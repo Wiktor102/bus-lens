@@ -38,9 +38,14 @@ function Sidebar() {
 					<span className="eyebrow">Archive</span>
 					<h1>Capture sets</h1>
 				</div>
-				<button id="newCaptureBtn" className="icon-btn" title="New capture" aria-label="New capture">
-					＋
-				</button>
+				<div className="sidebar-create-actions">
+					<button id="newFolderBtn" className="icon-btn" title="New folder" aria-label="New folder">
+						▱
+					</button>
+					<button id="newCaptureBtn" className="icon-btn" title="New capture" aria-label="New capture">
+						＋
+					</button>
+				</div>
 			</div>
 			<label className="search-box">
 				<span>⌕</span>
@@ -460,6 +465,12 @@ function ContextDialog() {
 					Controller screen / view
 					<input id="contextView" placeholder="e.g. Temperature" />
 				</label>
+				<label className="field">
+					Archive folder
+					<select id="contextFolder" defaultValue="">
+						<option value="">Unfiled</option>
+					</select>
+				</label>
 				<div className="field">
 					<div className="field-row">
 						<span>Parameters</span>
@@ -626,6 +637,31 @@ function ExportDialog() {
 	);
 }
 
+function FolderDialog() {
+	return (
+		<dialog id="folderDialog" className="modal folder-modal">
+			<form id="folderForm" method="dialog">
+				<DialogHeading eyebrow="Archive organization" title="Create folder" />
+				<label className="field">
+					Folder name
+					<input id="folderName" required maxLength={80} placeholder="e.g. Ventilation tests" />
+				</label>
+				<div id="folderHint" className="validation-hint" aria-live="polite">
+					Use a short name that describes this group of captures.
+				</div>
+				<div className="modal-actions">
+					<button className="btn btn-secondary" value="cancel" formMethod="dialog" formNoValidate>
+						Cancel
+					</button>
+					<button id="saveFolderBtn" className="btn btn-primary" value="default">
+						Create folder
+					</button>
+				</div>
+			</form>
+		</dialog>
+	);
+}
+
 function App() {
 	useEffect(() => {
 		void import("./controller");
@@ -652,6 +688,7 @@ function App() {
 			<AnnotationDialog />
 			<CaptureNoteDialog />
 			<ExportDialog />
+			<FolderDialog />
 			<div id="toast" className="toast" role="status" />
 		</>
 	);

@@ -142,6 +142,7 @@ function loadState() {
 	try {
 		const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
 		if (Array.isArray(saved?.captures)) {
+			normalizeArchiveState(saved);
 			saved.captures.forEach(normalizeCapture);
 			saved.captures.forEach(capture => rebuildPreview(capture));
 			normalizeSendState(saved);
@@ -150,7 +151,7 @@ function loadState() {
 	} catch {}
 	demoCaptures.forEach(normalizeCapture);
 	demoCaptures.forEach(capture => rebuildPreview(capture));
-	const initial = { captures: demoCaptures, activeId: demoCaptures[0].id };
+	const initial = { captures: demoCaptures, folders: [], activeId: demoCaptures[0].id };
 	normalizeSendState(initial);
 	return initial;
 }
@@ -176,6 +177,27 @@ function normalizeSendState(target = state) {
 		draft: String(target.sendSettings?.draft || ""),
 		baudRate: Math.max(300, +target.sendSettings?.baudRate || 115200)
 	};
+}
+
+function normalizeArchiveState(archive) {
+	archive.folders = Array.isArray(archive.folders) ? archive.folders : [];
+	const seen = new Set();
+	archive.folders = archive.folders
+		.filter(folder => folder && typeof folder === "object")
+		.map(folder => ({
+			id: String(folder.id || crypto.randomUUID()),
+			name: String(folder.name || "Untitled folder").trim() || "Untitled folder",
+			collapsed: Boolean(folder.collapsed),
+			createdAt: folder.createdAt || new Date().toISOString()
+		}))
+		.filter(folder => {
+			if (seen.has(folder.id)) return false;
+			seen.add(folder.id);
+			return true;
+		});
+	archive.captures.forEach(item => {
+		item.folderId = seen.has(item.folderId) ? item.folderId : null;
+	});
 }
 
 function normalizeCapture(c) {
@@ -563,24 +585,28 @@ function renderSendWorkbench() {
 }
 
 function renderCaptureList() {
-	const query = $("#captureSearch").value.toLowerCase();
-	const items = state.captures.filter(c =>
-		`${c.name} ${c.view} ${c.params.map(p => `${p.key} ${p.value}`).join(" ")}`.toLowerCase().includes(query)
-	);
-	$("#captureList").innerHTML =
-		items
-			.map(
-				c => `
-    <button class="capture-item ${c.id === activeId ? "active" : ""}" data-capture-id="${c.id}">
-      <strong>${escapeHtml(c.name)}</strong>
-      <small><span>${escapeHtml(c.view || "Unassigned view")}</span><span>${c.messages.length} msg</span></small>
-      <span class="capture-tags">${c.params
-			.slice(0, 2)
-			.map(p => `<i>${escapeHtml(p.key)}: ${escapeHtml(p.value)}</i>`)
-			.join("")}</span>
-    </button>`
-			)
-			.join("") || `<p class="muted" style="padding:12px">No matching captures.</p>`;
+	const query = $("#captureSearch").value.trim().toLowerCase();
+	const folderNameById = new Map(state.folders.map(folder => [folder.id, folder.name]));
+	const matches = capture =>
+		`${capture.name} ${capture.view} ${folderNameById.get(capture.folderId) || "unfiled"} ${capture.params
+			.map(p => `${p.key} ${p.value}`)
+			.join(" ")}`
+			.toLowerCase()
+			.includes(query);
+	const visibleCaptures = state.captures.filter(matches);
+	const groups = [
+		...state.folders.map(folder => ({ ...folder, captures: visibleCaptures.filter(c => c.folderId === folder.id) })),
+		{
+			id: "",
+			name: "Unfiled",
+			collapsed: Boolean(state.unfiledCollapsed),
+			captures: visibleCaptures.filter(c => !c.folderId),
+			system: true
+		}
+	].filter(group => !query || group.captures.length);
+	$("#captureList").innerHTML = visibleCaptures.length
+		? groups.map(group => renderFolderGroup(group, Boolean(query))).join("")
+		: `<div class="sidebar-empty"><strong>No matching captures</strong><span>Try another name, folder, view, or parameter.</span></div>`;
 	$$("[data-capture-id]").forEach(
 		el =>
 			(el.onclick = () => {
@@ -589,6 +615,158 @@ function renderCaptureList() {
 				render();
 			})
 	);
+	$$("[data-folder-toggle]").forEach(
+		button =>
+			(button.onclick = () => {
+				const folderId = button.dataset.folderToggle;
+				if (folderId) {
+					const folder = state.folders.find(item => item.id === folderId);
+					if (folder) folder.collapsed = !folder.collapsed;
+				} else state.unfiledCollapsed = !state.unfiledCollapsed;
+				saveState();
+				renderCaptureList();
+			})
+	);
+	$$("[data-folder-rename]").forEach(
+		button => (button.onclick = () => openFolderDialog(button.dataset.folderRename))
+	);
+	$$("[data-folder-delete]").forEach(button => (button.onclick = () => deleteFolder(button.dataset.folderDelete)));
+	$$("[data-capture-folder]").forEach(
+		select =>
+			(select.onchange = event => {
+				const item = state.captures.find(c => c.id === select.dataset.captureFolder);
+				if (!item) return;
+				item.folderId = event.target.value || null;
+				saveState();
+				renderCaptureList();
+				showToast(item.folderId ? `Moved to ${folderNameById.get(item.folderId)}` : "Moved to Unfiled");
+			})
+	);
+}
+
+function renderFolderGroup(group, searching) {
+	const collapsed = group.collapsed && !searching;
+	const options = [
+		`<option value="">Unfiled</option>`,
+		...state.folders.map(
+			folder =>
+				`<option value="${escapeHtml(folder.id)}" data-folder-option="${escapeHtml(folder.id)}">${escapeHtml(folder.name)}</option>`
+		)
+	].join("");
+	return `
+		<section class="capture-folder ${collapsed ? "collapsed" : ""}" data-folder-id="${escapeHtml(group.id)}">
+			<header class="folder-header">
+				<button class="folder-toggle" type="button" data-folder-toggle="${escapeHtml(group.id)}"
+					aria-expanded="${!collapsed}" aria-label="${collapsed ? "Expand" : "Collapse"} ${escapeHtml(group.name)}">
+					<span class="folder-chevron">⌄</span>
+					<span class="folder-icon" aria-hidden="true">${group.system ? "◇" : "▱"}</span>
+					<strong>${escapeHtml(group.name)}</strong>
+					<small>${group.captures.length}</small>
+				</button>
+				${
+					group.system
+						? ""
+						: `<span class="folder-actions">
+							<button type="button" data-folder-rename="${escapeHtml(group.id)}" title="Rename folder" aria-label="Rename ${escapeHtml(group.name)}">✎</button>
+							<button type="button" data-folder-delete="${escapeHtml(group.id)}" title="Delete folder" aria-label="Delete ${escapeHtml(group.name)}">×</button>
+						</span>`
+				}
+			</header>
+			<div class="folder-captures">
+				${
+					group.captures.length
+						? group.captures.map(c => renderCaptureItem(c, options)).join("")
+						: `<p class="folder-empty">No captures here yet</p>`
+				}
+			</div>
+		</section>`;
+}
+
+function renderCaptureItem(c, options) {
+	const selectedOptions = options.replace(`value="${escapeHtml(c.folderId || "")}"`, `value="${escapeHtml(c.folderId || "")}" selected`);
+	return `
+		<div class="capture-item ${c.id === activeId ? "active" : ""}">
+			<button class="capture-open" type="button" data-capture-id="${escapeHtml(c.id)}">
+				<strong>${escapeHtml(c.name)}</strong>
+				<small><span>${escapeHtml(c.view || "Unassigned view")}</span><span>${c.messages.length} msg</span></small>
+				<span class="capture-tags">${c.params
+					.slice(0, 2)
+					.map(p => `<i>${escapeHtml(p.key)}: ${escapeHtml(p.value)}</i>`)
+					.join("")}</span>
+			</button>
+			<label class="capture-move" title="Move capture to another folder">
+				<span>Move to</span>
+				<select data-capture-folder="${escapeHtml(c.id)}" aria-label="Move ${escapeHtml(c.name)} to folder">${selectedOptions}</select>
+			</label>
+		</div>`;
+}
+
+function openFolderDialog(folderId = null) {
+	const folder = folderId ? state.folders.find(item => item.id === folderId) : null;
+	const dialog = $("#folderDialog");
+	dialog.dataset.folderId = folder?.id || "";
+	$(".folder-modal .modal-heading h2").textContent = folder ? "Rename folder" : "Create folder";
+	$("#saveFolderBtn").textContent = folder ? "Save name" : "Create folder";
+	$("#folderName").value = folder?.name || "";
+	updateFolderValidity();
+	dialog.showModal();
+	$("#folderName").focus();
+}
+
+function updateFolderValidity() {
+	const dialog = $("#folderDialog");
+	const name = $("#folderName").value.trim();
+	const editingId = dialog.dataset.folderId;
+	const duplicate = state.folders.some(
+		folder => folder.id !== editingId && folder.name.toLowerCase() === name.toLowerCase()
+	);
+	$("#saveFolderBtn").disabled = !name || duplicate;
+	$("#folderHint").textContent = duplicate
+		? "A folder with this name already exists."
+		: name
+			? "Ready to save."
+			: "Enter a folder name.";
+	$("#folderHint").classList.toggle("ready", Boolean(name && !duplicate));
+	return Boolean(name && !duplicate);
+}
+
+function saveFolder() {
+	if (!updateFolderValidity()) return false;
+	const dialog = $("#folderDialog");
+	const name = $("#folderName").value.trim();
+	const folder = state.folders.find(item => item.id === dialog.dataset.folderId);
+	if (folder) {
+		folder.name = name;
+		showToast("Folder renamed");
+	} else {
+		state.folders.push({
+			id: crypto.randomUUID(),
+			name,
+			collapsed: false,
+			createdAt: new Date().toISOString()
+		});
+		showToast("Folder created");
+	}
+	saveState();
+	renderCaptureList();
+	return true;
+}
+
+function deleteFolder(folderId) {
+	const folder = state.folders.find(item => item.id === folderId);
+	if (!folder) return;
+	const captureCount = state.captures.filter(item => item.folderId === folderId).length;
+	const detail = captureCount
+		? ` Its ${captureCount} capture${captureCount === 1 ? "" : "s"} will be moved to Unfiled.`
+		: "";
+	if (!confirm(`Delete folder “${folder.name}”?${detail}`)) return;
+	state.captures.forEach(item => {
+		if (item.folderId === folderId) item.folderId = null;
+	});
+	state.folders = state.folders.filter(item => item.id !== folderId);
+	saveState();
+	renderCaptureList();
+	showToast(captureCount ? "Folder deleted; captures moved to Unfiled" : "Folder deleted");
 }
 
 function renderHeader() {
@@ -1172,11 +1350,16 @@ function saveCaptureNote() {
 }
 
 function openContext(isNew = false) {
-	const c = isNew ? { name: "Untitled capture", view: "", params: [], baudRate: 115200 } : capture();
+	const c = isNew ? { name: "Untitled capture", view: "", params: [], baudRate: 115200, folderId: null } : capture();
 	$("#contextDialog").dataset.mode = isNew ? "new" : "edit";
 	$("#contextName").value = c.name;
 	$("#contextView").value = c.view;
 	$("#baudRate").value = c.baudRate;
+	$("#contextFolder").innerHTML = [
+		`<option value="">Unfiled</option>`,
+		...state.folders.map(folder => `<option value="${escapeHtml(folder.id)}">${escapeHtml(folder.name)}</option>`)
+	].join("");
+	$("#contextFolder").value = c.folderId || "";
 	$("#parameterRows").innerHTML = "";
 	c.params.forEach(p => addParameterRow(p.key, p.value));
 	if (!c.params.length) addParameterRow("Speed", "");
@@ -1311,6 +1494,7 @@ function saveContext() {
 	const values = {
 		name: $("#contextName").value.trim() || "Untitled capture",
 		view: $("#contextView").value.trim(),
+		folderId: $("#contextFolder").value || null,
 		params,
 		baudRate: +$("#baudRate").value,
 		inputFormat: "raw"
@@ -1675,8 +1859,29 @@ async function importFile(file) {
 			const imported = JSON.parse(text);
 			const captures = Array.isArray(imported) ? imported : imported.captures;
 			if (!Array.isArray(captures)) throw new Error("No captures found");
+			const importedFolders = Array.isArray(imported?.folders) ? imported.folders : [];
+			const folderIdMap = new Map();
+			const existingFolderNames = new Map(state.folders.map(folder => [folder.name.toLowerCase(), folder.id]));
+			const existingCaptureIds = new Set(state.captures.map(capture => capture.id));
+			importedFolders.forEach(sourceFolder => {
+				const name = String(sourceFolder?.name || "Imported folder").trim() || "Imported folder";
+				let id = existingFolderNames.get(name.toLowerCase());
+				if (!id) {
+					id = crypto.randomUUID();
+					state.folders.push({
+						id,
+						name,
+						collapsed: Boolean(sourceFolder?.collapsed),
+						createdAt: sourceFolder?.createdAt || new Date().toISOString()
+					});
+					existingFolderNames.set(name.toLowerCase(), id);
+				}
+				if (sourceFolder?.id) folderIdMap.set(sourceFolder.id, id);
+			});
 			captures.forEach(c => {
-				c.id ||= crypto.randomUUID();
+				if (!c.id || existingCaptureIds.has(c.id)) c.id = crypto.randomUUID();
+				existingCaptureIds.add(c.id);
+				c.folderId = folderIdMap.get(c.folderId) || null;
 				normalizeCapture(c);
 				rebuildPreview(c);
 				c.messages.forEach(m => (m.id ||= crypto.randomUUID()));
@@ -1730,6 +1935,7 @@ function exportData(format) {
 					app: "Bus Lens",
 					version: 3,
 					exportedAt: new Date().toISOString(),
+					folders: state.folders,
 					captures: state.captures,
 					sendHistory: state.sendHistory,
 					sendQueue: state.sendQueue,
@@ -1832,6 +2038,13 @@ $("#transmitHex").onkeydown = event => {
 	}
 };
 $("#newCaptureBtn").onclick = () => openContext(true);
+$("#newFolderBtn").onclick = () => openFolderDialog();
+$("#folderName").oninput = updateFolderValidity;
+$("#folderForm").addEventListener("submit", event => {
+	if (event.submitter?.value === "cancel") return;
+	event.preventDefault();
+	if (saveFolder()) $("#folderDialog").close();
+});
 $("#editContextBtn").onclick = () => openContext(false);
 $("#addCaptureNoteBtn").onclick = () => openCaptureNoteEditor();
 $("#addParameterBtn").onclick = () => addParameterRow();
