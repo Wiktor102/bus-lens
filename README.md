@@ -55,6 +55,18 @@ Capture context, messages, parameters, and notes are stored locally in the brows
 Use JSON export for a complete, re-importable backup. CSV and monitor-text exports
 are available for the active capture.
 
+## Sending messages
+
+The **Send** tab is available whenever a serial port is connected; a capture does
+not need to be running. Enter complete hex bytes and either send immediately or
+add the message to the timed queue. The queue and its configurable inter-message
+gap are stored locally, so work is preserved across reloads.
+
+Every send is recorded in a separate replayable history, including sends made
+while capture is stopped and failed write attempts. When capture is running,
+successful sends are additionally added to that capture as TX bytes. Captured
+messages can also be replayed directly from the message table.
+
 ## Useful interactions
 
 - Click any byte to attach a byte-level note.
@@ -67,6 +79,7 @@ are available for the active capture.
 - Telegram signatures that occur only once in the complete capture show their
   row ID and timestamp in orange.
 - Toggle **BINARY** to see readable nibbles such as `1100·0010`.
+- Hover a captured row and choose **Replay** to send its bytes again.
 - **Frame changes** connects adjacent byte changes vertically whenever the
   telegrams still share at least one byte. Repeated transitions reuse the same
   frame color.

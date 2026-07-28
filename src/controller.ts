@@ -24,6 +24,7 @@ const MAX_CAPTURE_BYTES = 50_000;
 const LIVE_REFRESH_MS = 120;
 const VIRTUAL_ROW_HEIGHT = 56;
 const VIRTUAL_OVERSCAN = 8;
+const MAX_SEND_HISTORY = 250;
 
 const demoCaptures = [
 	{
@@ -118,6 +119,11 @@ let liveRefreshTimer = null;
 let stateSaveTimer = null;
 let virtualMessageView = null;
 let virtualRenderPending = false;
+let sendInFlight = false;
+let queueRunning = false;
+let stopQueueRequested = false;
+let queueDelayTimer = null;
+let queueDelayResolve = null;
 
 function makeMessage(hex, timestamp = Date.now(), index = 0) {
 	const bytes = typeof hex === "string" ? (hex.match(/[0-9a-f]{2}/gi) || []).map(v => parseInt(v, 16)) : [...hex];
@@ -138,12 +144,38 @@ function loadState() {
 		if (Array.isArray(saved?.captures)) {
 			saved.captures.forEach(normalizeCapture);
 			saved.captures.forEach(capture => rebuildPreview(capture));
+			normalizeSendState(saved);
 			return saved;
 		}
 	} catch {}
 	demoCaptures.forEach(normalizeCapture);
 	demoCaptures.forEach(capture => rebuildPreview(capture));
-	return { captures: demoCaptures, activeId: demoCaptures[0].id };
+	const initial = { captures: demoCaptures, activeId: demoCaptures[0].id };
+	normalizeSendState(initial);
+	return initial;
+}
+
+function normalizeSendState(target = state) {
+	target.sendHistory = Array.isArray(target.sendHistory)
+		? target.sendHistory
+				.filter(item => Array.isArray(item.bytes) && item.bytes.length)
+				.slice(0, MAX_SEND_HISTORY)
+		: [];
+	target.sendQueue = Array.isArray(target.sendQueue)
+		? target.sendQueue
+				.filter(item => Array.isArray(item.bytes) && item.bytes.length)
+				.map(item => ({
+					id: item.id || crypto.randomUUID(),
+					bytes: item.bytes.map(Number),
+					createdAt: item.createdAt || Date.now()
+				}))
+		: [];
+	const savedDelay = Number(target.sendSettings?.delayMs);
+	target.sendSettings = {
+		delayMs: Number.isFinite(savedDelay) ? Math.max(0, Math.min(600_000, savedDelay)) : 100,
+		draft: String(target.sendSettings?.draft || ""),
+		baudRate: Math.max(300, +target.sendSettings?.baudRate || 115200)
+	};
 }
 
 function normalizeCapture(c) {
@@ -360,12 +392,12 @@ function showToast(message) {
 
 function render() {
 	renderCaptureList();
+	renderSendWorkbench();
 	if (!capture()) {
 		renderEmptyWorkspace();
 		return;
 	}
 	renderHeader();
-	renderTransmitPanel();
 	renderStats();
 	renderMessages();
 	renderAnalysis();
@@ -380,7 +412,7 @@ function renderEmptyWorkspace() {
 	$("#captureMeta").innerHTML = `<span class="meta-chip">Use ＋ to create a capture, or import an existing dump.</span>`;
 	$("#editContextBtn").disabled = true;
 	$("#moreBtn").disabled = true;
-	$("#connectBtn").disabled = true;
+	$("#connectBtn").disabled = false;
 	$("#recordBtn").disabled = true;
 	$("#exportBtn").disabled = true;
 	$("#statMessages").textContent = "0";
@@ -406,7 +438,6 @@ function renderEmptyWorkspace() {
 	$("#headerNoteCount").textContent = "0";
 	$("#addCaptureNoteBtn").disabled = true;
 	$("#collapseControl").classList.remove("hidden");
-	$("#transmitPanel").classList.add("hidden");
 	["framingMode", "previewFrameSize", "frameMarker", "markerPosition", "frameTimeGap", "editSectionsBtn"].forEach(
 		id => ($(`#${id}`).disabled = true)
 	);
@@ -423,23 +454,112 @@ function parseTransmitHex(value) {
 	};
 }
 
-function renderTransmitPanel() {
-	const visible = Boolean(recording && port && capture());
-	$("#transmitPanel").classList.toggle("hidden", !visible);
-	if (!visible) return;
-	updateTransmitValidity();
-}
-
 function updateTransmitValidity() {
 	const input = $("#transmitHex");
 	const hint = $("#transmitHint");
 	const parsed = parseTransmitHex(input.value);
-	const ready = Boolean(parsed.bytes?.length && recording && port?.writable);
+	const valid = Boolean(parsed.bytes?.length);
+	const ready = Boolean(valid && port?.writable && !sendInFlight && !queueRunning);
 	hint.textContent = parsed.message;
 	hint.classList.toggle("ready", ready);
 	hint.classList.toggle("invalid", parsed.bytes === null);
 	$("#sendBytesBtn").disabled = !ready;
+	$("#addQueueBtn").disabled = !valid || queueRunning;
 	return parsed;
+}
+
+function renderSendWorkbench() {
+	normalizeSendState(state);
+	const connected = Boolean(port?.writable);
+	const draftInput = $("#transmitHex");
+	if (document.activeElement !== draftInput && draftInput.value !== state.sendSettings.draft) {
+		draftInput.value = state.sendSettings.draft;
+	}
+	if (document.activeElement !== $("#queueDelay")) $("#queueDelay").value = state.sendSettings.delayMs;
+	$("#sendStatusBadge").classList.toggle("connected", connected);
+	$("#sendStatusBadge").classList.toggle("running", queueRunning);
+	$("#sendStatusBadge").innerHTML = queueRunning
+		? "<i></i> QUEUE RUNNING"
+		: connected
+			? "<i></i> READY"
+			: "<i></i> OFFLINE";
+	$("#sendConnectionHint").textContent = connected
+		? recording
+			? "Sent bytes are recorded as TX in the active capture and in local send history."
+			: "Capture is inactive. Sends are kept in the separate local history."
+		: "Connect a serial port to send. Drafts and queue stay saved locally.";
+	$("#queueCount").textContent = state.sendQueue.length;
+	$("#queueTabCount").textContent = state.sendQueue.length;
+	$("#historyCount").textContent = state.sendHistory.length;
+	$("#queueList").innerHTML = state.sendQueue.length
+		? state.sendQueue
+				.map(
+					(item, index) => `
+      <div class="queue-item">
+        <span class="queue-index">${String(index + 1).padStart(2, "0")}</span>
+        <code>${item.bytes.map(hexByte).join(" ")}</code>
+        <button class="icon-btn" data-queue-send="${item.id}" title="Send this message now" aria-label="Send this message now">▶</button>
+        <button class="icon-btn" data-queue-remove="${item.id}" title="Remove from queue" aria-label="Remove from queue">×</button>
+      </div>`
+				)
+				.join("")
+		: `<div class="send-empty">Queue messages here, then run them with a controlled gap.</div>`;
+	$("#sendHistory").innerHTML = state.sendHistory.length
+		? state.sendHistory
+				.map(
+					item => `
+      <div class="history-item ${item.ok === false ? "failed" : ""}">
+        <div>
+          <code>${item.bytes.map(hexByte).join(" ")}</code>
+          <small>${formatTime(item.timestamp)} · ${item.captureId ? "captured TX" : "send history"}${item.origin === "queue" ? " · queued" : ""}${item.ok === false ? ` · failed: ${escapeHtml(item.error || "unknown error")}` : ""}</small>
+        </div>
+        <button class="text-btn" data-history-load="${item.id}">Load</button>
+        <button class="text-btn" data-history-replay="${item.id}" ${connected && !sendInFlight && !queueRunning ? "" : "disabled"}>Replay</button>
+      </div>`
+				)
+				.join("")
+		: `<div class="send-empty">Successful and failed sends appear here, including sends made outside a capture.</div>`;
+	$$("[data-queue-remove]").forEach(
+		button =>
+			(button.onclick = () => {
+				state.sendQueue = state.sendQueue.filter(item => item.id !== button.dataset.queueRemove);
+				saveState();
+				renderSendWorkbench();
+			})
+	);
+	$$("[data-queue-send]").forEach(
+		button =>
+			(button.onclick = () => {
+				const item = state.sendQueue.find(entry => entry.id === button.dataset.queueSend);
+				if (item) void transmitBytes(Uint8Array.from(item.bytes), "manual");
+			})
+	);
+	$$("[data-history-load]").forEach(
+		button =>
+			(button.onclick = () => {
+				const item = state.sendHistory.find(entry => entry.id === button.dataset.historyLoad);
+				if (!item) return;
+				state.sendSettings.draft = item.bytes.map(hexByte).join(" ");
+				saveState();
+				renderSendWorkbench();
+				$("#transmitHex").focus();
+			})
+	);
+	$$("[data-history-replay]").forEach(
+		button =>
+			(button.onclick = () => {
+				const item = state.sendHistory.find(entry => entry.id === button.dataset.historyReplay);
+				if (item) void transmitBytes(Uint8Array.from(item.bytes), "replay");
+			})
+	);
+	$("#runQueueBtn").disabled = !connected || !state.sendQueue.length || queueRunning || sendInFlight;
+	$("#runQueueBtn").classList.toggle("hidden", queueRunning);
+	$("#stopQueueBtn").classList.toggle("hidden", !queueRunning);
+	$("#stopQueueBtn").disabled = false;
+	$("#stopQueueBtn").textContent = "Stop";
+	$("#clearQueueBtn").disabled = !state.sendQueue.length || queueRunning;
+	$("#clearHistoryBtn").disabled = !state.sendHistory.length;
+	updateTransmitValidity();
 }
 
 function renderCaptureList() {
@@ -870,7 +990,10 @@ function renderVirtualRows() {
 			})
 			.join("")}</div></td>
       <td>${m._repeats > 1 ? renderRepeatPill(m) : "—"}</td>
-      <td><button class="note-link ${messageNote || sequenceNote ? "" : "add-note"}" data-message-note="${m.id}">${escapeHtml(messageNote?.text || (sequenceNote ? `↳ ${sequenceNote.text}` : "＋ Add note"))}</button></td>
+      <td><div class="row-actions">
+        <button class="note-link ${messageNote || sequenceNote ? "" : "add-note"}" data-message-note="${m.id}">${escapeHtml(messageNote?.text || (sequenceNote ? `↳ ${sequenceNote.text}` : "＋ Add note"))}</button>
+        <button class="replay-link" data-message-replay="${m.id}" title="Replay this message on the connected serial port">↻ Replay</button>
+      </div></td>
     </tr>`;
 		})
 		.join("");
@@ -891,6 +1014,13 @@ function renderVirtualRows() {
 			: "Connect a serial port and start capture, or import a monitor dump.";
 	$(".message-table").classList.toggle("hidden", c.messages.length === 0);
 	$$("[data-message-note]").forEach(el => (el.onclick = () => openAnnotation("message", el.dataset.messageNote)));
+	$$("[data-message-replay]").forEach(
+		el =>
+			(el.onclick = () => {
+				const message = c.messages.find(item => item.id === el.dataset.messageReplay);
+				if (message) void transmitBytes(Uint8Array.from(message.bytes), "replay");
+			})
+	);
 	$$("[data-byte-note]").forEach(el => (el.onclick = () => openAnnotation("byte", el.dataset.byteNote)));
 	$$("[data-byte-note]").forEach(
 		el =>
@@ -1252,7 +1382,6 @@ function saveAnnotation() {
 }
 
 async function connectSerial() {
-	if (!capture()) return showToast("Create a capture before connecting a port");
 	if (!("serial" in navigator)) {
 		showToast("Web Serial requires Chrome or Edge on localhost");
 		return;
@@ -1263,13 +1392,17 @@ async function connectSerial() {
 	}
 	try {
 		port = await navigator.serial.requestPort();
-		await port.open({ baudRate: capture().baudRate || 115200 });
+		const baudRate = capture()?.baudRate || state.sendSettings.baudRate || 115200;
+		await port.open({ baudRate });
+		state.sendSettings.baudRate = baudRate;
+		saveState();
 		$("#connectionBadge").innerHTML = "<i></i> Port connected";
 		$("#connectionBadge").classList.add("connected");
 		$("#connectBtn").textContent = "Disconnect";
-		$("#recordBtn").disabled = false;
+		$("#recordBtn").disabled = !capture();
 		readAbort = false;
 		readSerialLoop();
+		renderSendWorkbench();
 	} catch (error) {
 		port = null;
 		showToast(error.name === "NotFoundError" ? "No serial port selected" : `Serial error: ${error.message}`);
@@ -1280,6 +1413,8 @@ async function disconnectSerial() {
 	flushLiveBytes();
 	recording = false;
 	readAbort = true;
+	stopQueueRequested = true;
+	queueDelayResolve?.();
 	try {
 		await reader?.cancel();
 		reader?.releaseLock();
@@ -1294,7 +1429,7 @@ async function disconnectSerial() {
 	$("#recordBtn").classList.remove("recording");
 	$("#recordBtn").innerHTML = "<span></span> Start capture";
 	renderHeader();
-	renderTransmitPanel();
+	renderSendWorkbench();
 }
 
 async function readSerialLoop() {
@@ -1363,33 +1498,120 @@ function ingestChunk(bytes) {
 	queueLiveBytes(bytes, "rx");
 }
 
-async function sendBytes() {
-	const parsed = updateTransmitValidity();
-	if (!parsed.bytes?.length) return;
-	if (!recording || !port?.writable) return showToast("Start capture and connect a writable serial port first");
-	const button = $("#sendBytesBtn");
-	button.disabled = true;
-	button.textContent = "Sending…";
+function recordSend(bytes, { origin, ok, error = "" }) {
+	const entry = {
+		id: crypto.randomUUID(),
+		timestamp: Date.now(),
+		bytes: [...bytes],
+		origin,
+		ok,
+		error,
+		captureId: ok && recording ? capture()?.id || null : null
+	};
+	state.sendHistory.unshift(entry);
+	state.sendHistory = state.sendHistory.slice(0, MAX_SEND_HISTORY);
+	saveState({ immediate: true });
+}
+
+async function transmitBytes(bytes, origin = "manual") {
+	if (!bytes?.length) return false;
+	if (!port?.writable) {
+		showToast("Connect a writable serial port first");
+		return false;
+	}
+	if (sendInFlight) {
+		showToast("A message is already being sent");
+		return false;
+	}
+	sendInFlight = true;
+	renderSendWorkbench();
 	try {
 		const writer = port.writable.getWriter();
 		try {
-			await writer.write(parsed.bytes);
+			await writer.write(bytes);
 		} finally {
 			writer.releaseLock();
 		}
-		queueLiveBytes(parsed.bytes, "tx");
-		$("#transmitHex").value = "";
-		updateTransmitValidity();
-		showToast(`${parsed.bytes.length} byte${parsed.bytes.length === 1 ? "" : "s"} sent to RS-485`);
+		if (recording && capture()) queueLiveBytes(bytes, "tx");
+		recordSend(bytes, { origin, ok: true });
+		showToast(`${bytes.length} byte${bytes.length === 1 ? "" : "s"} sent to RS-485`);
+		return true;
 	} catch (error) {
+		recordSend(bytes, { origin, ok: false, error: error.message });
 		showToast(`Send failed: ${error.message}`);
+		return false;
 	} finally {
-		button.textContent = "Send";
-		updateTransmitValidity();
+		sendInFlight = false;
+		renderSendWorkbench();
+	}
+}
+
+async function sendBytes() {
+	const parsed = updateTransmitValidity();
+	if (!parsed.bytes?.length) return;
+	const sent = await transmitBytes(parsed.bytes, "manual");
+	if (!sent) return;
+	state.sendSettings.draft = "";
+	$("#transmitHex").value = "";
+	saveState();
+	renderSendWorkbench();
+}
+
+function addDraftToQueue() {
+	const parsed = updateTransmitValidity();
+	if (!parsed.bytes?.length) return;
+	state.sendQueue.push({
+		id: crypto.randomUUID(),
+		bytes: [...parsed.bytes],
+		createdAt: Date.now()
+	});
+	state.sendSettings.draft = "";
+	$("#transmitHex").value = "";
+	saveState();
+	renderSendWorkbench();
+	showToast("Message added to transmit queue");
+}
+
+function waitForQueueDelay(ms) {
+	return new Promise(resolve => {
+		const finish = () => {
+			if (queueDelayTimer) clearTimeout(queueDelayTimer);
+			queueDelayTimer = null;
+			queueDelayResolve = null;
+			resolve();
+		};
+		queueDelayResolve = finish;
+		queueDelayTimer = setTimeout(finish, ms);
+	});
+}
+
+async function runSendQueue() {
+	if (queueRunning || sendInFlight || !port?.writable || !state.sendQueue.length) return;
+	queueRunning = true;
+	stopQueueRequested = false;
+	renderSendWorkbench();
+	const queued = [...state.sendQueue];
+	let completed = 0;
+	try {
+		for (let index = 0; index < queued.length; index++) {
+			if (stopQueueRequested || !port?.writable) break;
+			const sent = await transmitBytes(Uint8Array.from(queued[index].bytes), "queue");
+			if (!sent) break;
+			completed++;
+			state.sendQueue = state.sendQueue.filter(item => item.id !== queued[index].id);
+			saveState({ immediate: true });
+			if (index < queued.length - 1 && !stopQueueRequested) await waitForQueueDelay(state.sendSettings.delayMs);
+		}
+	} finally {
+		queueRunning = false;
+		stopQueueRequested = false;
+		renderSendWorkbench();
+		if (completed) showToast(`Queue sent ${completed} message${completed === 1 ? "" : "s"}`);
 	}
 }
 
 function toggleRecording() {
+	if (!capture()) return showToast("Create a capture before starting capture");
 	recording = !recording;
 	if (!recording) {
 		flushLiveBytes();
@@ -1398,7 +1620,7 @@ function toggleRecording() {
 	$("#recordBtn").classList.toggle("recording", recording);
 	$("#recordBtn").innerHTML = recording ? "<span></span> Stop capture" : "<span></span> Start capture";
 	renderHeader();
-	renderTransmitPanel();
+	renderSendWorkbench();
 	showToast(recording ? "Capture started" : "Capture saved locally");
 }
 
@@ -1460,7 +1682,17 @@ async function importFile(file) {
 				c.messages.forEach(m => (m.id ||= crypto.randomUUID()));
 			});
 			state.captures.unshift(...captures);
-			activeId = captures[0].id;
+			if (!Array.isArray(imported) && Array.isArray(imported.sendHistory)) {
+				state.sendHistory = [...imported.sendHistory, ...state.sendHistory];
+			}
+			if (!Array.isArray(imported) && Array.isArray(imported.sendQueue)) {
+				state.sendQueue = [...state.sendQueue, ...imported.sendQueue];
+			}
+			if (!Array.isArray(imported) && imported.sendSettings) {
+				state.sendSettings = { ...state.sendSettings, ...imported.sendSettings, draft: state.sendSettings.draft };
+			}
+			normalizeSendState(state);
+			activeId = captures[0]?.id || activeId;
 		} else {
 			const captures = parseDump(text);
 			if (!captures.length) throw new Error("No timestamped hex messages found");
@@ -1494,7 +1726,15 @@ function exportData(format) {
 	if (format === "json") {
 		download(
 			JSON.stringify(
-				{ app: "Bus Lens", version: 2, exportedAt: new Date().toISOString(), captures: state.captures },
+				{
+					app: "Bus Lens",
+					version: 3,
+					exportedAt: new Date().toISOString(),
+					captures: state.captures,
+					sendHistory: state.sendHistory,
+					sendQueue: state.sendQueue,
+					sendSettings: { ...state.sendSettings, draft: "" }
+				},
 				null,
 				2
 			),
@@ -1550,11 +1790,45 @@ function exportData(format) {
 $("#connectBtn").onclick = connectSerial;
 $("#recordBtn").onclick = toggleRecording;
 $("#sendBytesBtn").onclick = sendBytes;
-$("#transmitHex").oninput = updateTransmitValidity;
+$("#addQueueBtn").onclick = addDraftToQueue;
+$("#runQueueBtn").onclick = () => void runSendQueue();
+$("#stopQueueBtn").onclick = () => {
+	stopQueueRequested = true;
+	queueDelayResolve?.();
+	$("#stopQueueBtn").disabled = true;
+	$("#stopQueueBtn").textContent = "Stopping…";
+};
+$("#clearQueueBtn").onclick = () => {
+	if (!state.sendQueue.length || queueRunning) return;
+	if (confirm("Clear every message from the transmit queue?")) {
+		state.sendQueue = [];
+		saveState({ immediate: true });
+		renderSendWorkbench();
+	}
+};
+$("#clearHistoryBtn").onclick = () => {
+	if (!state.sendHistory.length) return;
+	if (confirm("Clear the separate local send history? Captured TX bytes will remain in captures.")) {
+		state.sendHistory = [];
+		saveState({ immediate: true });
+		renderSendWorkbench();
+	}
+};
+$("#queueDelay").onchange = event => {
+	state.sendSettings.delayMs = Math.max(0, Math.min(600_000, +event.target.value || 0));
+	saveState({ immediate: true });
+	renderSendWorkbench();
+};
+$("#transmitHex").oninput = event => {
+	state.sendSettings.draft = event.target.value;
+	saveState();
+	updateTransmitValidity();
+};
 $("#transmitHex").onkeydown = event => {
-	if (event.key === "Enter" && !event.shiftKey) {
+	if (event.key === "Enter") {
 		event.preventDefault();
-		sendBytes();
+		if (event.shiftKey) addDraftToQueue();
+		else void sendBytes();
 	}
 };
 $("#newCaptureBtn").onclick = () => openContext(true);
@@ -1635,7 +1909,10 @@ $("#clearMessagesBtn").onclick = () => {
 };
 $("#deleteCaptureBtn").onclick = async () => {
 	if (confirm(`Delete “${capture().name}”?`)) {
-		if (port) await disconnectSerial();
+		if (recording) {
+			flushLiveBytes();
+			recording = false;
+		}
 		state.captures = state.captures.filter(c => c.id !== activeId);
 		activeId = state.captures[0]?.id || null;
 		saveState();
@@ -1649,6 +1926,8 @@ $$(".tab").forEach(
 			$$(".tab").forEach(x => x.classList.toggle("active", x === tab));
 			$$(".tab-panel").forEach(x => x.classList.remove("active"));
 			$(`#${tab.dataset.panel}Panel`).classList.add("active");
+			$(".toolbar").classList.toggle("send-view", tab.dataset.panel === "send");
+			if (tab.dataset.panel === "send") renderSendWorkbench();
 		})
 );
 $("#captureNoteForm").onsubmit = e => {

@@ -145,6 +145,9 @@ function Toolbar() {
 				<button className="tab" data-panel="notes">
 					Notes <span id="notesCount">0</span>
 				</button>
+				<button className="tab transmit-tab" data-panel="send">
+					Send <span id="queueTabCount">0</span>
+				</button>
 			</div>
 			<div className="toolbar-controls">
 				<label className="compact-select">
@@ -203,34 +206,6 @@ function Toolbar() {
 function StreamPanel() {
 	return (
 		<div id="streamPanel" className="tab-panel active">
-			<section id="transmitPanel" className="transmit-panel hidden" aria-label="Send bytes to RS-485">
-				<div className="transmit-panel-heading">
-					<div>
-						<span className="eyebrow">Live transmit</span>
-						<strong>Send bytes to RS-485</strong>
-					</div>
-					<span className="transmit-live">
-						<i /> CAPTURING
-					</span>
-				</div>
-				<label className="transmit-input">
-					<span>HEX</span>
-					<input
-						id="transmitHex"
-						autoComplete="off"
-						autoCapitalize="characters"
-						spellCheck={false}
-						placeholder="e.g. C2 08 5D"
-						aria-describedby="transmitHint"
-					/>
-				</label>
-				<button id="sendBytesBtn" className="btn btn-send" type="button" disabled>
-					Send
-				</button>
-				<p id="transmitHint" className="transmit-hint">
-					Enter whole bytes as hex. Sent bytes are tagged TX in the stream.
-				</p>
-			</section>
 			<div className="stream-filter">
 				<label>
 					<span>⌕</span>
@@ -269,6 +244,96 @@ function StreamPanel() {
 					<h2>No messages in this capture</h2>
 					<p>Connect a serial port and start capture, or import a monitor dump.</p>
 				</div>
+			</div>
+		</div>
+	);
+}
+
+function SendPanel() {
+	return (
+		<div id="sendPanel" className="tab-panel send-workbench">
+			<div className="send-workbench-header">
+				<div>
+					<span className="eyebrow">Serial transmit</span>
+					<h2>Send workbench</h2>
+					<p id="sendConnectionHint">Connect a serial port to send. Drafts and queue stay saved locally.</p>
+				</div>
+				<span id="sendStatusBadge" className="send-status">
+					<i /> OFFLINE
+				</span>
+			</div>
+			<div className="send-grid">
+				<section className="send-card composer-card" aria-label="Compose serial message">
+					<div className="send-card-heading">
+						<div>
+							<span className="eyebrow">Composer</span>
+							<h3>Hex message</h3>
+						</div>
+						<span className="keyboard-hint">Enter to send · Shift+Enter to queue</span>
+					</div>
+					<label className="transmit-input">
+						<span>HEX</span>
+						<input
+							id="transmitHex"
+							autoComplete="off"
+							autoCapitalize="characters"
+							spellCheck={false}
+							placeholder="e.g. C2 08 5D"
+							aria-describedby="transmitHint"
+						/>
+					</label>
+					<p id="transmitHint" className="transmit-hint">
+						Enter whole bytes as hex.
+					</p>
+					<div className="composer-actions">
+						<button id="addQueueBtn" className="btn btn-secondary" type="button" disabled>
+							Add to queue
+						</button>
+						<button id="sendBytesBtn" className="btn btn-send" type="button" disabled>
+							Send now
+						</button>
+					</div>
+				</section>
+
+				<section className="send-card queue-card" aria-label="Timed transmit queue">
+					<div className="send-card-heading">
+						<div>
+							<span className="eyebrow">Sequence</span>
+							<h3>Timed queue <span id="queueCount">0</span></h3>
+						</div>
+						<label className="queue-delay">
+							Gap
+							<input id="queueDelay" type="number" min="0" max="600000" step="10" defaultValue="100" />
+							ms
+						</label>
+					</div>
+					<div id="queueList" className="queue-list" />
+					<div className="queue-actions">
+						<button id="clearQueueBtn" className="text-btn" type="button">
+							Clear queue
+						</button>
+						<span />
+						<button id="stopQueueBtn" className="btn btn-danger hidden" type="button">
+							Stop
+						</button>
+						<button id="runQueueBtn" className="btn btn-primary" type="button" disabled>
+							Run queue
+						</button>
+					</div>
+				</section>
+
+				<section className="send-card history-card" aria-label="Transmit history">
+					<div className="send-card-heading">
+						<div>
+							<span className="eyebrow">Local history</span>
+							<h3>Recent sends <span id="historyCount">0</span></h3>
+						</div>
+						<button id="clearHistoryBtn" className="text-btn" type="button">
+							Clear
+						</button>
+					</div>
+					<div id="sendHistory" className="send-history" />
+				</section>
 			</div>
 		</div>
 	);
@@ -576,6 +641,7 @@ function App() {
 						<CaptureHeader />
 						<Toolbar />
 						<StreamPanel />
+						<SendPanel />
 						<AnalysisPanel />
 						<NotesPanel />
 					</section>
