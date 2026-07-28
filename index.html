@@ -47,7 +47,7 @@
 
         <section class="main-panel">
           <div class="capture-header">
-            <div>
+            <div class="capture-identity">
               <div class="eyebrow-row">
                 <span class="eyebrow">Active capture</span>
                 <span id="captureState" class="capture-state">SAVED</span>
@@ -55,6 +55,13 @@
               <input id="captureTitle" class="title-input" value="Overview · Speed 1" aria-label="Capture title" />
               <div id="captureMeta" class="capture-meta"></div>
             </div>
+            <section id="captureNoteRail" class="capture-note-rail" aria-label="Capture notes">
+              <header>
+                <span class="eyebrow">Capture notes <i id="headerNoteCount">0</i></span>
+                <button id="addCaptureNoteBtn" class="text-btn" type="button">＋ Add note</button>
+              </header>
+              <div id="headerCaptureNotes" class="header-capture-notes"></div>
+            </section>
             <div class="header-actions">
               <button id="editContextBtn" class="btn btn-secondary">Edit context</button>
               <button id="moreBtn" class="icon-btn" aria-label="Capture menu">•••</button>
@@ -224,6 +231,23 @@
           <span></span>
           <button class="btn btn-secondary" value="cancel" formmethod="dialog" formnovalidate>Cancel</button>
           <button id="saveAnnotationBtn" class="btn btn-primary" value="default" disabled>Save note</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="captureNoteDialog" class="modal note-modal">
+      <form id="captureNoteEditorForm" method="dialog">
+        <div class="modal-heading">
+          <div><span class="eyebrow">Capture notebook</span><h2 id="captureNoteEditorTitle">Add capture note</h2></div>
+          <button class="icon-btn" value="cancel" formmethod="dialog" formnovalidate aria-label="Close">×</button>
+        </div>
+        <label class="field">Note<textarea id="captureNoteEditorText" placeholder="What should remain visible while analyzing this capture?"></textarea></label>
+        <div id="captureNoteEditorHint" class="validation-hint" aria-live="polite">Enter a note to enable saving.</div>
+        <div class="modal-actions">
+          <button id="deleteCaptureNoteBtn" class="btn btn-danger" type="button">Delete note</button>
+          <span></span>
+          <button class="btn btn-secondary" value="cancel" formmethod="dialog" formnovalidate>Cancel</button>
+          <button id="saveCaptureNoteBtn" class="btn btn-primary" value="default" disabled>Save note</button>
         </div>
       </form>
     </dialog>

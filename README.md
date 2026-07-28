@@ -33,9 +33,13 @@ are available for the active capture.
 
 - Click any byte to attach a byte-level note.
 - Use **Add note** on a row for a message-level annotation.
+- Capture-level notes can be pinned, edited, and removed directly in the capture
+  header; they also remain available in the **Notes** tab.
 - In **Notes**, choose **Message sequence** and enter a row range to attach an
   observation to a specific sequence.
 - Use wildcards in stream filtering, for example `C2 ?? 5D`.
+- Telegram signatures that occur only once in the complete capture show their
+  row ID and timestamp in orange.
 - Toggle **BINARY** to see readable nibbles such as `1100·0010`.
 - **Frame changes** connects adjacent byte changes vertically whenever the
   telegrams still share at least one byte. Repeated transitions reuse the same

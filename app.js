@@ -45,6 +45,7 @@ let readAbort = false;
 let textRemainder = "";
 let rawRemainder = [];
 let annotationTarget = null;
+let captureNoteTargetId = null;
 let toastTimer = null;
 
 function makeMessage(hex, timestamp = Date.now(), index = 0) {
@@ -63,7 +64,10 @@ function parseTime(value) {
 function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (Array.isArray(saved?.captures)) return saved;
+    if (Array.isArray(saved?.captures)) {
+      saved.captures.forEach(capture => (capture.notes || []).forEach(note => note.id ||= crypto.randomUUID()));
+      return saved;
+    }
   } catch {}
   return { captures: demoCaptures, activeId: demoCaptures[0].id };
 }
@@ -159,6 +163,10 @@ function renderEmptyWorkspace() {
   $("#transitionList").innerHTML = `<span class="muted">No capture selected.</span>`;
   $("#notesList").innerHTML = `<p class="muted">No capture selected.</p>`;
   $("#notesCount").textContent = "0";
+  $("#captureNoteRail").classList.add("hidden");
+  $("#headerCaptureNotes").innerHTML = "";
+  $("#headerNoteCount").textContent = "0";
+  $("#addCaptureNoteBtn").disabled = true;
 }
 
 function renderCaptureList() {
@@ -183,6 +191,8 @@ function renderHeader() {
   $("#connectBtn").disabled = false;
   $("#recordBtn").disabled = !port;
   $("#exportBtn").disabled = false;
+  $("#captureNoteRail").classList.remove("hidden");
+  $("#addCaptureNoteBtn").disabled = false;
   $("#captureMeta").innerHTML = [
     c.view && `<span class="meta-chip"><b>VIEW</b> ${escapeHtml(c.view)}</span>`,
     ...c.params.map(p => `<span class="meta-chip"><b>${escapeHtml(p.key.toUpperCase())}</b> ${escapeHtml(p.value)}</span>`),
@@ -191,6 +201,29 @@ function renderHeader() {
   $("#frameSizeLabel").textContent = `${c.frameSize} BYTE${c.frameSize === 1 ? "" : "S"}`;
   $("#captureState").textContent = recording ? "● LIVE" : "SAVED";
   $("#captureState").classList.toggle("live", recording);
+  renderHeaderCaptureNotes();
+}
+
+function captureLevelNotes(c = capture()) {
+  return (c?.notes || []).filter(note => note.type === "capture").sort((a,b) => b.createdAt - a.createdAt);
+}
+
+function renderHeaderCaptureNotes() {
+  const notes = captureLevelNotes();
+  $("#headerNoteCount").textContent = notes.length;
+  $("#captureNoteRail").classList.toggle("empty", notes.length === 0);
+  $("#headerCaptureNotes").innerHTML = notes.length
+    ? notes.slice(0, 2).map(note => `
+      <button class="header-capture-note" data-capture-note-id="${note.id}" title="Edit capture note">
+        <span>${escapeHtml(note.text)}</span>
+        <small>${new Date(note.updatedAt || note.createdAt).toLocaleDateString()}${note.updatedAt ? " · edited" : ""}</small>
+      </button>`).join("") + (notes.length > 2 ? `<span class="header-note-overflow">＋${notes.length - 2} more in Notes</span>` : "")
+    : `<button class="header-note-empty" data-new-capture-note>
+        <span>Pin an observation to this capture</span>
+        <small>Visible here while you inspect telegrams</small>
+      </button>`;
+  $$("[data-capture-note-id]").forEach(button => button.onclick = () => openCaptureNoteEditor(button.dataset.captureNoteId));
+  $$("[data-new-capture-note]").forEach(button => button.onclick = () => openCaptureNoteEditor());
 }
 
 function getCounts(messages) {
@@ -320,6 +353,7 @@ function renderMessages() {
   const c = capture();
   if (!c) return;
   const rows = filteredMessages();
+  const signatureCounts = getCounts(c.messages);
   const countsByPosition = Array.from({length:c.frameSize}, (_,pos) => {
     const map = new Map();
     c.messages.forEach(m => map.set(m.bytes[pos], (map.get(m.bytes[pos]) || 0) + 1));
@@ -338,8 +372,14 @@ function renderMessages() {
     const messageNote = c.annotations[m.id];
     const originalRow = m._originalStart + 1;
     const sequenceNote = (c.notes || []).find(n => n.type === "sequence" && originalRow >= n.start && originalRow <= n.end);
+    const isUnique = signatureCounts.get(signature(m)) === 1;
     const rowLabel = m._originalStart === m._originalEnd ? originalRow : `${originalRow}–${m._originalEnd + 1}`;
-    return `<tr data-message-id="${m.id}" class="${sequenceNote ? "sequence-noted" : ""}" title="${sequenceNote ? escapeHtml(`Sequence rows ${sequenceNote.start}–${sequenceNote.end}: ${sequenceNote.text}`) : ""}">
+    const rowClasses = [sequenceNote ? "sequence-noted" : "", isUnique ? "unique-message" : ""].filter(Boolean).join(" ");
+    const rowTitles = [
+      isUnique ? "Unique telegram · this signature occurs once in the capture" : "",
+      sequenceNote ? `Sequence rows ${sequenceNote.start}–${sequenceNote.end}: ${sequenceNote.text}` : ""
+    ].filter(Boolean).join(" · ");
+    return `<tr data-message-id="${m.id}" class="${rowClasses}" title="${escapeHtml(rowTitles)}">
       <td>${rowLabel}</td>
       <td>${formatTime(m.timestamp)}</td>
       <td>${formatDelta(m._delta)}</td>
@@ -455,6 +495,45 @@ function renderNotes() {
   $("#notesList").innerHTML = notes.map(n => `
     <article class="note-card"><header><span>${n.label}${n.targetLabel ? ` · ${escapeHtml(n.targetLabel)}` : ""}</span><span>${new Date(n.createdAt).toLocaleString()}</span></header><p>${escapeHtml(n.text)}</p></article>
   `).join("") || `<p class="muted">No observations recorded for this capture.</p>`;
+}
+
+function openCaptureNoteEditor(noteId = null) {
+  const note = noteId ? captureLevelNotes().find(item => item.id === noteId) : null;
+  captureNoteTargetId = note?.id || null;
+  $("#captureNoteEditorTitle").textContent = note ? "Edit capture note" : "Add capture note";
+  $("#captureNoteEditorText").value = note?.text || "";
+  $("#deleteCaptureNoteBtn").style.visibility = note ? "visible" : "hidden";
+  updateCaptureNoteValidity();
+  $("#captureNoteDialog").showModal();
+  $("#captureNoteEditorText").focus();
+}
+
+function updateCaptureNoteValidity() {
+  const hasText = $("#captureNoteEditorText").value.trim().length > 0;
+  $("#saveCaptureNoteBtn").disabled = !hasText;
+  $("#captureNoteEditorHint").textContent = hasText ? "Ready to pin in the capture header." : "Enter a note to enable saving.";
+  $("#captureNoteEditorHint").classList.toggle("ready", hasText);
+  return hasText;
+}
+
+function saveCaptureNote() {
+  if (!updateCaptureNoteValidity()) return false;
+  const c = capture();
+  const text = $("#captureNoteEditorText").value.trim();
+  if (captureNoteTargetId) {
+    const note = (c.notes || []).find(item => item.id === captureNoteTargetId);
+    if (!note) return false;
+    note.text = text;
+    note.updatedAt = Date.now();
+  } else {
+    c.notes ||= [];
+    c.notes.push({ id:crypto.randomUUID(), type:"capture", text, createdAt:Date.now() });
+  }
+  saveState();
+  renderHeader();
+  renderNotes();
+  showToast(captureNoteTargetId ? "Capture note updated" : "Capture note added");
+  return true;
 }
 
 function openContext(isNew = false) {
@@ -652,7 +731,13 @@ async function importFile(file) {
       const imported = JSON.parse(text);
       const captures = Array.isArray(imported) ? imported : imported.captures;
       if (!Array.isArray(captures)) throw new Error("No captures found");
-      captures.forEach(c => { c.id ||= crypto.randomUUID(); c.annotations ||= {}; c.notes ||= []; c.messages.forEach(m=>m.id ||= crypto.randomUUID()); });
+      captures.forEach(c => {
+        c.id ||= crypto.randomUUID();
+        c.annotations ||= {};
+        c.notes ||= [];
+        c.notes.forEach(note => note.id ||= crypto.randomUUID());
+        c.messages.forEach(m=>m.id ||= crypto.randomUUID());
+      });
       state.captures.unshift(...captures); activeId = captures[0].id;
     } else {
       const captures = parseDump(text);
@@ -691,6 +776,7 @@ $("#connectBtn").onclick = connectSerial;
 $("#recordBtn").onclick = toggleRecording;
 $("#newCaptureBtn").onclick = () => openContext(true);
 $("#editContextBtn").onclick = () => openContext(false);
+$("#addCaptureNoteBtn").onclick = () => openCaptureNoteEditor();
 $("#addParameterBtn").onclick = () => addParameterRow();
 $("#contextForm").addEventListener("submit", e => { if (e.submitter?.value === "cancel") return; e.preventDefault(); saveContext(); $("#contextDialog").close(); });
 $("#captureTitle").onchange = e => {
@@ -737,9 +823,24 @@ $("#captureNoteForm").onsubmit = e => {
     note.targetLabel = `rows ${note.start}–${note.end}`;
   }
   capture().notes.push(note);
-  $("#captureNoteText").value=""; saveState(); renderNotes(); renderMessages(); showToast("Observation added");
+  $("#captureNoteText").value=""; saveState(); renderHeader(); renderNotes(); renderMessages(); showToast("Observation added");
 };
 $("#noteScope").onchange = e => $("#sequenceRange").classList.toggle("hidden",e.target.value !== "sequence");
+$("#captureNoteEditorText").addEventListener("input",updateCaptureNoteValidity);
+$("#captureNoteEditorForm").addEventListener("submit",e => {
+  if (e.submitter?.value === "cancel") return;
+  e.preventDefault();
+  if (saveCaptureNote()) $("#captureNoteDialog").close();
+});
+$("#deleteCaptureNoteBtn").onclick = () => {
+  const c = capture();
+  c.notes = (c.notes || []).filter(note => note.id !== captureNoteTargetId);
+  saveState();
+  renderHeader();
+  renderNotes();
+  $("#captureNoteDialog").close();
+  showToast("Capture note removed");
+};
 $("#annotationText").addEventListener("input",updateAnnotationValidity);
 $("#annotationForm").addEventListener("submit",e => {
   if (e.submitter?.value === "cancel") return;
