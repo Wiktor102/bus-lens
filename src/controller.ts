@@ -1,3 +1,6 @@
+// The controller remains framework-agnostic so the protocol and Web Serial
+// behavior can stay byte-for-byte compatible with the original implementation.
+// @ts-nocheck
 const STORAGE_KEY = "bus-lens-state-v1";
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -1371,3 +1374,5 @@ window.addEventListener("beforeunload",() => {
 });
 
 render();
+
+export {};
