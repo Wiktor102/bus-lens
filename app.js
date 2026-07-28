@@ -42,15 +42,13 @@ let port = null;
 let reader = null;
 let recording = false;
 let readAbort = false;
-let textRemainder = "";
-let rawRemainder = [];
 let annotationTarget = null;
 let captureNoteTargetId = null;
 let toastTimer = null;
 
 function makeMessage(hex, timestamp = Date.now(), index = 0) {
   const bytes = typeof hex === "string" ? (hex.match(/[0-9a-f]{2}/gi) || []).map(v => parseInt(v, 16)) : [...hex];
-  return { id: crypto.randomUUID(), timestamp, bytes, sourceIndex: index };
+  return { id: crypto.randomUUID(), timestamp, byteTimestamps: bytes.map(() => timestamp), bytes, sourceIndex: index };
 }
 
 function parseTime(value) {
@@ -65,11 +63,118 @@ function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (Array.isArray(saved?.captures)) {
-      saved.captures.forEach(capture => (capture.notes || []).forEach(note => note.id ||= crypto.randomUUID()));
+      saved.captures.forEach(normalizeCapture);
+      saved.captures.forEach(capture => rebuildPreview(capture));
       return saved;
     }
   } catch {}
+  demoCaptures.forEach(normalizeCapture);
+  demoCaptures.forEach(capture => rebuildPreview(capture));
   return { captures: demoCaptures, activeId: demoCaptures[0].id };
+}
+
+function normalizeCapture(c) {
+  c.params ||= [];
+  c.notes ||= [];
+  c.annotations ||= {};
+  c.messages ||= [];
+  c.notes.forEach(note => note.id ||= crypto.randomUUID());
+  c.previewMode ||= "length";
+  c.frameSize = Math.max(1, +c.frameSize || 3);
+  if (c.markerConfigured === undefined) {
+    // 0A was the old UI default, not a marker the user necessarily chose.
+    c.markerConfigured = Boolean(c.frameMarker && c.frameMarker !== "0A");
+  }
+  c.frameMarker = c.markerConfigured ? String(c.frameMarker || "") : "";
+  c.markerPosition ||= "start";
+  c.frameTimeGap = Math.max(.01, +c.frameTimeGap || 5);
+  if (!Array.isArray(c.byteStream)) {
+    c.byteStream = c.messages.flatMap(message =>
+      message.bytes.map((value, index) => ({
+        value,
+        timestamp: message.byteTimestamps?.[index] ?? message.timestamp
+      }))
+    );
+  }
+  c.messages.forEach(message => {
+    message.byteTimestamps ||= message.bytes.map(() => message.timestamp);
+  });
+  return c;
+}
+
+function frameWidth(c = capture()) {
+  return Math.max(0, ...(c?.messages || []).map(message => message.bytes.length));
+}
+
+function markerBytes(value) {
+  return (String(value).match(/[0-9a-f]{2}/gi) || []).map(byte => parseInt(byte, 16));
+}
+
+function markerAt(stream, index, marker) {
+  return marker.length > 0 && marker.every((value, offset) => stream[index + offset]?.value === value);
+}
+
+function rebuildPreview(c = capture()) {
+  if (!c) return;
+  normalizeCapture(c);
+  const stream = c.byteStream;
+  const ranges = [];
+  if (c.previewMode === "marker") {
+    const marker = markerBytes(c.frameMarker);
+    if (c.markerPosition === "end") {
+      let start = 0;
+      let foundMarker = false;
+      for (let index = 0; index < stream.length; index++) {
+        if (markerAt(stream, index, marker)) {
+          foundMarker = true;
+          const end = index + marker.length;
+          ranges.push([start, end]);
+          start = end;
+          index = end - 1;
+        }
+      }
+      if (foundMarker && start < stream.length) ranges.push([start, stream.length]);
+    } else {
+      let start = -1;
+      for (let index = 0; index < stream.length; index++) {
+        if (!markerAt(stream, index, marker)) continue;
+        if (start >= 0 && index > start) ranges.push([start, index]);
+        start = index;
+        index += marker.length - 1;
+      }
+      if (start >= 0 && start < stream.length) ranges.push([start, stream.length]);
+    }
+  } else if (c.previewMode === "time") {
+    if (stream.length) {
+      let start = 0;
+      for (let index = 1; index < stream.length; index++) {
+        if (stream[index].timestamp - stream[index - 1].timestamp >= c.frameTimeGap) {
+          ranges.push([start, index]);
+          start = index;
+        }
+      }
+      ranges.push([start, stream.length]);
+    }
+  } else {
+    for (let start = 0; start < stream.length; start += c.frameSize) {
+      ranges.push([start, Math.min(start + c.frameSize, stream.length)]);
+    }
+  }
+  const oldIds = new Map(c.messages.map(message => [
+    `${message._byteStart ?? ""}:${message._byteEnd ?? ""}`, message.id
+  ]));
+  c.messages = ranges.filter(([start, end]) => end > start).map(([start, end], index) => {
+    const records = stream.slice(start, end);
+    return {
+      id: oldIds.get(`${start}:${end}`) || crypto.randomUUID(),
+      timestamp: records[0].timestamp,
+      byteTimestamps: records.map(record => record.timestamp),
+      bytes: records.map(record => record.value),
+      sourceIndex: index,
+      _byteStart: start,
+      _byteEnd: end
+    };
+  });
 }
 
 function saveState() {
@@ -92,7 +197,7 @@ function formatDelta(ms) {
   if (ms === null) return "—";
   if (ms >= 60000) return `${(ms / 60000).toFixed(1)} min`;
   if (ms >= 1000) return `${(ms / 1000).toFixed(2)} s`;
-  return `${ms} ms`;
+  return `${ms.toFixed(1)} ms`;
 }
 
 function hexByte(byte) { return byte.toString(16).padStart(2, "0").toUpperCase(); }
@@ -167,6 +272,7 @@ function renderEmptyWorkspace() {
   $("#headerCaptureNotes").innerHTML = "";
   $("#headerNoteCount").textContent = "0";
   $("#addCaptureNoteBtn").disabled = true;
+  ["framingMode","previewFrameSize","frameMarker","markerPosition","frameTimeGap"].forEach(id => $(`#${id}`).disabled = true);
 }
 
 function renderCaptureList() {
@@ -184,6 +290,8 @@ function renderCaptureList() {
 function renderHeader() {
   const c = capture();
   if (!c) return;
+  ["framingMode","previewFrameSize","frameMarker","markerPosition","frameTimeGap"].forEach(id => $(`#${id}`).disabled = false);
+  syncPreviewControls(c);
   $("#captureTitle").value = c.name;
   $("#captureTitle").disabled = false;
   $("#editContextBtn").disabled = false;
@@ -196,12 +304,38 @@ function renderHeader() {
   $("#captureMeta").innerHTML = [
     c.view && `<span class="meta-chip"><b>VIEW</b> ${escapeHtml(c.view)}</span>`,
     ...c.params.map(p => `<span class="meta-chip"><b>${escapeHtml(p.key.toUpperCase())}</b> ${escapeHtml(p.value)}</span>`),
-    `<span class="meta-chip"><b>FRAME</b> ${c.frameSize} bytes</span>`
+    `<span class="meta-chip"><b>FRAMING</b> ${escapeHtml(framingDescription(c))}</span>`,
+    `<span class="meta-chip"><b>RAW</b> ${(c.byteStream || []).length.toLocaleString()} timestamped bytes</span>`
   ].filter(Boolean).join("");
-  $("#frameSizeLabel").textContent = `${c.frameSize} BYTE${c.frameSize === 1 ? "" : "S"}`;
+  const width = frameWidth(c);
+  $("#frameSizeLabel").textContent = c.previewMode === "length"
+    ? `${c.frameSize} BYTE${c.frameSize === 1 ? "" : "S"}`
+    : c.previewMode === "marker" && !c.frameMarker
+      ? "MARKER PENDING"
+      : `VARIABLE · UP TO ${width} BYTE${width === 1 ? "" : "S"}`;
   $("#captureState").textContent = recording ? "● LIVE" : "SAVED";
   $("#captureState").classList.toggle("live", recording);
   renderHeaderCaptureNotes();
+}
+
+function framingDescription(c) {
+  if (c.previewMode === "marker") return `marker ${c.frameMarker || "not set"} · ${c.markerPosition}`;
+  if (c.previewMode === "time") return `idle gap ≥ ${c.frameTimeGap} ms`;
+  return `${c.frameSize} bytes`;
+}
+
+function syncPreviewControls(c = capture()) {
+  if (!c) return;
+  const markerInput = $("#frameMarker");
+  const editingMarker = document.activeElement === markerInput;
+  $("#framingMode").value = c.previewMode;
+  $("#previewFrameSize").value = c.frameSize;
+  if (!editingMarker) markerInput.value = c.frameMarker;
+  $("#markerPosition").value = c.markerPosition;
+  $("#frameTimeGap").value = c.frameTimeGap;
+  $("#frameLengthControl").classList.toggle("hidden", c.previewMode !== "length");
+  $("#markerControls").classList.toggle("hidden", c.previewMode !== "marker");
+  $("#timeControls").classList.toggle("hidden", c.previewMode !== "time");
 }
 
 function captureLevelNotes(c = capture()) {
@@ -237,12 +371,25 @@ function renderStats() {
   const messages = c?.messages || [];
   const counts = getCounts(messages);
   const intervals = messages.slice(1).map((m,i) => m.timestamp - messages[i].timestamp).filter(n => n >= 0 && n < 60000);
-  const variants = Array.from({ length: c?.frameSize || 0 }, (_,i) => new Set(messages.map(m => m.bytes[i]).filter(v => v !== undefined)).size);
+  const variants = Array.from({ length: frameWidth(c) }, (_,i) => new Set(messages.map(m => m.bytes[i]).filter(v => v !== undefined)).size);
+  const varyingPositions = variants
+    .map((count, index) => ({ count, position: index + 1 }))
+    .filter(item => item.count > 1);
+  const variantSummary = !messages.length
+    ? "—"
+    : !varyingPositions.length
+      ? "STABLE"
+      : varyingPositions.length <= 4
+        ? varyingPositions.map(item => `B${item.position}: ${item.count}`).join(" · ")
+        : `${varyingPositions.length} POSITIONS`;
   $("#statMessages").textContent = messages.length.toLocaleString();
   $("#statUnique").textContent = counts.size.toLocaleString();
   $("#statDuplicate").textContent = messages.length ? `${Math.round((1 - counts.size/messages.length) * 100)}%` : "0%";
   $("#statInterval").textContent = intervals.length ? `${Math.round(intervals.reduce((a,b)=>a+b,0)/intervals.length)} ms` : "—";
-  $("#statVariants").textContent = variants.length ? variants.join(" / ") : "—";
+  $("#statVariants").textContent = variantSummary;
+  $("#statVariants").title = varyingPositions.length
+    ? varyingPositions.map(item => `Byte ${item.position}: ${item.count} observed values`).join(" · ")
+    : messages.length ? "All observed byte positions are stable" : "No messages to compare";
 }
 
 function filteredMessages() {
@@ -354,7 +501,7 @@ function renderMessages() {
   if (!c) return;
   const rows = filteredMessages();
   const signatureCounts = getCounts(c.messages);
-  const countsByPosition = Array.from({length:c.frameSize}, (_,pos) => {
+  const countsByPosition = Array.from({length:frameWidth(c)}, (_,pos) => {
     const map = new Map();
     c.messages.forEach(m => map.set(m.bytes[pos], (map.get(m.bytes[pos]) || 0) + 1));
     return map;
@@ -418,15 +565,21 @@ function renderMessages() {
         const transitionTitle = transitions.length
           ? ` · framed transition${transitions.length > 1 ? "s" : ""}: ${transitions.join(" / ")}`
           : "";
-        return `<button class="${classes}" style="${styles}" data-byte-note="${m.id}:${pos}" title="Byte ${pos + 1} · ${count} occurrence(s)${transitionTitle} · click to annotate"><span class="byte-value">${content}</span></button>`;
+        const receivedAt = new Date(m.byteTimestamps?.[pos] ?? m.timestamp).toISOString();
+        return `<button class="${classes}" style="${styles}" data-byte-note="${m.id}:${pos}" title="Byte ${pos + 1} · received ${receivedAt} · ${count} occurrence(s)${transitionTitle} · click to annotate"><span class="byte-value">${content}</span></button>`;
       }).join("")}</div></td>
       <td>${m._repeats > 1 ? renderRepeatPill(m) : "—"}</td>
       <td><button class="note-link ${messageNote || sequenceNote ? "" : "add-note"}" data-message-note="${m.id}">${escapeHtml(messageNote?.text || (sequenceNote ? `↳ ${sequenceNote.text}` : "＋ Add note"))}</button></td>
     </tr>`;
   }).join("");
+  const marker = c.previewMode === "marker" ? markerBytes(c.frameMarker) : [];
   $("#emptyState").classList.toggle("hidden", c.messages.length > 0);
-  $("#emptyState h2").textContent = "No messages in this capture";
-  $("#emptyState p").textContent = "Connect a serial port and start capture, or import a monitor dump.";
+  $("#emptyState h2").textContent = c.previewMode === "marker"
+    ? marker.length ? "No marker matches in this capture" : "Enter a marker to preview messages"
+    : "No messages in this capture";
+  $("#emptyState p").textContent = c.previewMode === "marker"
+    ? marker.length ? "The raw byte stream is still preserved; adjust the marker or capture more data." : "Type a hex byte sequence such as AA 55 in the Marker field."
+    : "Connect a serial port and start capture, or import a monitor dump.";
   $(".message-table").classList.toggle("hidden", c.messages.length === 0);
   $$("[data-message-note]").forEach(el => el.onclick = () => openAnnotation("message", el.dataset.messageNote));
   $$("[data-byte-note]").forEach(el => el.onclick = () => openAnnotation("byte", el.dataset.byteNote));
@@ -452,13 +605,13 @@ function renderAnalysis() {
     <div class="signature-row"><span>${sig}</span><span class="signature-bar"><i style="width:${n/maxCount*100}%"></i></span><small>${n} · ${Math.round(n/c.messages.length*100)}%</small></div>
   `).join("") || `<span class="muted">No messages to analyze.</span>`;
 
-  $("#vocabulary").innerHTML = Array.from({length:c.frameSize},(_,pos) => {
+  $("#vocabulary").innerHTML = Array.from({length:frameWidth(c)},(_,pos) => {
     const values = new Map();
     c.messages.forEach(m => { if (m.bytes[pos] !== undefined) values.set(m.bytes[pos], (values.get(m.bytes[pos]) || 0) + 1); });
     return `<div class="vocab-row"><label>BYTE ${pos+1}</label><div class="vocab-values">${[...values.entries()].sort((a,b)=>b[1]-a[1]).map(([v,n]) => `<span title="${n} occurrences">${hexByte(v)}<small> ·${n}</small></span>`).join("")}</div></div>`;
   }).join("");
 
-  $("#bitMap").innerHTML = Array.from({length:c.frameSize},(_,pos) => {
+  $("#bitMap").innerHTML = Array.from({length:frameWidth(c)},(_,pos) => {
     const bytes = c.messages.map(m => m.bytes[pos]).filter(v => v !== undefined);
     return `<div class="bit-row"><label>BYTE ${pos+1}</label>${Array.from({length:8},(_,idx) => {
       const bit = 7-idx;
@@ -537,13 +690,11 @@ function saveCaptureNote() {
 }
 
 function openContext(isNew = false) {
-  const c = isNew ? { name:"Untitled capture", view:"", params:[], baudRate:115200, inputFormat:"raw", frameSize:3 } : capture();
+  const c = isNew ? { name:"Untitled capture", view:"", params:[], baudRate:115200 } : capture();
   $("#contextDialog").dataset.mode = isNew ? "new" : "edit";
   $("#contextName").value = c.name;
   $("#contextView").value = c.view;
   $("#baudRate").value = c.baudRate;
-  $("#inputFormat").value = c.inputFormat;
-  $("#frameSize").value = c.frameSize;
   $("#parameterRows").innerHTML = "";
   c.params.forEach(p => addParameterRow(p.key,p.value));
   if (!c.params.length) addParameterRow("Speed","");
@@ -566,11 +717,10 @@ function saveContext() {
   const values = {
     name: $("#contextName").value.trim() || "Untitled capture",
     view: $("#contextView").value.trim(),
-    params, baudRate:+$("#baudRate").value, inputFormat:$("#inputFormat").value,
-    frameSize:Math.max(1,Math.min(64,+$("#frameSize").value || 3))
+    params, baudRate:+$("#baudRate").value, inputFormat:"raw"
   };
   if ($("#contextDialog").dataset.mode === "new") {
-    const c = { id:crypto.randomUUID(), ...values, createdAt:new Date().toISOString(), messages:[], notes:[], annotations:{} };
+    const c = normalizeCapture({ id:crypto.randomUUID(), ...values, createdAt:new Date().toISOString(), messages:[], byteStream:[], notes:[], annotations:{} });
     state.captures.unshift(c); activeId = c.id;
   } else Object.assign(capture(), values);
   saveState(); render(); showToast("Capture context saved");
@@ -585,7 +735,8 @@ function openAnnotation(type,key) {
   const targetKey = type === "byte" ? key : messageId;
   const existing = c.annotations[targetKey];
   $("#annotationTitle").textContent = type === "byte" ? `Note on byte ${pos+1}` : "Note on message";
-  $("#annotationTarget").textContent = type === "byte" ? `${formatTime(m.timestamp)}  ·  ${signature(m)}  ·  BYTE ${pos+1} = ${hexByte(m.bytes[pos])}` : `${formatTime(m.timestamp)}  ·  ${signature(m)}`;
+  const byteTime = m.byteTimestamps?.[pos] ?? m.timestamp;
+  $("#annotationTarget").textContent = type === "byte" ? `${formatTime(byteTime)}  ·  ${signature(m)}  ·  BYTE ${pos+1} = ${hexByte(m.bytes[pos])}` : `${formatTime(m.timestamp)}  ·  ${signature(m)}`;
   $("#annotationText").value = existing?.text || "";
   $("#deleteAnnotationBtn").style.visibility = existing ? "visible" : "hidden";
   updateAnnotationValidity();
@@ -673,31 +824,18 @@ async function readSerialLoop() {
 
 function ingestChunk(bytes) {
   const c = capture();
-  if (c.inputFormat === "text") {
-    textRemainder += new TextDecoder().decode(bytes, {stream:true});
-    const lines = textRemainder.split(/\r?\n/);
-    textRemainder = lines.pop();
-    lines.forEach(line => {
-      const timeMatch = line.match(/(\d{2}:\d{2}:\d{2}[.:]\d{3})/);
-      const afterArrow = line.includes("->") ? line.split("->").at(-1) : line;
-      const hex = afterArrow.match(/\b[0-9a-f]{2}\b/gi) || [];
-      for (let i=0; i+c.frameSize<=hex.length; i+=c.frameSize) appendMessage(hex.slice(i,i+c.frameSize).map(x=>parseInt(x,16)), timeMatch ? parseTime(timeMatch[1]) : Date.now());
-    });
-  } else {
-    rawRemainder.push(...bytes);
-    while (rawRemainder.length >= c.frameSize) appendMessage(rawRemainder.splice(0,c.frameSize), Date.now());
-  }
-}
-
-function appendMessage(bytes,timestamp) {
-  capture().messages.push(makeMessage(bytes,timestamp,capture().messages.length));
+  const receivedAt = performance.timeOrigin + performance.now();
+  c.byteStream.push(...Array.from(bytes, value => ({
+    value,
+    timestamp: receivedAt
+  })));
+  rebuildPreview(c);
   saveState();
-  renderStats(); renderMessages(); renderAnalysis();
+  renderHeader(); renderStats(); renderMessages(); renderAnalysis();
 }
 
 function toggleRecording() {
   recording = !recording;
-  textRemainder = ""; rawRemainder = [];
   $("#recordBtn").classList.toggle("recording",recording);
   $("#recordBtn").innerHTML = recording ? "<span></span> Stop capture" : "<span></span> Start capture";
   renderHeader();
@@ -733,15 +871,15 @@ async function importFile(file) {
       if (!Array.isArray(captures)) throw new Error("No captures found");
       captures.forEach(c => {
         c.id ||= crypto.randomUUID();
-        c.annotations ||= {};
-        c.notes ||= [];
-        c.notes.forEach(note => note.id ||= crypto.randomUUID());
+        normalizeCapture(c);
+        rebuildPreview(c);
         c.messages.forEach(m=>m.id ||= crypto.randomUUID());
       });
       state.captures.unshift(...captures); activeId = captures[0].id;
     } else {
       const captures = parseDump(text);
       if (!captures.length) throw new Error("No timestamped hex messages found");
+      captures.forEach(c => { normalizeCapture(c); rebuildPreview(c); });
       state.captures.unshift(...captures); activeId = captures[0].id;
     }
     saveState(); render(); showToast(`Imported ${file.name}`);
@@ -758,11 +896,19 @@ function exportData(format) {
   const c = capture();
   const safeName = c.name.replace(/[^a-z0-9_-]+/gi,"-").toLowerCase();
   if (format === "json") {
-    download(JSON.stringify({app:"Bus Lens",version:1,exportedAt:new Date().toISOString(),captures:state.captures},null,2),"bus-lens-archive.json","application/json");
+    download(JSON.stringify({app:"Bus Lens",version:2,exportedAt:new Date().toISOString(),captures:state.captures},null,2),"bus-lens-archive.json","application/json");
   } else if (format === "csv") {
     const quote = value => `"${String(value ?? "").replaceAll('"','""')}"`;
-    const header = ["index","timestamp","delta_ms",...Array.from({length:c.frameSize},(_,i)=>`byte_${i+1}_hex`),"message_hex","message_note"];
-    const rows = c.messages.map((m,i) => [i+1,new Date(m.timestamp).toISOString(),i?m.timestamp-c.messages[i-1].timestamp:"",...m.bytes.map(hexByte),signature(m),c.annotations[m.id]?.text||""].map(quote).join(","));
+    const width = frameWidth(c);
+    const byteHeaders = Array.from({length:width},(_,i)=>[`byte_${i+1}_hex`,`byte_${i+1}_timestamp`]).flat();
+    const header = ["index","timestamp","delta_ms",...byteHeaders,"message_hex","message_note"];
+    const rows = c.messages.map((m,i) => {
+      const byteCells = Array.from({length:width}, (_, position) => m.bytes[position] === undefined
+        ? ["", ""]
+        : [hexByte(m.bytes[position]), new Date(m.byteTimestamps?.[position] ?? m.timestamp).toISOString()]
+      ).flat();
+      return [i+1,new Date(m.timestamp).toISOString(),i?m.timestamp-c.messages[i-1].timestamp:"",...byteCells,signature(m),c.annotations[m.id]?.text||""].map(quote).join(",");
+    });
     download([header.join(","),...rows].join("\n"),`${safeName}.csv`,"text/csv");
   } else {
     const noteLines = (c.notes || []).map(n => `# ${n.type === "sequence" ? `Rows ${n.start}-${n.end}` : "Capture"}: ${n.text}`);
@@ -788,13 +934,38 @@ $("#messageFilter").oninput = renderMessages;
 $("#displayMode").onchange = renderMessages;
 $("#uniqueToggle").onchange = renderMessages;
 $("#collapseToggle").onchange = renderMessages;
+function applyPreviewSettings() {
+  const c = capture();
+  if (!c) return;
+  c.previewMode = $("#framingMode").value;
+  c.frameSize = Math.max(1, Math.min(1024, +$("#previewFrameSize").value || 3));
+  const marker = markerBytes($("#frameMarker").value);
+  c.markerConfigured = marker.length > 0;
+  c.frameMarker = marker.map(hexByte).join(" ");
+  c.markerPosition = $("#markerPosition").value;
+  c.frameTimeGap = Math.max(.01, +$("#frameTimeGap").value || 5);
+  rebuildPreview(c);
+  saveState();
+  render();
+}
+$("#framingMode").onchange = applyPreviewSettings;
+$("#previewFrameSize").oninput = applyPreviewSettings;
+$("#frameMarker").onchange = applyPreviewSettings;
+$("#markerPosition").onchange = applyPreviewSettings;
+$("#frameTimeGap").oninput = applyPreviewSettings;
 $("#moreBtn").onclick = () => $("#moreMenu").classList.toggle("hidden");
 $("#duplicateCaptureBtn").onclick = () => {
   const copy = structuredClone(capture()); copy.id=crypto.randomUUID(); copy.name += " · copy"; copy.createdAt=new Date().toISOString();
   copy.messages.forEach(m=>m.id=crypto.randomUUID()); copy.annotations={}; state.captures.unshift(copy); activeId=copy.id; saveState(); render(); $("#moreMenu").classList.add("hidden");
 };
 $("#clearMessagesBtn").onclick = () => {
-  if (confirm("Clear all messages and message annotations from this capture?")) { capture().messages=[]; capture().annotations={}; saveState(); render(); }
+  if (confirm("Clear all raw bytes, messages, and message annotations from this capture?")) {
+    capture().byteStream=[];
+    capture().messages=[];
+    capture().annotations={};
+    saveState();
+    render();
+  }
   $("#moreMenu").classList.add("hidden");
 };
 $("#deleteCaptureBtn").onclick = async () => {

@@ -21,9 +21,20 @@ the next available port.
 
 ## Capture modes
 
-- **Raw bytes** groups incoming bytes by the configured frame size (3 by default).
-- **Text / Arduino monitor** parses timestamped lines such as
-  `12:39:07.009 -> C2 08 5D`.
+The serial input is a raw binary stream, compatible with ESP32 `Serial.write()`.
+Every byte is stored with its own receive timestamp before any framing is applied.
+
+Message framing is a preview setting and can be changed without recapturing:
+
+- **Length** groups the raw stream into a configurable number of bytes.
+- **Marker** starts or ends a message at a configurable hex byte sequence.
+- **Time gap** starts a new message after a configurable idle interval.
+
+Marker mode leaves the preview empty until a marker is configured and found; the
+raw byte stream remains preserved while the framing rule is being set.
+
+Because the timestamp is recorded when a Web Serial read delivers a byte, multiple
+bytes delivered in the same browser read may have effectively identical times.
 
 Capture context, messages, parameters, and notes are stored locally in the browser.
 Use JSON export for a complete, re-importable backup. CSV and monitor-text exports

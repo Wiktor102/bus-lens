@@ -88,6 +88,31 @@
               <button class="tab" data-panel="notes">Notes <span id="notesCount">0</span></button>
             </div>
             <div class="toolbar-controls">
+              <label class="compact-select">Frame by
+                <select id="framingMode">
+                  <option value="length">LENGTH</option>
+                  <option value="marker">MARKER</option>
+                  <option value="time">TIME GAP</option>
+                </select>
+              </label>
+              <label id="frameLengthControl" class="compact-input">Bytes
+                <input id="previewFrameSize" type="number" min="1" max="1024" value="3" />
+              </label>
+              <span id="markerControls" class="preview-mode-controls hidden">
+                <label class="compact-input">Marker
+                  <input id="frameMarker" placeholder="e.g. AA 55" spellcheck="false" />
+                </label>
+                <label class="compact-select">Position
+                  <select id="markerPosition">
+                    <option value="start">STARTS MESSAGE</option>
+                    <option value="end">ENDS MESSAGE</option>
+                  </select>
+                </label>
+              </span>
+              <label id="timeControls" class="compact-input hidden">Idle gap ≥
+                <input id="frameTimeGap" type="number" min="0.01" step="0.1" value="5" />
+                ms
+              </label>
               <label class="compact-select">Display
                 <select id="displayMode">
                   <option value="hex">HEX</option>
@@ -207,8 +232,7 @@
         </div>
         <div class="serial-settings">
           <label class="field">Baud rate<select id="baudRate"><option>9600</option><option>19200</option><option selected>115200</option><option>250000</option></select></label>
-          <label class="field">Input format<select id="inputFormat"><option value="raw">Raw bytes</option><option value="text">Text / Arduino monitor</option></select></label>
-          <label class="field">Frame size<input id="frameSize" type="number" min="1" max="64" value="3" /></label>
+          <div class="field serial-format"><span>Input format</span><strong>Raw binary bytes</strong><small>Designed for ESP32 Serial.write()</small></div>
         </div>
         <div class="modal-actions">
           <button class="btn btn-secondary" value="cancel" formmethod="dialog" formnovalidate>Cancel</button>
