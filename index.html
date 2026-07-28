@@ -89,7 +89,7 @@
               </label>
               <label class="switch-label">
                 <input id="uniqueToggle" type="checkbox" checked />
-                <span class="switch"></span> Highlight changes
+                <span class="switch"></span> Frame changes
               </label>
               <label class="switch-label">
                 <input id="collapseToggle" type="checkbox" />
@@ -101,7 +101,13 @@
           <div id="streamPanel" class="tab-panel active">
             <div class="stream-filter">
               <label><span>⌕</span><input id="messageFilter" placeholder="Filter bytes, e.g. C2 ?? 5D" /></label>
-              <span id="visibleCount">0 rows</span>
+              <div class="stream-summary">
+                <span class="stream-legend" title="Matching byte values reuse a color. Matching transitions reuse a frame color.">
+                  <i class="byte-swatch"></i> same byte
+                  <i class="frame-swatch"></i> same transition
+                </span>
+                <span id="visibleCount">0 rows</span>
+              </div>
             </div>
             <div class="table-wrap">
               <table class="message-table">

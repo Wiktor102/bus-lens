@@ -1,6 +1,8 @@
 const STORAGE_KEY = "bus-lens-state-v1";
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
+const BYTE_COLORS = ["#79D8E7", "#CBF45A", "#F2B84B", "#B99AF7", "#FF8178", "#69D5A5", "#7DA9FF", "#E48AC2", "#5BD6C8", "#F08C62", "#A8B7FF", "#E76F7B"];
+const TRANSITION_COLORS = ["#36C8E8", "#9E65F4", "#F39C4A", "#E35D91", "#5A8FFF", "#49C88A"];
 
 const demoCaptures = [
   {
@@ -91,6 +93,19 @@ function formatDelta(ms) {
 
 function hexByte(byte) { return byte.toString(16).padStart(2, "0").toUpperCase(); }
 function signature(message) { return message.bytes.map(hexByte).join(" "); }
+function hashText(value) {
+  let hash = 2166136261;
+  for (const char of value) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+function colorForByte(byte) {
+  const paletteIndex = (byte * 13 + (byte >> 4) * 7) % BYTE_COLORS.length;
+  return BYTE_COLORS[paletteIndex];
+}
+function colorForTransition(key) { return TRANSITION_COLORS[hashText(key) % TRANSITION_COLORS.length]; }
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, ch => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;" })[ch]);
 }
@@ -199,7 +214,15 @@ function renderStats() {
 
 function filteredMessages() {
   const c = capture();
-  let rows = c?.messages || [];
+  let rows = (c?.messages || []).map((message, originalIndex) => ({
+    ...message,
+    _originalStart: originalIndex,
+    _originalEnd: originalIndex,
+    _runStart: message.timestamp,
+    _runEnd: message.timestamp,
+    _runMessages: [message],
+    _repeats: 1
+  }));
   const query = $("#messageFilter").value.trim().toUpperCase();
   if (query) {
     const pattern = query.split(/\s+/).map(x => x === "??" || x === "**" ? "[0-9A-F]{2}" : x.replace(/[^0-9A-F?]/g, "").replaceAll("?", "[0-9A-F]")).join("\\s+");
@@ -209,16 +232,88 @@ function filteredMessages() {
     const collapsed = [];
     rows.forEach(m => {
       const last = collapsed.at(-1);
-      if (last && signature(last) === signature(m)) last._repeats++;
-      else collapsed.push({ ...m, _repeats: 1 });
+      const isAdjacent = last && m._originalStart === last._originalEnd + 1;
+      if (isAdjacent && signature(last) === signature(m)) {
+        last._repeats++;
+        last._originalEnd = m._originalEnd;
+        last._runEnd = m.timestamp;
+        last._runMessages.push(m);
+      } else collapsed.push(m);
     });
-    return rowsWithDelta(collapsed);
+    rows = collapsed;
   }
-  return rowsWithDelta(rows.map(m => ({...m, _repeats: 1})));
+  return rowsWithDelta(rows.map(summarizeRunCadence));
 }
 
 function rowsWithDelta(rows) {
-  return rows.map((m,i) => ({ ...m, _delta: i ? m.timestamp - rows[i-1].timestamp : null }));
+  return rows.map((m,i) => ({
+    ...m,
+    _delta: i && m._originalStart === rows[i-1]._originalEnd + 1
+      ? m._runStart - rows[i-1]._runEnd
+      : null
+  }));
+}
+
+function summarizeRunCadence(message) {
+  const intervals = message._runMessages.slice(1).map((item, index) =>
+    item.timestamp - message._runMessages[index].timestamp
+  ).filter(interval => Number.isFinite(interval) && interval >= 0);
+  if (!intervals.length) return { ...message, _cadence: null, _cadenceStable: false, _intervals: intervals };
+  const sorted = [...intervals].sort((a,b) => a-b);
+  const middle = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 ? sorted[middle] : (sorted[middle-1] + sorted[middle]) / 2;
+  const tolerance = Math.max(2, median * .1);
+  const stable = intervals.every(interval => Math.abs(interval - median) <= tolerance);
+  const average = intervals.reduce((sum, interval) => sum + interval, 0) / intervals.length;
+  return { ...message, _cadence: stable ? average : null, _cadenceStable: stable, _intervals: intervals };
+}
+
+function transitionFrames(rows) {
+  const frames = rows.map(row => row.bytes.map(() => ({ incoming: null, outgoing: null })));
+  for (let rowIndex = 0; rowIndex < rows.length - 1; rowIndex++) {
+    const fromRow = rows[rowIndex];
+    const toRow = rows[rowIndex + 1];
+    if (toRow._originalStart !== fromRow._originalEnd + 1) continue;
+    const comparable = Math.min(fromRow.bytes.length, toRow.bytes.length);
+    const unchanged = Array.from({ length: comparable }, (_, position) => position)
+      .filter(position => fromRow.bytes[position] === toRow.bytes[position]);
+    const changed = Array.from({ length: comparable }, (_, position) => position)
+      .filter(position => fromRow.bytes[position] !== toRow.bytes[position]);
+    if (!unchanged.length || !changed.length) continue;
+
+    const groups = [];
+    changed.forEach(position => {
+      const group = groups.at(-1);
+      if (group && position === group.at(-1) + 1) group.push(position);
+      else groups.push([position]);
+    });
+
+    groups.forEach(group => {
+      const start = group[0];
+      const end = group.at(-1);
+      const from = group.map(position => hexByte(fromRow.bytes[position])).join(" ");
+      const to = group.map(position => hexByte(toRow.bytes[position])).join(" ");
+      const key = `${from}→${to}`;
+      const descriptor = {
+        color: colorForTransition(key),
+        lane: hashText(key) % 3,
+        label: `${from} → ${to}`
+      };
+      group.forEach(position => {
+        frames[rowIndex][position].outgoing = {
+          ...descriptor,
+          start: position === start,
+          end: position === end
+        };
+        frames[rowIndex + 1][position].incoming = {
+          ...descriptor,
+          start: position === start,
+          end: position === end
+        };
+      });
+    });
+  }
+  return frames;
 }
 
 function renderMessages() {
@@ -232,25 +327,60 @@ function renderMessages() {
   });
   const mode = $("#displayMode").value;
   const highlight = $("#uniqueToggle").checked;
-  $("#visibleCount").textContent = `${rows.length} row${rows.length === 1 ? "" : "s"}`;
+  const frames = highlight
+    ? transitionFrames(rows)
+    : rows.map(row => row.bytes.map(() => ({ incoming: null, outgoing: null })));
+  const telegramCount = rows.reduce((sum, row) => sum + row._repeats, 0);
+  $("#visibleCount").textContent = telegramCount === rows.length
+    ? `${rows.length} row${rows.length === 1 ? "" : "s"}`
+    : `${rows.length} rows · ${telegramCount} telegrams`;
   $("#messageBody").innerHTML = rows.map((m,i) => {
     const messageNote = c.annotations[m.id];
-    const originalRow = c.messages.findIndex(item => item.id === m.id) + 1;
+    const originalRow = m._originalStart + 1;
     const sequenceNote = (c.notes || []).find(n => n.type === "sequence" && originalRow >= n.start && originalRow <= n.end);
+    const rowLabel = m._originalStart === m._originalEnd ? originalRow : `${originalRow}–${m._originalEnd + 1}`;
     return `<tr data-message-id="${m.id}" class="${sequenceNote ? "sequence-noted" : ""}" title="${sequenceNote ? escapeHtml(`Sequence rows ${sequenceNote.start}–${sequenceNote.end}: ${sequenceNote.text}`) : ""}">
-      <td>${i + 1}</td>
+      <td>${rowLabel}</td>
       <td>${formatTime(m.timestamp)}</td>
       <td>${formatDelta(m._delta)}</td>
       <td><div class="byte-row">${m.bytes.map((byte,pos) => {
         const count = countsByPosition[pos]?.get(byte) || 0;
-        const prev = i ? rows[i-1].bytes[pos] : byte;
-        const changed = highlight && prev !== byte;
+        const frame = frames[i][pos] || {};
+        const incoming = frame.incoming;
+        const outgoing = frame.outgoing;
+        const previousIsAdjacent = i && m._originalStart === rows[i-1]._originalEnd + 1;
+        const changedFromPrevious = previousIsAdjacent && rows[i-1].bytes[pos] !== byte;
+        const changed = highlight && (changedFromPrevious || incoming || outgoing);
         const noted = c.annotations[`${m.id}:${pos}`];
         const binary = byte.toString(2).padStart(8,"0");
         const content = mode === "binary" ? `${binary.slice(0,4)}<i>·</i>${binary.slice(4)}` : hexByte(byte);
-        return `<button class="byte ${mode === "binary" ? "binary" : ""} ${changed ? "changed" : ""} ${count === 1 ? "rare" : ""} ${noted ? "noted" : ""}" data-byte-note="${m.id}:${pos}" title="Byte ${pos + 1} · ${count} occurrence(s) · click to annotate">${content}</button>`;
+        const classes = [
+          "byte",
+          mode === "binary" ? "binary" : "",
+          changed ? "changed" : "",
+          count === 1 ? "rare" : "",
+          noted ? "noted" : "",
+          incoming ? "has-incoming" : "",
+          incoming?.start ? "in-start" : "",
+          incoming?.end ? "in-end" : "",
+          outgoing ? "has-outgoing" : "",
+          outgoing?.start ? "out-start" : "",
+          outgoing?.end ? "out-end" : ""
+        ].filter(Boolean).join(" ");
+        const styles = [
+          `--byte-color:${colorForByte(byte)}`,
+          incoming && `--in-color:${incoming.color}`,
+          incoming && `--in-offset:${-3 - incoming.lane * 3}px`,
+          outgoing && `--out-color:${outgoing.color}`,
+          outgoing && `--out-offset:${-3 - outgoing.lane * 3}px`
+        ].filter(Boolean).join(";");
+        const transitions = [incoming?.label, outgoing?.label].filter(Boolean);
+        const transitionTitle = transitions.length
+          ? ` · framed transition${transitions.length > 1 ? "s" : ""}: ${transitions.join(" / ")}`
+          : "";
+        return `<button class="${classes}" style="${styles}" data-byte-note="${m.id}:${pos}" title="Byte ${pos + 1} · ${count} occurrence(s)${transitionTitle} · click to annotate"><span class="byte-value">${content}</span></button>`;
       }).join("")}</div></td>
-      <td>${m._repeats > 1 ? `<span class="repeat-pill">×${m._repeats}</span>` : "—"}</td>
+      <td>${m._repeats > 1 ? renderRepeatPill(m) : "—"}</td>
       <td><button class="note-link ${messageNote || sequenceNote ? "" : "add-note"}" data-message-note="${m.id}">${escapeHtml(messageNote?.text || (sequenceNote ? `↳ ${sequenceNote.text}` : "＋ Add note"))}</button></td>
     </tr>`;
   }).join("");
@@ -260,6 +390,17 @@ function renderMessages() {
   $(".message-table").classList.toggle("hidden", c.messages.length === 0);
   $$("[data-message-note]").forEach(el => el.onclick = () => openAnnotation("message", el.dataset.messageNote));
   $$("[data-byte-note]").forEach(el => el.onclick = () => openAnnotation("byte", el.dataset.byteNote));
+}
+
+function renderRepeatPill(message) {
+  const min = Math.min(...message._intervals);
+  const max = Math.max(...message._intervals);
+  const range = message._intervals.length ? `${formatDelta(min)}${min === max ? "" : `–${formatDelta(max)}`}` : "—";
+  const cadence = message._cadenceStable && message._cadence !== null
+    ? `<small>≈ ${formatDelta(Math.round(message._cadence))}</small>`
+    : `<small>varied</small>`;
+  const title = `${message._repeats} consecutive identical telegrams · interval ${range}`;
+  return `<span class="repeat-pill ${message._cadenceStable ? "steady" : ""}" title="${title}"><strong>×${message._repeats}</strong>${cadence}</span>`;
 }
 
 function renderAnalysis() {

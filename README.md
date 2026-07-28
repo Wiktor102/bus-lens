@@ -37,5 +37,10 @@ are available for the active capture.
   observation to a specific sequence.
 - Use wildcards in stream filtering, for example `C2 ?? 5D`.
 - Toggle **BINARY** to see readable nibbles such as `1100·0010`.
+- **Frame changes** connects adjacent byte changes vertically whenever the
+  telegrams still share at least one byte. Repeated transitions reuse the same
+  frame color.
+- **Collapse runs** combines only consecutive identical telegrams and shows
+  their approximate cadence when the intervals are near-constant.
 - Pattern analysis shows bit variance, byte vocabulary, message frequency, and
   common transitions.
