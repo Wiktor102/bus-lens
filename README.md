@@ -3,21 +3,34 @@
 A local-first RS-485 capture and protocol-analysis workbench. It uses the browser's
 Web Serial API, so run it in a current Chromium-based browser (Chrome or Edge).
 
-## Run
+## Development
 
-Right-click `start.ps1` and choose **Run with PowerShell**, or run:
+Install dependencies once, then start the Vite development server:
 
 ```powershell
 cd D:\Dokumenty\dom\wentylacja\rs485-lab
-.\start.ps1
+pnpm install
+pnpm start
 ```
 
-If script execution is restricted, `npm start` is an equivalent option when
-Node.js is available.
+`npm install` and `npm start` are equivalent when npm is preferred.
 
 Open the local address printed in the terminal. It normally uses
 `http://127.0.0.1:4173`; if that port is occupied, Bus Lens automatically tries
 the next available port.
+
+Useful checks:
+
+```powershell
+pnpm typecheck
+pnpm build
+pnpm preview
+```
+
+The application is implemented with React 19, TypeScript, and Vite. The static
+workbench shell is split into focused React components. Protocol capture and
+analysis code is loaded as a separate chunk after the first render, and the
+message table keeps its virtualized rendering path for large captures.
 
 ## Capture modes
 

@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Manrope:wght@400;500;600;700&display=swap');
-
 :root {
   --ink: #e9eee7;
   --muted: #8e998d;
@@ -14,8 +12,8 @@
   --amber: #f2b84b;
   --red: #f1695f;
   --blue: #6fc5d6;
-  --mono: "DM Mono", Consolas, monospace;
-  --sans: "Manrope", sans-serif;
+  --mono: "Cascadia Code", "Cascadia Mono", Consolas, monospace;
+  --sans: Bahnschrift, "Aptos Narrow", "Segoe UI", sans-serif;
 }
 
 * { box-sizing: border-box; }
