@@ -27,6 +27,8 @@ Every byte is stored with its own receive timestamp before any framing is applie
 Message framing is a preview setting and can be changed without recapturing:
 
 - **Length** groups the raw stream into a configurable number of bytes.
+- **Sectioned length** lets one capture use different frame lengths across raw-byte
+  sections; each section starts at a selected raw-byte position.
 - **Marker** starts or ends a message at a configurable hex byte sequence.
 - **Time gap** starts a new message after a configurable idle interval.
 

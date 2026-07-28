@@ -96,10 +96,27 @@ function normalizeCapture(c) {
       }))
     );
   }
+  normalizeSections(c);
   c.messages.forEach(message => {
     message.byteTimestamps ||= message.bytes.map(() => message.timestamp);
   });
   return c;
+}
+
+function normalizeSections(c) {
+  const streamLength = c.byteStream?.length || 0;
+  const byStart = new Map();
+  (Array.isArray(c.frameSections) ? c.frameSections : []).forEach(section => {
+    const start = Math.max(0, Math.min(Math.max(0, streamLength - 1), Math.floor(+section.start || 0)));
+    byStart.set(start, {
+      id: section.id || crypto.randomUUID(),
+      start,
+      frameSize: Math.max(1, Math.min(1024, Math.floor(+section.frameSize || c.frameSize || 3))),
+      collapseRuns: Boolean(section.collapseRuns)
+    });
+  });
+  if (!byStart.has(0)) byStart.set(0, { id: crypto.randomUUID(), start: 0, frameSize: c.frameSize, collapseRuns: false });
+  c.frameSections = [...byStart.values()].sort((a, b) => a.start - b.start);
 }
 
 function frameWidth(c = capture()) {
@@ -155,6 +172,14 @@ function rebuildPreview(c = capture()) {
       }
       ranges.push([start, stream.length]);
     }
+  } else if (c.previewMode === "sections") {
+    normalizeSections(c);
+    c.frameSections.forEach((section, sectionIndex) => {
+      const sectionEnd = c.frameSections[sectionIndex + 1]?.start ?? stream.length;
+      for (let start = section.start; start < sectionEnd; start += section.frameSize) {
+        ranges.push([start, Math.min(start + section.frameSize, sectionEnd), section.id]);
+      }
+    });
   } else {
     for (let start = 0; start < stream.length; start += c.frameSize) {
       ranges.push([start, Math.min(start + c.frameSize, stream.length)]);
@@ -163,7 +188,7 @@ function rebuildPreview(c = capture()) {
   const oldIds = new Map(c.messages.map(message => [
     `${message._byteStart ?? ""}:${message._byteEnd ?? ""}`, message.id
   ]));
-  c.messages = ranges.filter(([start, end]) => end > start).map(([start, end], index) => {
+  c.messages = ranges.filter(([start, end]) => end > start).map(([start, end, sectionId], index) => {
     const records = stream.slice(start, end);
     return {
       id: oldIds.get(`${start}:${end}`) || crypto.randomUUID(),
@@ -171,6 +196,7 @@ function rebuildPreview(c = capture()) {
       byteTimestamps: records.map(record => record.timestamp),
       bytes: records.map(record => record.value),
       sourceIndex: index,
+      sectionId,
       _byteStart: start,
       _byteEnd: end
     };
@@ -272,7 +298,8 @@ function renderEmptyWorkspace() {
   $("#headerCaptureNotes").innerHTML = "";
   $("#headerNoteCount").textContent = "0";
   $("#addCaptureNoteBtn").disabled = true;
-  ["framingMode","previewFrameSize","frameMarker","markerPosition","frameTimeGap"].forEach(id => $(`#${id}`).disabled = true);
+  $("#collapseControl").classList.remove("hidden");
+  ["framingMode","previewFrameSize","frameMarker","markerPosition","frameTimeGap","editSectionsBtn"].forEach(id => $(`#${id}`).disabled = true);
 }
 
 function renderCaptureList() {
@@ -290,7 +317,7 @@ function renderCaptureList() {
 function renderHeader() {
   const c = capture();
   if (!c) return;
-  ["framingMode","previewFrameSize","frameMarker","markerPosition","frameTimeGap"].forEach(id => $(`#${id}`).disabled = false);
+  ["framingMode","previewFrameSize","frameMarker","markerPosition","frameTimeGap","editSectionsBtn"].forEach(id => $(`#${id}`).disabled = false);
   syncPreviewControls(c);
   $("#captureTitle").value = c.name;
   $("#captureTitle").disabled = false;
@@ -310,6 +337,8 @@ function renderHeader() {
   const width = frameWidth(c);
   $("#frameSizeLabel").textContent = c.previewMode === "length"
     ? `${c.frameSize} BYTE${c.frameSize === 1 ? "" : "S"}`
+    : c.previewMode === "sections"
+      ? `${c.frameSections.length} SECTION${c.frameSections.length === 1 ? "" : "S"} · UP TO ${width} BYTES`
     : c.previewMode === "marker" && !c.frameMarker
       ? "MARKER PENDING"
       : `VARIABLE · UP TO ${width} BYTE${width === 1 ? "" : "S"}`;
@@ -319,6 +348,7 @@ function renderHeader() {
 }
 
 function framingDescription(c) {
+  if (c.previewMode === "sections") return `${c.frameSections.length} section${c.frameSections.length === 1 ? "" : "s"} · independent lengths`;
   if (c.previewMode === "marker") return `marker ${c.frameMarker || "not set"} · ${c.markerPosition}`;
   if (c.previewMode === "time") return `idle gap ≥ ${c.frameTimeGap} ms`;
   return `${c.frameSize} bytes`;
@@ -334,8 +364,10 @@ function syncPreviewControls(c = capture()) {
   $("#markerPosition").value = c.markerPosition;
   $("#frameTimeGap").value = c.frameTimeGap;
   $("#frameLengthControl").classList.toggle("hidden", c.previewMode !== "length");
+  $("#editSectionsBtn").classList.toggle("hidden", c.previewMode !== "sections");
   $("#markerControls").classList.toggle("hidden", c.previewMode !== "marker");
   $("#timeControls").classList.toggle("hidden", c.previewMode !== "time");
+  $("#collapseControl").classList.toggle("hidden", c.previewMode === "sections");
 }
 
 function captureLevelNotes(c = capture()) {
@@ -408,12 +440,16 @@ function filteredMessages() {
     const pattern = query.split(/\s+/).map(x => x === "??" || x === "**" ? "[0-9A-F]{2}" : x.replace(/[^0-9A-F?]/g, "").replaceAll("?", "[0-9A-F]")).join("\\s+");
     try { const re = new RegExp(pattern); rows = rows.filter(m => re.test(signature(m))); } catch {}
   }
-  if ($("#collapseToggle").checked) {
+  const sectionsById = new Map((c?.frameSections || []).map(section => [section.id, section]));
+  if ($("#collapseToggle").checked || c?.previewMode === "sections") {
     const collapsed = [];
     rows.forEach(m => {
       const last = collapsed.at(-1);
-      const isAdjacent = last && m._originalStart === last._originalEnd + 1;
-      if (isAdjacent && signature(last) === signature(m)) {
+      const isAdjacent = last && m._originalStart === last._originalEnd + 1 && m.sectionId === last.sectionId;
+      const collapseThisSection = c.previewMode === "sections"
+        ? Boolean(sectionsById.get(m.sectionId)?.collapseRuns)
+        : $("#collapseToggle").checked;
+      if (collapseThisSection && isAdjacent && signature(last) === signature(m)) {
         last._repeats++;
         last._originalEnd = m._originalEnd;
         last._runEnd = m.timestamp;
@@ -453,7 +489,7 @@ function transitionFrames(rows) {
   for (let rowIndex = 0; rowIndex < rows.length - 1; rowIndex++) {
     const fromRow = rows[rowIndex];
     const toRow = rows[rowIndex + 1];
-    if (toRow._originalStart !== fromRow._originalEnd + 1) continue;
+    if (toRow._originalStart !== fromRow._originalEnd + 1 || toRow.sectionId !== fromRow.sectionId) continue;
     const comparable = Math.min(fromRow.bytes.length, toRow.bytes.length);
     const unchanged = Array.from({ length: comparable }, (_, position) => position)
       .filter(position => fromRow.bytes[position] === toRow.bytes[position]);
@@ -515,6 +551,7 @@ function renderMessages() {
   $("#visibleCount").textContent = telegramCount === rows.length
     ? `${rows.length} row${rows.length === 1 ? "" : "s"}`
     : `${rows.length} rows · ${telegramCount} telegrams`;
+  let previousSectionId = null;
   $("#messageBody").innerHTML = rows.map((m,i) => {
     const messageNote = c.annotations[m.id];
     const originalRow = m._originalStart + 1;
@@ -526,7 +563,22 @@ function renderMessages() {
       isUnique ? "Unique telegram · this signature occurs once in the capture" : "",
       sequenceNote ? `Sequence rows ${sequenceNote.start}–${sequenceNote.end}: ${sequenceNote.text}` : ""
     ].filter(Boolean).join(" · ");
-    return `<tr data-message-id="${m.id}" class="${rowClasses}" title="${escapeHtml(rowTitles)}">
+    const section = c.frameSections?.find(section => section.id === m.sectionId);
+    const sectionNumber = c.frameSections.findIndex(item => item.id === m.sectionId) + 1;
+    const sectionDivider = c.previewMode === "sections" && m.sectionId !== previousSectionId
+      ? `<tr class="section-divider">
+          <td class="section-number">${String(sectionNumber).padStart(2, "0")}</td>
+          <td colspan="5"><div class="section-header-content">
+            <span>Section · raw byte ${section.start + 1}</span>
+            <div class="section-header-controls">
+              <label>Message length <input data-section-length="${section.id}" type="number" min="1" max="1024" value="${section.frameSize}" /> bytes</label>
+              <label class="switch-label section-collapse">Collapse runs <input data-section-collapse="${section.id}" type="checkbox" ${section.collapseRuns ? "checked" : ""} /><span class="switch"></span></label>
+            </div>
+          </div></td>
+        </tr>`
+      : "";
+    previousSectionId = m.sectionId;
+    return `${sectionDivider}<tr data-message-id="${m.id}" class="${rowClasses}" title="${escapeHtml(rowTitles)}">
       <td>${rowLabel}</td>
       <td>${formatTime(m.timestamp)}</td>
       <td>${formatDelta(m._delta)}</td>
@@ -535,7 +587,7 @@ function renderMessages() {
         const frame = frames[i][pos] || {};
         const incoming = frame.incoming;
         const outgoing = frame.outgoing;
-        const previousIsAdjacent = i && m._originalStart === rows[i-1]._originalEnd + 1;
+        const previousIsAdjacent = i && m._originalStart === rows[i-1]._originalEnd + 1 && m.sectionId === rows[i-1].sectionId;
         const changedFromPrevious = previousIsAdjacent && rows[i-1].bytes[pos] !== byte;
         const changed = highlight && (changedFromPrevious || incoming || outgoing);
         const noted = c.annotations[`${m.id}:${pos}`];
@@ -566,7 +618,7 @@ function renderMessages() {
           ? ` · framed transition${transitions.length > 1 ? "s" : ""}: ${transitions.join(" / ")}`
           : "";
         const receivedAt = new Date(m.byteTimestamps?.[pos] ?? m.timestamp).toISOString();
-        return `<button class="${classes}" style="${styles}" data-byte-note="${m.id}:${pos}" title="Byte ${pos + 1} · received ${receivedAt} · ${count} occurrence(s)${transitionTitle} · click to annotate"><span class="byte-value">${content}</span></button>`;
+        return `<button class="${classes}" style="${styles}" data-byte-note="${m.id}:${pos}" title="Byte ${pos + 1} · received ${receivedAt} · ${count} occurrence(s)${transitionTitle} · click to annotate · right-click to begin a section"><span class="byte-value">${content}</span></button>`;
       }).join("")}</div></td>
       <td>${m._repeats > 1 ? renderRepeatPill(m) : "—"}</td>
       <td><button class="note-link ${messageNote || sequenceNote ? "" : "add-note"}" data-message-note="${m.id}">${escapeHtml(messageNote?.text || (sequenceNote ? `↳ ${sequenceNote.text}` : "＋ Add note"))}</button></td>
@@ -583,6 +635,13 @@ function renderMessages() {
   $(".message-table").classList.toggle("hidden", c.messages.length === 0);
   $$("[data-message-note]").forEach(el => el.onclick = () => openAnnotation("message", el.dataset.messageNote));
   $$("[data-byte-note]").forEach(el => el.onclick = () => openAnnotation("byte", el.dataset.byteNote));
+  $$("[data-byte-note]").forEach(el => el.oncontextmenu = event => {
+    event.preventDefault();
+    const [messageId, position] = el.dataset.byteNote.split(":");
+    startSectionAtByte(messageId, +position);
+  });
+  $$("[data-section-length]").forEach(input => input.onchange = () => setSectionFrameSize(input.dataset.sectionLength, input.value));
+  $$("[data-section-collapse]").forEach(input => input.onchange = () => setSectionCollapse(input.dataset.sectionCollapse, input.checked));
 }
 
 function renderRepeatPill(message) {
@@ -699,6 +758,109 @@ function openContext(isNew = false) {
   c.params.forEach(p => addParameterRow(p.key,p.value));
   if (!c.params.length) addParameterRow("Speed","");
   $("#contextDialog").showModal();
+}
+
+function openSectionsEditor() {
+  const c = capture();
+  if (!c) return;
+  normalizeSections(c);
+  renderSectionRows(c.frameSections);
+  $("#sectionsDialog").showModal();
+}
+
+function renderSectionRows(sections) {
+  $("#sectionRows").innerHTML = "";
+  sections.forEach(section => addSectionRow(section));
+}
+
+function addSectionRow(section) {
+  const c = capture();
+  if (!c) return;
+  const streamLength = c.byteStream.length;
+  if (!section && streamLength < 2) {
+    showToast("Capture at least two raw bytes before adding a section");
+    return;
+  }
+  const existingStarts = $$("#sectionRows [data-section-start]").map(input => +input.value - 1);
+  const fallbackStart = Math.min(streamLength - 1, Math.max(...existingStarts, 0) + 1);
+  const values = section || { id: crypto.randomUUID(), start: fallbackStart, frameSize: c.frameSize };
+  const row = document.createElement("div");
+  row.className = "section-row";
+  row.dataset.sectionId = values.id;
+  row.innerHTML = `<strong>Section</strong>
+    <label>Starts at raw byte <input data-section-start type="number" min="1" max="${Math.max(1, streamLength)}" value="${values.start + 1}" /></label>
+    <label>Frame length <input data-section-size type="number" min="1" max="1024" value="${values.frameSize}" /> bytes</label>
+    <button class="icon-btn" type="button" aria-label="Remove section">×</button>`;
+  row.querySelector("button").onclick = () => {
+    if ($$("#sectionRows .section-row").length === 1) return showToast("A section is required to frame the capture");
+    row.remove();
+  };
+  $("#sectionRows").append(row);
+}
+
+function saveSections() {
+  const c = capture();
+  if (!c) return;
+  const maxStart = Math.max(0, c.byteStream.length - 1);
+  const draft = $$("#sectionRows .section-row").map(row => ({
+    id: row.dataset.sectionId || crypto.randomUUID(),
+    start: Math.max(0, Math.min(maxStart, Math.floor(+(row.querySelector("[data-section-start]").value) - 1 || 0))),
+    frameSize: Math.max(1, Math.min(1024, Math.floor(+(row.querySelector("[data-section-size]").value) || c.frameSize))),
+    collapseRuns: Boolean(c.frameSections.find(section => section.id === row.dataset.sectionId)?.collapseRuns)
+  }));
+  const starts = new Set();
+  if (draft.some(section => starts.has(section.start) || !starts.add(section.start))) {
+    showToast("Each section must start at a different raw byte");
+    return;
+  }
+  c.frameSections = draft;
+  normalizeSections(c);
+  rebuildPreview(c);
+  saveState();
+  render();
+  showToast("Section framing updated");
+}
+
+function startSectionAtByte(messageId, position) {
+  const c = capture();
+  const message = c?.messages.find(item => item.id === messageId);
+  if (!message) return;
+  const start = message._byteStart + position;
+  c.previewMode = "sections";
+  normalizeSections(c);
+  if (c.frameSections.some(section => section.start === start)) {
+    render();
+    showToast(start === 0 ? "The first raw byte already begins section 01" : `Raw byte ${start + 1} already begins a section`);
+    return;
+  }
+  const preceding = [...c.frameSections].reverse().find(section => section.start < start);
+  c.frameSections.push({ id: crypto.randomUUID(), start, frameSize: preceding?.frameSize || c.frameSize, collapseRuns: preceding?.collapseRuns || false });
+  normalizeSections(c);
+  rebuildPreview(c);
+  saveState();
+  render();
+  showToast(`Section begins at raw byte ${start + 1}`);
+}
+
+function setSectionFrameSize(sectionId, value) {
+  const c = capture();
+  const section = c?.frameSections.find(item => item.id === sectionId);
+  if (!section) return;
+  section.frameSize = Math.max(1, Math.min(1024, Math.floor(+value || section.frameSize)));
+  rebuildPreview(c);
+  saveState();
+  render();
+  showToast(`Section message length set to ${section.frameSize} bytes`);
+}
+
+function setSectionCollapse(sectionId, collapseRuns) {
+  const c = capture();
+  const section = c?.frameSections.find(item => item.id === sectionId);
+  if (!section) return;
+  section.collapseRuns = collapseRuns;
+  saveState();
+  renderMessages();
+  showToast(collapseRuns ? "Runs collapse in this section" : "Runs expand in this section");
 }
 
 function addParameterRow(key="",value="") {
@@ -944,6 +1106,7 @@ function applyPreviewSettings() {
   c.frameMarker = marker.map(hexByte).join(" ");
   c.markerPosition = $("#markerPosition").value;
   c.frameTimeGap = Math.max(.01, +$("#frameTimeGap").value || 5);
+  normalizeSections(c);
   rebuildPreview(c);
   saveState();
   render();
@@ -953,6 +1116,14 @@ $("#previewFrameSize").oninput = applyPreviewSettings;
 $("#frameMarker").onchange = applyPreviewSettings;
 $("#markerPosition").onchange = applyPreviewSettings;
 $("#frameTimeGap").oninput = applyPreviewSettings;
+$("#editSectionsBtn").onclick = openSectionsEditor;
+$("#addSectionBtn").onclick = addSectionRow;
+$("#sectionsForm").addEventListener("submit", event => {
+  if (event.submitter?.value === "cancel") return;
+  event.preventDefault();
+  saveSections();
+  $("#sectionsDialog").close();
+});
 $("#moreBtn").onclick = () => $("#moreMenu").classList.toggle("hidden");
 $("#duplicateCaptureBtn").onclick = () => {
   const copy = structuredClone(capture()); copy.id=crypto.randomUUID(); copy.name += " · copy"; copy.createdAt=new Date().toISOString();

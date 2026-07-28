@@ -91,6 +91,7 @@
               <label class="compact-select">Frame by
                 <select id="framingMode">
                   <option value="length">LENGTH</option>
+                  <option value="sections">SECTIONED LENGTH</option>
                   <option value="marker">MARKER</option>
                   <option value="time">TIME GAP</option>
                 </select>
@@ -98,6 +99,7 @@
               <label id="frameLengthControl" class="compact-input">Bytes
                 <input id="previewFrameSize" type="number" min="1" max="1024" value="3" />
               </label>
+              <button id="editSectionsBtn" class="text-btn framing-sections-btn hidden" type="button">Sections</button>
               <span id="markerControls" class="preview-mode-controls hidden">
                 <label class="compact-input">Marker
                   <input id="frameMarker" placeholder="e.g. AA 55" spellcheck="false" />
@@ -123,7 +125,7 @@
                 <input id="uniqueToggle" type="checkbox" checked />
                 <span class="switch"></span> Frame changes
               </label>
-              <label class="switch-label">
+              <label id="collapseControl" class="switch-label">
                 <input id="collapseToggle" type="checkbox" />
                 <span class="switch"></span> Collapse runs
               </label>
@@ -237,6 +239,22 @@
         <div class="modal-actions">
           <button class="btn btn-secondary" value="cancel" formmethod="dialog" formnovalidate>Cancel</button>
           <button id="saveContextBtn" class="btn btn-primary" value="default">Save context</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="sectionsDialog" class="modal sections-modal">
+      <form id="sectionsForm" method="dialog">
+        <div class="modal-heading">
+          <div><span class="eyebrow">Sectioned framing</span><h2>Frame-length sections</h2></div>
+          <button class="icon-btn" value="cancel" formmethod="dialog" formnovalidate aria-label="Close">×</button>
+        </div>
+        <p class="modal-copy">Each section starts at a raw-byte position and applies its own frame length until the next section begins.</p>
+        <div id="sectionRows" class="section-rows"></div>
+        <button id="addSectionBtn" class="text-btn" type="button">＋ Add section</button>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" value="cancel" formmethod="dialog" formnovalidate>Cancel</button>
+          <button class="btn btn-primary" value="default">Save sections</button>
         </div>
       </form>
     </dialog>
