@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#101310" />
+    <title>Bus Lens — RS-485 Protocol Workbench</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <div>
+            <strong>BUS LENS</strong>
+            <span>RS-485 protocol workbench</span>
+          </div>
+        </div>
+        <div class="transport">
+          <span id="connectionBadge" class="status-badge"><i></i> Disconnected</span>
+          <button id="connectBtn" class="btn btn-secondary">Connect port</button>
+          <button id="recordBtn" class="btn btn-record" disabled><span></span> Start capture</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="sidebar">
+          <div class="sidebar-heading">
+            <div>
+              <span class="eyebrow">Archive</span>
+              <h1>Capture sets</h1>
+            </div>
+            <button id="newCaptureBtn" class="icon-btn" title="New capture" aria-label="New capture">＋</button>
+          </div>
+          <label class="search-box">
+            <span>⌕</span>
+            <input id="captureSearch" type="search" placeholder="Filter captures…" />
+          </label>
+          <div id="captureList" class="capture-list"></div>
+          <div class="sidebar-actions">
+            <button id="importBtn" class="text-btn">↥ Import</button>
+            <button id="exportBtn" class="text-btn">↧ Export</button>
+            <input id="fileInput" type="file" accept=".txt,.json,.csv" hidden />
+          </div>
+        </aside>
+
+        <section class="main-panel">
+          <div class="capture-header">
+            <div>
+              <div class="eyebrow-row">
+                <span class="eyebrow">Active capture</span>
+                <span id="captureState" class="capture-state">SAVED</span>
+              </div>
+              <input id="captureTitle" class="title-input" value="Overview · Speed 1" aria-label="Capture title" />
+              <div id="captureMeta" class="capture-meta"></div>
+            </div>
+            <div class="header-actions">
+              <button id="editContextBtn" class="btn btn-secondary">Edit context</button>
+              <button id="moreBtn" class="icon-btn" aria-label="Capture menu">•••</button>
+              <div id="moreMenu" class="popover hidden">
+                <button id="duplicateCaptureBtn">Duplicate capture</button>
+                <button id="clearMessagesBtn">Clear messages</button>
+                <button id="deleteCaptureBtn" class="danger">Delete capture</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="stat-strip">
+            <div><span>MESSAGES</span><strong id="statMessages">0</strong></div>
+            <div><span>UNIQUE</span><strong id="statUnique">0</strong></div>
+            <div><span>DUPLICATION</span><strong id="statDuplicate">0%</strong></div>
+            <div><span>AVG. INTERVAL</span><strong id="statInterval">—</strong></div>
+            <div><span>BYTE VARIANTS</span><strong id="statVariants">—</strong></div>
+          </div>
+
+          <div class="toolbar">
+            <div class="view-tabs" role="tablist">
+              <button class="tab active" data-panel="stream">Message stream</button>
+              <button class="tab" data-panel="patterns">Pattern analysis</button>
+              <button class="tab" data-panel="notes">Notes <span id="notesCount">0</span></button>
+            </div>
+            <div class="toolbar-controls">
+              <label class="compact-select">Display
+                <select id="displayMode">
+                  <option value="hex">HEX</option>
+                  <option value="binary">BINARY</option>
+                </select>
+              </label>
+              <label class="switch-label">
+                <input id="uniqueToggle" type="checkbox" checked />
+                <span class="switch"></span> Highlight changes
+              </label>
+              <label class="switch-label">
+                <input id="collapseToggle" type="checkbox" />
+                <span class="switch"></span> Collapse runs
+              </label>
+            </div>
+          </div>
+
+          <div id="streamPanel" class="tab-panel active">
+            <div class="stream-filter">
+              <label><span>⌕</span><input id="messageFilter" placeholder="Filter bytes, e.g. C2 ?? 5D" /></label>
+              <span id="visibleCount">0 rows</span>
+            </div>
+            <div class="table-wrap">
+              <table class="message-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>TIME</th>
+                    <th>Δ</th>
+                    <th>MESSAGE · <span id="frameSizeLabel">3 BYTES</span></th>
+                    <th>REPEATS</th>
+                    <th>ANNOTATION</th>
+                  </tr>
+                </thead>
+                <tbody id="messageBody"></tbody>
+              </table>
+              <div id="emptyState" class="empty-state hidden">
+                <div class="empty-glyph">01<span>10</span></div>
+                <h2>No messages in this capture</h2>
+                <p>Connect a serial port and start capture, or import a monitor dump.</p>
+              </div>
+            </div>
+          </div>
+
+          <div id="patternsPanel" class="tab-panel">
+            <div class="analysis-grid">
+              <article class="analysis-card wide">
+                <div class="card-heading">
+                  <div><span class="eyebrow">Bit-level</span><h2>Variance map</h2></div>
+                  <span class="legend"><i></i> stable <i></i> changing</span>
+                </div>
+                <div id="bitMap" class="bit-map"></div>
+              </article>
+              <article class="analysis-card">
+                <div class="card-heading"><div><span class="eyebrow">Frequency</span><h2>Message signatures</h2></div></div>
+                <div id="signatureList" class="signature-list"></div>
+              </article>
+              <article class="analysis-card">
+                <div class="card-heading"><div><span class="eyebrow">Per offset</span><h2>Byte vocabulary</h2></div></div>
+                <div id="vocabulary" class="vocabulary"></div>
+              </article>
+              <article class="analysis-card wide">
+                <div class="card-heading">
+                  <div><span class="eyebrow">Discovery aid</span><h2>Transitions</h2></div>
+                  <span class="muted">Consecutive message changes</span>
+                </div>
+                <div id="transitionList" class="transition-list"></div>
+              </article>
+            </div>
+          </div>
+
+          <div id="notesPanel" class="tab-panel">
+            <div class="notes-layout">
+              <div>
+                <div class="section-title"><span class="eyebrow">Notebook</span><h2>Protocol observations</h2></div>
+                <div id="notesList" class="notes-list"></div>
+              </div>
+              <form id="captureNoteForm" class="note-composer">
+                <span class="eyebrow">Capture note</span>
+                <h2>Record an observation</h2>
+                <label class="field">Attach to
+                  <select id="noteScope">
+                    <option value="capture">Entire capture</option>
+                    <option value="sequence">Message sequence</option>
+                  </select>
+                </label>
+                <div id="sequenceRange" class="sequence-range hidden">
+                  <label class="field">From row<input id="sequenceStart" type="number" min="1" value="1" /></label>
+                  <label class="field">To row<input id="sequenceEnd" type="number" min="1" value="2" /></label>
+                </div>
+                <textarea id="captureNoteText" required placeholder="What did the controller do? What changed on the bus?"></textarea>
+                <button class="btn btn-primary" type="submit">Add note</button>
+              </form>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="contextDialog" class="modal">
+      <form id="contextForm" method="dialog">
+        <div class="modal-heading">
+          <div><span class="eyebrow">Capture definition</span><h2>Controller context</h2></div>
+          <button class="icon-btn" value="cancel" formmethod="dialog" formnovalidate aria-label="Close">×</button>
+        </div>
+        <label class="field">Capture name<input id="contextName" required /></label>
+        <label class="field">Controller screen / view<input id="contextView" placeholder="e.g. Temperature" /></label>
+        <div class="field">
+          <div class="field-row"><span>Parameters</span><button id="addParameterBtn" type="button" class="text-btn">＋ Add parameter</button></div>
+          <div id="parameterRows" class="parameter-rows"></div>
+        </div>
+        <div class="serial-settings">
+          <label class="field">Baud rate<select id="baudRate"><option>9600</option><option>19200</option><option selected>115200</option><option>250000</option></select></label>
+          <label class="field">Input format<select id="inputFormat"><option value="raw">Raw bytes</option><option value="text">Text / Arduino monitor</option></select></label>
+          <label class="field">Frame size<input id="frameSize" type="number" min="1" max="64" value="3" /></label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" value="cancel" formmethod="dialog" formnovalidate>Cancel</button>
+          <button id="saveContextBtn" class="btn btn-primary" value="default">Save context</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="noteDialog" class="modal note-modal">
+      <form id="annotationForm" method="dialog">
+        <div class="modal-heading">
+          <div><span class="eyebrow">Annotation</span><h2 id="annotationTitle">Note on message</h2></div>
+          <button class="icon-btn" value="cancel" formmethod="dialog" formnovalidate>×</button>
+        </div>
+        <div id="annotationTarget" class="annotation-target"></div>
+        <label class="field">Note<textarea id="annotationText" placeholder="Possible checksum, command, status flag…"></textarea></label>
+        <div id="annotationHint" class="validation-hint" aria-live="polite">Enter a note to enable saving.</div>
+        <div class="modal-actions">
+          <button id="deleteAnnotationBtn" class="btn btn-danger" type="button">Delete note</button>
+          <span></span>
+          <button class="btn btn-secondary" value="cancel" formmethod="dialog" formnovalidate>Cancel</button>
+          <button id="saveAnnotationBtn" class="btn btn-primary" value="default" disabled>Save note</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="exportDialog" class="modal">
+      <form method="dialog">
+        <div class="modal-heading">
+          <div><span class="eyebrow">Portable evidence</span><h2>Export captures</h2></div>
+          <button class="icon-btn" value="cancel" formmethod="dialog" formnovalidate>×</button>
+        </div>
+        <div class="export-options">
+          <button type="button" data-export="json"><strong>JSON archive</strong><span>All captures, parameters, timing and notes. Re-importable.</span></button>
+          <button type="button" data-export="csv"><strong>CSV table</strong><span>The active capture, ready for a spreadsheet.</span></button>
+          <button type="button" data-export="txt"><strong>Monitor text</strong><span>Human-readable timestamped hex dump with context.</span></button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status"></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
