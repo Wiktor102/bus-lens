@@ -1151,6 +1151,10 @@ tr:hover .replay-link,
 	border: 2px solid #9e65f4;
 	background: transparent;
 }
+.pattern-swatch {
+	border-left: 3px solid var(--blue);
+	background: linear-gradient(90deg, color-mix(in srgb, var(--blue) 18%, transparent), transparent);
+}
 .table-wrap {
 	overflow: auto;
 	flex: 1;
@@ -1207,6 +1211,16 @@ tr:hover .replay-link,
 }
 .message-table tr.sent-message td:first-child {
 	border-left: 2px solid var(--blue);
+}
+.message-table tr.pattern-member td:first-child {
+	box-shadow: inset 3px 0 var(--pattern-color);
+	background: linear-gradient(90deg, color-mix(in srgb, var(--pattern-color) 10%, transparent), transparent 88%);
+}
+.message-table tr.pattern-start td:first-child {
+	border-top: 1px solid color-mix(in srgb, var(--pattern-color) 60%, transparent);
+}
+.message-table tr.pattern-end td:first-child {
+	border-bottom-color: color-mix(in srgb, var(--pattern-color) 55%, var(--line-soft));
 }
 .direction-tag {
 	display: inline-block;
@@ -1354,6 +1368,39 @@ tr:hover .replay-link,
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
+}
+.annotation-stack {
+	display: grid;
+	gap: 3px;
+}
+.pattern-link {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	max-width: 260px;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	color: var(--muted);
+	font: 9px var(--mono);
+	text-align: left;
+	white-space: nowrap;
+	cursor: pointer;
+}
+.pattern-link i {
+	flex: 0 0 auto;
+	width: 7px;
+	height: 7px;
+	background: var(--pattern-color);
+	box-shadow: 0 0 8px color-mix(in srgb, var(--pattern-color) 45%, transparent);
+}
+.pattern-link.remarked {
+	color: var(--ink);
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.pattern-link:hover {
+	color: var(--pattern-color);
 }
 .add-note {
 	opacity: 0;
@@ -1787,6 +1834,26 @@ tr:hover .add-note {
 	margin-bottom: 15px;
 	font: 11px var(--mono);
 	color: var(--acid);
+}
+.pattern-remark-target {
+	display: grid;
+	gap: 5px;
+	margin-bottom: 16px;
+	padding: 12px;
+	border: 1px solid color-mix(in srgb, var(--pattern-color) 45%, var(--line));
+	border-left: 3px solid var(--pattern-color);
+	background: #0e120f;
+	font: 10px var(--mono);
+}
+.pattern-remark-target span {
+	display: grid;
+	grid-template-columns: 28px 1fr;
+	gap: 8px;
+	color: #c7d0c6;
+}
+.pattern-remark-target b {
+	color: var(--pattern-color);
+	font-weight: 500;
 }
 .validation-hint {
 	color: var(--muted);
