@@ -133,6 +133,21 @@
           </div>
 
           <div id="streamPanel" class="tab-panel active">
+            <section id="transmitPanel" class="transmit-panel hidden" aria-label="Send bytes to RS-485">
+              <div class="transmit-panel-heading">
+                <div>
+                  <span class="eyebrow">Live transmit</span>
+                  <strong>Send bytes to RS-485</strong>
+                </div>
+                <span class="transmit-live"><i></i> CAPTURING</span>
+              </div>
+              <label class="transmit-input">
+                <span>HEX</span>
+                <input id="transmitHex" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="e.g. C2 08 5D" aria-describedby="transmitHint" />
+              </label>
+              <button id="sendBytesBtn" class="btn btn-send" type="button" disabled>Send</button>
+              <p id="transmitHint" class="transmit-hint">Enter whole bytes as hex. Sent bytes are tagged TX in the stream.</p>
+            </section>
             <div class="stream-filter">
               <label><span>⌕</span><input id="messageFilter" placeholder="Filter bytes, e.g. C2 ?? 5D" /></label>
               <div class="stream-summary">

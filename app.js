@@ -96,6 +96,7 @@ function normalizeCapture(c) {
       }))
     );
   }
+  c.byteStream.forEach(record => record.direction ||= "rx");
   normalizeSections(c);
   c.messages.forEach(message => {
     message.byteTimestamps ||= message.bytes.map(() => message.timestamp);
@@ -195,6 +196,7 @@ function rebuildPreview(c = capture()) {
       timestamp: records[0].timestamp,
       byteTimestamps: records.map(record => record.timestamp),
       bytes: records.map(record => record.value),
+      directions: records.map(record => record.direction || "rx"),
       sourceIndex: index,
       sectionId,
       _byteStart: start,
@@ -259,6 +261,7 @@ function render() {
     return;
   }
   renderHeader();
+  renderTransmitPanel();
   renderStats();
   renderMessages();
   renderAnalysis();
@@ -299,7 +302,34 @@ function renderEmptyWorkspace() {
   $("#headerNoteCount").textContent = "0";
   $("#addCaptureNoteBtn").disabled = true;
   $("#collapseControl").classList.remove("hidden");
+  $("#transmitPanel").classList.add("hidden");
   ["framingMode","previewFrameSize","frameMarker","markerPosition","frameTimeGap","editSectionsBtn"].forEach(id => $(`#${id}`).disabled = true);
+}
+
+function parseTransmitHex(value) {
+  const compact = value.replace(/[\s,:-]/g, "");
+  if (!compact) return { bytes: [], message: "Enter whole bytes as hex." };
+  if (!/^[0-9a-f]+$/i.test(compact) || compact.length % 2) return { bytes: null, message: "Use complete hex bytes, for example C2 08 5D." };
+  return { bytes: Uint8Array.from(compact.match(/.{2}/g).map(pair => parseInt(pair, 16))), message: `${compact.length / 2} byte${compact.length === 2 ? "" : "s"} ready to send.` };
+}
+
+function renderTransmitPanel() {
+  const visible = Boolean(recording && port && capture());
+  $("#transmitPanel").classList.toggle("hidden", !visible);
+  if (!visible) return;
+  updateTransmitValidity();
+}
+
+function updateTransmitValidity() {
+  const input = $("#transmitHex");
+  const hint = $("#transmitHint");
+  const parsed = parseTransmitHex(input.value);
+  const ready = Boolean(parsed.bytes?.length && recording && port?.writable);
+  hint.textContent = parsed.message;
+  hint.classList.toggle("ready", ready);
+  hint.classList.toggle("invalid", parsed.bytes === null);
+  $("#sendBytesBtn").disabled = !ready;
+  return parsed;
 }
 
 function renderCaptureList() {
@@ -558,7 +588,10 @@ function renderMessages() {
     const sequenceNote = (c.notes || []).find(n => n.type === "sequence" && originalRow >= n.start && originalRow <= n.end);
     const isUnique = signatureCounts.get(signature(m)) === 1;
     const rowLabel = m._originalStart === m._originalEnd ? originalRow : `${originalRow}–${m._originalEnd + 1}`;
-    const rowClasses = [sequenceNote ? "sequence-noted" : "", isUnique ? "unique-message" : ""].filter(Boolean).join(" ");
+    const sentByteCount = m.directions?.filter(direction => direction === "tx").length || 0;
+    const hasSentBytes = sentByteCount > 0;
+    const directionTag = hasSentBytes ? (sentByteCount === m.bytes.length ? "TX" : "MIXED") : "";
+    const rowClasses = [sequenceNote ? "sequence-noted" : "", isUnique ? "unique-message" : "", hasSentBytes ? "sent-message" : ""].filter(Boolean).join(" ");
     const rowTitles = [
       isUnique ? "Unique telegram · this signature occurs once in the capture" : "",
       sequenceNote ? `Sequence rows ${sequenceNote.start}–${sequenceNote.end}: ${sequenceNote.text}` : ""
@@ -580,7 +613,7 @@ function renderMessages() {
     previousSectionId = m.sectionId;
     return `${sectionDivider}<tr data-message-id="${m.id}" class="${rowClasses}" title="${escapeHtml(rowTitles)}">
       <td>${rowLabel}</td>
-      <td>${formatTime(m.timestamp)}</td>
+      <td>${formatTime(m.timestamp)}${directionTag ? `<span class="direction-tag">${directionTag}</span>` : ""}</td>
       <td>${formatDelta(m._delta)}</td>
       <td><div class="byte-row">${m.bytes.map((byte,pos) => {
         const count = countsByPosition[pos]?.get(byte) || 0;
@@ -591,6 +624,7 @@ function renderMessages() {
         const changedFromPrevious = previousIsAdjacent && rows[i-1].bytes[pos] !== byte;
         const changed = highlight && (changedFromPrevious || incoming || outgoing);
         const noted = c.annotations[`${m.id}:${pos}`];
+        const sent = m.directions?.[pos] === "tx";
         const binary = byte.toString(2).padStart(8,"0");
         const content = mode === "binary" ? `${binary.slice(0,4)}<i>·</i>${binary.slice(4)}` : hexByte(byte);
         const classes = [
@@ -599,6 +633,7 @@ function renderMessages() {
           changed ? "changed" : "",
           count === 1 ? "rare" : "",
           noted ? "noted" : "",
+          sent ? "sent" : "",
           incoming ? "has-incoming" : "",
           incoming?.start ? "in-start" : "",
           incoming?.end ? "in-end" : "",
@@ -618,7 +653,8 @@ function renderMessages() {
           ? ` · framed transition${transitions.length > 1 ? "s" : ""}: ${transitions.join(" / ")}`
           : "";
         const receivedAt = new Date(m.byteTimestamps?.[pos] ?? m.timestamp).toISOString();
-        return `<button class="${classes}" style="${styles}" data-byte-note="${m.id}:${pos}" title="Byte ${pos + 1} · received ${receivedAt} · ${count} occurrence(s)${transitionTitle} · click to annotate · right-click to begin a section"><span class="byte-value">${content}</span></button>`;
+        const directionLabel = sent ? "sent to RS-485" : "received from serial";
+        return `<button class="${classes}" style="${styles}" data-byte-note="${m.id}:${pos}" title="Byte ${pos + 1} · ${directionLabel} ${receivedAt} · ${count} occurrence(s)${transitionTitle} · click to annotate · right-click to begin a section"><span class="byte-value">${content}</span></button>`;
       }).join("")}</div></td>
       <td>${m._repeats > 1 ? renderRepeatPill(m) : "—"}</td>
       <td><button class="note-link ${messageNote || sequenceNote ? "" : "add-note"}" data-message-note="${m.id}">${escapeHtml(messageNote?.text || (sequenceNote ? `↳ ${sequenceNote.text}` : "＋ Add note"))}</button></td>
@@ -963,7 +999,7 @@ async function disconnectSerial() {
   $("#recordBtn").disabled = true;
   $("#recordBtn").classList.remove("recording");
   $("#recordBtn").innerHTML = "<span></span> Start capture";
-  renderHeader();
+  renderHeader(); renderTransmitPanel();
 }
 
 async function readSerialLoop() {
@@ -989,18 +1025,47 @@ function ingestChunk(bytes) {
   const receivedAt = performance.timeOrigin + performance.now();
   c.byteStream.push(...Array.from(bytes, value => ({
     value,
-    timestamp: receivedAt
+    timestamp: receivedAt,
+    direction: "rx"
   })));
   rebuildPreview(c);
   saveState();
   renderHeader(); renderStats(); renderMessages(); renderAnalysis();
 }
 
+async function sendBytes() {
+  const parsed = updateTransmitValidity();
+  if (!parsed.bytes?.length) return;
+  if (!recording || !port?.writable) return showToast("Start capture and connect a writable serial port first");
+  const button = $("#sendBytesBtn");
+  button.disabled = true;
+  button.textContent = "Sending…";
+  try {
+    const writer = port.writable.getWriter();
+    try { await writer.write(parsed.bytes); }
+    finally { writer.releaseLock(); }
+    const sentAt = performance.timeOrigin + performance.now();
+    const c = capture();
+    c.byteStream.push(...Array.from(parsed.bytes, value => ({ value, timestamp: sentAt, direction: "tx" })));
+    rebuildPreview(c);
+    saveState();
+    $("#transmitHex").value = "";
+    renderHeader(); renderStats(); renderMessages(); renderAnalysis();
+    updateTransmitValidity();
+    showToast(`${parsed.bytes.length} byte${parsed.bytes.length === 1 ? "" : "s"} sent to RS-485`);
+  } catch (error) {
+    showToast(`Send failed: ${error.message}`);
+  } finally {
+    button.textContent = "Send";
+    updateTransmitValidity();
+  }
+}
+
 function toggleRecording() {
   recording = !recording;
   $("#recordBtn").classList.toggle("recording",recording);
   $("#recordBtn").innerHTML = recording ? "<span></span> Stop capture" : "<span></span> Start capture";
-  renderHeader();
+  renderHeader(); renderTransmitPanel();
   showToast(recording ? "Capture started" : "Capture saved locally");
 }
 
@@ -1082,6 +1147,11 @@ function exportData(format) {
 
 $("#connectBtn").onclick = connectSerial;
 $("#recordBtn").onclick = toggleRecording;
+$("#sendBytesBtn").onclick = sendBytes;
+$("#transmitHex").oninput = updateTransmitValidity;
+$("#transmitHex").onkeydown = event => {
+  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendBytes(); }
+};
 $("#newCaptureBtn").onclick = () => openContext(true);
 $("#editContextBtn").onclick = () => openContext(false);
 $("#addCaptureNoteBtn").onclick = () => openCaptureNoteEditor();
