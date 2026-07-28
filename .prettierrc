@@ -1,0 +1,8 @@
+{
+	"tabWidth": 4,
+	"useTabs": true,
+	"arrowParens": "avoid",
+	"trailingComma": "none",
+	"printWidth": 125,
+	"braceStyle": "1tbs"
+}
