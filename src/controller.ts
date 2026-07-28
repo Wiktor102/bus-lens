@@ -19,6 +19,20 @@ const BYTE_COLORS = [
 	"#E76F7B"
 ];
 const TRANSITION_COLORS = ["#36C8E8", "#9E65F4", "#F39C4A", "#E35D91", "#5A8FFF", "#49C88A"];
+const PATTERN_COLORS = [
+	"#42D9C8",
+	"#B6E94A",
+	"#FFB44C",
+	"#B58AF4",
+	"#F7788A",
+	"#66A3FF",
+	"#E987D0",
+	"#72D28D",
+	"#F08B5D",
+	"#A6B2FF"
+];
+const MIN_PATTERN_LENGTH = 2;
+const MAX_PATTERN_LENGTH = 8;
 // A capture remains useful at this size while still fitting comfortably in browser storage.
 const MAX_CAPTURE_BYTES = 50_000;
 const LIVE_REFRESH_MS = 120;
@@ -124,6 +138,8 @@ let queueRunning = false;
 let stopQueueRequested = false;
 let queueDelayTimer = null;
 let queueDelayResolve = null;
+let patternRemarkTarget = null;
+const patternRecognitionCache = new WeakMap();
 
 function makeMessage(hex, timestamp = Date.now(), index = 0) {
 	const bytes = typeof hex === "string" ? (hex.match(/[0-9a-f]{2}/gi) || []).map(v => parseInt(v, 16)) : [...hex];
@@ -204,6 +220,7 @@ function normalizeCapture(c) {
 	c.params ||= [];
 	c.notes ||= [];
 	c.annotations ||= {};
+	c.patternRemarks ||= {};
 	c.messages ||= [];
 	c.notes.forEach(note => (note.id ||= crypto.randomUUID()));
 	c.previewMode ||= "length";
@@ -398,6 +415,9 @@ function colorForByte(byte) {
 function colorForTransition(key) {
 	return TRANSITION_COLORS[hashText(key) % TRANSITION_COLORS.length];
 }
+function colorForPattern(key) {
+	return PATTERN_COLORS[hashText(key) % PATTERN_COLORS.length];
+}
 function escapeHtml(value = "") {
 	return String(value).replace(
 		/[&<>"']/g,
@@ -449,6 +469,7 @@ function renderEmptyWorkspace() {
 	$("#emptyState h2").textContent = "No captures in the archive";
 	$("#emptyState p").textContent = "Create a capture or import a monitor dump to begin.";
 	$("#visibleCount").textContent = "0 rows";
+	$("#patternCount").textContent = "0 groups";
 	$("#signatureList").innerHTML = `<span class="muted">No capture selected.</span>`;
 	$("#vocabulary").innerHTML = "";
 	$("#bitMap").innerHTML = "";
@@ -969,6 +990,105 @@ function summarizeRunCadence(message) {
 	return { ...message, _cadence: stable ? average : null, _cadenceStable: stable, _intervals: intervals };
 }
 
+function recognizeMessagePatterns(c = capture()) {
+	const messages = c?.messages || [];
+	if (messages.length < MIN_PATTERN_LENGTH * 2) return { groups: [], membership: new Map() };
+	const cacheKey = [
+		c.byteStream?.length || 0,
+		messages.length,
+		c.previewMode,
+		c.frameSize,
+		c.frameMarker,
+		c.markerPosition,
+		c.frameTimeGap,
+		JSON.stringify((c.frameSections || []).map(({ start, frameSize }) => [start, frameSize])),
+		JSON.stringify(c.patternRemarks || {})
+	].join("|");
+	const cached = patternRecognitionCache.get(c);
+	if (cached?.key === cacheKey) return cached.result;
+	const signatures = messages.map(signature);
+	const candidates = [];
+	const maxLength = Math.min(MAX_PATTERN_LENGTH, Math.floor(messages.length / 2));
+
+	for (let length = MIN_PATTERN_LENGTH; length <= maxLength; length++) {
+		const startsByKey = new Map();
+		for (let start = 0; start + length <= messages.length; start++) {
+			const window = messages.slice(start, start + length);
+			if (window.some((message, offset) => offset && message.sectionId !== window[0].sectionId)) continue;
+			const parts = signatures.slice(start, start + length);
+			// A run of one identical telegram is already represented by repeat collapsing;
+			// sequence recognition is reserved for exchanges with at least two states.
+			if (new Set(parts).size < 2) continue;
+			// Do not report A-B-A-B as a four-message pattern when A-B is the
+			// underlying repeated exchange.
+			const hasShorterPeriod = Array.from(
+				{ length: Math.floor(length / 2) - 1 },
+				(_, index) => index + MIN_PATTERN_LENGTH
+			).some(period => length % period === 0 && parts.every((part, index) => part === parts[index % period]));
+			if (hasShorterPeriod) continue;
+			const key = parts.join(" → ");
+			const starts = startsByKey.get(key) || [];
+			starts.push(start);
+			startsByKey.set(key, starts);
+		}
+		startsByKey.forEach((starts, key) => {
+			const nonOverlapping = [];
+			starts.forEach(start => {
+				if (!nonOverlapping.length || start >= nonOverlapping.at(-1) + length) nonOverlapping.push(start);
+			});
+			if (nonOverlapping.length >= 2) {
+				candidates.push({
+					key,
+					length,
+					starts: nonOverlapping,
+					signatures: key.split(" → "),
+					score: length * nonOverlapping.length
+				});
+			}
+		});
+	}
+
+	// Prefer the candidates that explain the most rows, then the longer exchange.
+	// Each table row receives one edge color, keeping dense captures legible.
+	candidates.sort(
+		(a, b) => b.score - a.score || b.length - a.length || b.starts.length - a.starts.length || a.key.localeCompare(b.key)
+	);
+	const claimed = new Set();
+	const groups = [];
+	for (const candidate of candidates) {
+		const availableStarts = candidate.starts.filter(start => {
+			for (let offset = 0; offset < candidate.length; offset++) {
+				if (claimed.has(start + offset)) return false;
+			}
+			return true;
+		});
+		if (availableStarts.length < 2) continue;
+		const group = {
+			...candidate,
+			id: `pattern-${hashText(candidate.key).toString(36)}`,
+			starts: availableStarts,
+			color: colorForPattern(candidate.key),
+			remark: c.patternRemarks?.[candidate.key]?.text || ""
+		};
+		groups.push(group);
+		availableStarts.forEach(start => {
+			for (let offset = 0; offset < candidate.length; offset++) claimed.add(start + offset);
+		});
+	}
+
+	const membership = new Map();
+	groups.forEach(group =>
+		group.starts.forEach((start, occurrenceIndex) => {
+			for (let offset = 0; offset < group.length; offset++) {
+				membership.set(start + offset, { group, occurrenceIndex, offset });
+			}
+		})
+	);
+	const result = { groups, membership };
+	patternRecognitionCache.set(c, { key: cacheKey, result });
+	return result;
+}
+
 function transitionFrames(rows) {
 	const frames = rows.map(row => row.bytes.map(() => ({ incoming: null, outgoing: null })));
 	for (let rowIndex = 0; rowIndex < rows.length - 1; rowIndex++) {
@@ -1029,7 +1149,9 @@ function renderMessages() {
 		c.messages.forEach(m => map.set(m.bytes[pos], (map.get(m.bytes[pos]) || 0) + 1));
 		return map;
 	});
-	virtualMessageView = { c, matchingRows, signatureCounts, countsByPosition };
+	const patterns = recognizeMessagePatterns(c);
+	virtualMessageView = { c, matchingRows, signatureCounts, countsByPosition, patterns };
+	$("#patternCount").textContent = `${patterns.groups.length} group${patterns.groups.length === 1 ? "" : "s"}`;
 	renderVirtualRows();
 }
 
@@ -1046,7 +1168,7 @@ function virtualRange(total) {
 function renderVirtualRows() {
 	const view = virtualMessageView;
 	if (!view) return;
-	const { c, matchingRows, signatureCounts, countsByPosition } = view;
+	const { c, matchingRows, signatureCounts, countsByPosition, patterns } = view;
 	const { start, end } = virtualRange(matchingRows.length);
 	const rows = matchingRows.slice(start, end);
 	const mode = $("#displayMode").value;
@@ -1074,6 +1196,8 @@ function renderVirtualRows() {
 	const rowsHtml = rows
 		.map((m, i) => {
 			const messageNote = c.annotations[m.id];
+			const patternMember = patterns.membership.get(m._originalStart);
+			const pattern = patternMember?.group;
 			const originalRow = m._originalStart + 1;
 			const sequenceNote = (c.notes || []).find(
 				n => n.type === "sequence" && originalRow >= n.start && originalRow <= n.end
@@ -1086,13 +1210,19 @@ function renderVirtualRows() {
 			const rowClasses = [
 				sequenceNote ? "sequence-noted" : "",
 				isUnique ? "unique-message" : "",
-				hasSentBytes ? "sent-message" : ""
+				hasSentBytes ? "sent-message" : "",
+				pattern ? "pattern-member" : "",
+				patternMember?.offset === 0 ? "pattern-start" : "",
+				patternMember?.offset === pattern?.length - 1 ? "pattern-end" : ""
 			]
 				.filter(Boolean)
 				.join(" ");
 			const rowTitles = [
 				isUnique ? "Unique telegram · this signature occurs once in the capture" : "",
-				sequenceNote ? `Sequence rows ${sequenceNote.start}–${sequenceNote.end}: ${sequenceNote.text}` : ""
+				sequenceNote ? `Sequence rows ${sequenceNote.start}–${sequenceNote.end}: ${sequenceNote.text}` : "",
+				pattern
+					? `Repeated sequence · occurrence ${patternMember.occurrenceIndex + 1} of ${pattern.starts.length}${pattern.remark ? ` · ${pattern.remark}` : ""}`
+					: ""
 			]
 				.filter(Boolean)
 				.join(" · ");
@@ -1112,7 +1242,21 @@ function renderVirtualRows() {
         </tr>`
 					: "";
 			previousSectionId = m.sectionId;
-			return `${sectionDivider}<tr data-message-id="${m.id}" class="${rowClasses}" title="${escapeHtml(rowTitles)}">
+			const patternStyle = pattern ? ` style="--pattern-color:${pattern.color}"` : "";
+			const noteControl = `<button class="note-link ${messageNote || sequenceNote ? "" : "add-note"}" data-message-note="${m.id}">${escapeHtml(messageNote?.text || (sequenceNote ? `↳ ${sequenceNote.text}` : "＋ Add note"))}</button>`;
+			const annotationControl = `<div class="${pattern ? "annotation-stack" : "row-actions"}">
+          ${
+						pattern
+							? `<button class="pattern-link ${pattern.remark ? "remarked" : ""}" data-pattern-id="${pattern.id}" title="Add or edit a shared remark for this recognized sequence">
+            <i style="--pattern-color:${pattern.color}"></i>
+            ${pattern.remark ? escapeHtml(pattern.remark) : `${pattern.length}-message sequence`}
+          </button>`
+							: ""
+					}
+          ${noteControl}
+          <button class="replay-link" data-message-replay="${m.id}" title="Replay this message on the connected serial port">↻ Replay</button>
+        </div>`;
+			return `${sectionDivider}<tr data-message-id="${m.id}" class="${rowClasses}"${patternStyle} title="${escapeHtml(rowTitles)}">
       <td>${rowLabel}</td>
       <td>${formatTime(m.timestamp)}${directionTag ? `<span class="direction-tag">${directionTag}</span>` : ""}</td>
       <td>${formatDelta(m._delta)}</td>
@@ -1168,11 +1312,8 @@ function renderVirtualRows() {
 			})
 			.join("")}</div></td>
       <td>${m._repeats > 1 ? renderRepeatPill(m) : "—"}</td>
-      <td><div class="row-actions">
-        <button class="note-link ${messageNote || sequenceNote ? "" : "add-note"}" data-message-note="${m.id}">${escapeHtml(messageNote?.text || (sequenceNote ? `↳ ${sequenceNote.text}` : "＋ Add note"))}</button>
-        <button class="replay-link" data-message-replay="${m.id}" title="Replay this message on the connected serial port">↻ Replay</button>
-      </div></td>
-    </tr>`;
+	      <td>${annotationControl}</td>
+	    </tr>`;
 		})
 		.join("");
 	$("#messageBody").innerHTML = `${topSpacer}${rowsHtml}${bottomSpacer}`;
@@ -1199,6 +1340,7 @@ function renderVirtualRows() {
 				if (message) void transmitBytes(Uint8Array.from(message.bytes), "replay");
 			})
 	);
+	$$("[data-pattern-id]").forEach(el => (el.onclick = () => openPatternRemark(el.dataset.patternId)));
 	$$("[data-byte-note]").forEach(el => (el.onclick = () => openAnnotation("byte", el.dataset.byteNote)));
 	$$("[data-byte-note]").forEach(
 		el =>
@@ -1563,6 +1705,34 @@ function saveAnnotation() {
 	render();
 	showToast("Annotation saved");
 	return true;
+}
+
+function openPatternRemark(id) {
+	const patterns = virtualMessageView?.patterns || recognizeMessagePatterns();
+	const group = patterns.groups.find(item => item.id === id);
+	if (!group) return showToast("This sequence is no longer present in the current framing");
+	patternRemarkTarget = group.key;
+	$("#patternRemarkTitle").textContent = `${group.length}-message sequence · ${group.starts.length} occurrences`;
+	$("#patternRemarkTarget").innerHTML = group.signatures
+		.map((value, index) => `<span><b>${String(index + 1).padStart(2, "0")}</b>${escapeHtml(value)}</span>`)
+		.join("");
+	$("#patternRemarkText").value = capture().patternRemarks?.[group.key]?.text || "";
+	$("#deletePatternRemarkBtn").style.visibility = $("#patternRemarkText").value ? "visible" : "hidden";
+	$("#patternDialog").style.setProperty("--pattern-color", group.color);
+	$("#patternDialog").showModal();
+	$("#patternRemarkText").focus();
+}
+
+function savePatternRemark() {
+	const text = $("#patternRemarkText").value.trim();
+	const c = capture();
+	c.patternRemarks ||= {};
+	if (text) c.patternRemarks[patternRemarkTarget] = { text, updatedAt: Date.now() };
+	else delete c.patternRemarks[patternRemarkTarget];
+	saveState();
+	renderMessages();
+	$("#patternDialog").close();
+	showToast(text ? "Sequence remark saved" : "Sequence remark removed");
 }
 
 async function connectSerial() {
@@ -1951,8 +2121,19 @@ function exportData(format) {
 		const quote = value => `"${String(value ?? "").replaceAll('"', '""')}"`;
 		const width = frameWidth(c);
 		const byteHeaders = Array.from({ length: width }, (_, i) => [`byte_${i + 1}_hex`, `byte_${i + 1}_timestamp`]).flat();
-		const header = ["index", "timestamp", "delta_ms", ...byteHeaders, "message_hex", "message_note"];
+		const patterns = recognizeMessagePatterns(c);
+		const header = [
+			"index",
+			"timestamp",
+			"delta_ms",
+			...byteHeaders,
+			"message_hex",
+			"message_note",
+			"sequence_group",
+			"sequence_remark"
+		];
 		const rows = c.messages.map((m, i) => {
+			const pattern = patterns.membership.get(i)?.group;
 			const byteCells = Array.from({ length: width }, (_, position) =>
 				m.bytes[position] === undefined
 					? ["", ""]
@@ -1964,13 +2145,22 @@ function exportData(format) {
 				i ? m.timestamp - c.messages[i - 1].timestamp : "",
 				...byteCells,
 				signature(m),
-				c.annotations[m.id]?.text || ""
+				c.annotations[m.id]?.text || "",
+				pattern?.id || "",
+				pattern?.remark || ""
 			]
 				.map(quote)
 				.join(",");
 		});
 		download([header.join(","), ...rows].join("\n"), `${safeName}.csv`, "text/csv");
 	} else {
+		const patterns = recognizeMessagePatterns(c);
+		const patternLines = patterns.groups
+			.filter(group => group.remark)
+			.map(
+				group =>
+					`# Repeated sequence (${group.length} messages, ${group.starts.length} occurrences): ${group.remark}\n#   ${group.signatures.join(" -> ")}`
+			);
 		const noteLines = (c.notes || []).map(
 			n => `# ${n.type === "sequence" ? `Rows ${n.start}-${n.end}` : "Capture"}: ${n.text}`
 		);
@@ -1979,6 +2169,7 @@ function exportData(format) {
 			`View: ${c.view}`,
 			...c.params.map(p => `${p.key}: ${p.value}`),
 			...noteLines,
+			...patternLines,
 			"",
 			...c.messages.map(
 				m =>
@@ -2115,6 +2306,7 @@ $("#clearMessagesBtn").onclick = () => {
 		capture().byteStream = [];
 		capture().messages = [];
 		capture().annotations = {};
+		capture().patternRemarks = {};
 		saveState();
 		render();
 	}
@@ -2191,6 +2383,15 @@ $("#deleteAnnotationBtn").onclick = () => {
 	render();
 	$("#noteDialog").close();
 	showToast("Annotation removed");
+};
+$("#patternRemarkForm").addEventListener("submit", e => {
+	if (e.submitter?.value === "cancel") return;
+	e.preventDefault();
+	savePatternRemark();
+});
+$("#deletePatternRemarkBtn").onclick = () => {
+	$("#patternRemarkText").value = "";
+	savePatternRemark();
 };
 $("#importBtn").onclick = () => $("#fileInput").click();
 $("#fileInput").onchange = e => {

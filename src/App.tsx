@@ -219,9 +219,9 @@ function StreamPanel() {
 				<div className="stream-summary">
 					<span
 						className="stream-legend"
-						title="Matching byte values reuse a color. Matching transitions reuse a frame color."
+						title="Repeated message sequences reuse a colored edge and can have a shared remark."
 					>
-						<i className="byte-swatch" /> same byte <i className="frame-swatch" /> same transition
+						<i className="pattern-swatch" /> repeated sequence <span id="patternCount">0 groups</span>
 					</span>
 					<span id="visibleCount">0 rows</span>
 				</div>
@@ -613,6 +613,47 @@ function CaptureNoteDialog() {
 	);
 }
 
+function PatternRemarkDialog() {
+	return (
+		<dialog id="patternDialog" className="modal note-modal">
+			<form id="patternRemarkForm" method="dialog">
+				<div className="modal-heading">
+					<div>
+						<span className="eyebrow">Recognized sequence</span>
+						<h2 id="patternRemarkTitle">Sequence remark</h2>
+					</div>
+					<button className="icon-btn" value="cancel" formMethod="dialog" formNoValidate aria-label="Close">
+						×
+					</button>
+				</div>
+				<div id="patternRemarkTarget" className="pattern-remark-target" />
+				<label className="field">
+					Shared remark
+					<textarea
+						id="patternRemarkText"
+						placeholder="What does this repeated exchange appear to represent?"
+					/>
+				</label>
+				<div id="patternRemarkHint" className="validation-hint" aria-live="polite">
+					This remark appears on every occurrence of the sequence.
+				</div>
+				<div className="modal-actions">
+					<button id="deletePatternRemarkBtn" className="btn btn-danger" type="button">
+						Delete remark
+					</button>
+					<span />
+					<button className="btn btn-secondary" value="cancel" formMethod="dialog" formNoValidate>
+						Cancel
+					</button>
+					<button id="savePatternRemarkBtn" className="btn btn-primary" value="default">
+						Save remark
+					</button>
+				</div>
+			</form>
+		</dialog>
+	);
+}
+
 function ExportDialog() {
 	return (
 		<dialog id="exportDialog" className="modal">
@@ -687,6 +728,7 @@ function App() {
 			<SectionsDialog />
 			<AnnotationDialog />
 			<CaptureNoteDialog />
+			<PatternRemarkDialog />
 			<ExportDialog />
 			<FolderDialog />
 			<div id="toast" className="toast" role="status" />
