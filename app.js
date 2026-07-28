@@ -3,6 +3,11 @@ const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 const BYTE_COLORS = ["#79D8E7", "#CBF45A", "#F2B84B", "#B99AF7", "#FF8178", "#69D5A5", "#7DA9FF", "#E48AC2", "#5BD6C8", "#F08C62", "#A8B7FF", "#E76F7B"];
 const TRANSITION_COLORS = ["#36C8E8", "#9E65F4", "#F39C4A", "#E35D91", "#5A8FFF", "#49C88A"];
+// A capture remains useful at this size while still fitting comfortably in browser storage.
+const MAX_CAPTURE_BYTES = 50_000;
+const LIVE_REFRESH_MS = 120;
+const VIRTUAL_ROW_HEIGHT = 56;
+const VIRTUAL_OVERSCAN = 8;
 
 const demoCaptures = [
   {
@@ -45,6 +50,11 @@ let readAbort = false;
 let annotationTarget = null;
 let captureNoteTargetId = null;
 let toastTimer = null;
+let pendingLiveBytes = [];
+let liveRefreshTimer = null;
+let stateSaveTimer = null;
+let virtualMessageView = null;
+let virtualRenderPending = false;
 
 function makeMessage(hex, timestamp = Date.now(), index = 0) {
   const bytes = typeof hex === "string" ? (hex.match(/[0-9a-f]{2}/gi) || []).map(v => parseInt(v, 16)) : [...hex];
@@ -205,9 +215,28 @@ function rebuildPreview(c = capture()) {
   });
 }
 
-function saveState() {
+function persistState() {
   state.activeId = activeId;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (error) {
+    console.warn("Could not save Bus Lens state", error);
+    showToast("Capture is live, but browser storage is full");
+  }
+}
+
+function saveState({ immediate = false } = {}) {
+  if (immediate) {
+    clearTimeout(stateSaveTimer);
+    stateSaveTimer = null;
+    persistState();
+    return;
+  }
+  if (stateSaveTimer) return;
+  stateSaveTimer = setTimeout(() => {
+    stateSaveTimer = null;
+    persistState();
+  }, 1_000);
 }
 
 function capture() {
@@ -565,24 +594,50 @@ function transitionFrames(rows) {
 function renderMessages() {
   const c = capture();
   if (!c) return;
-  const rows = filteredMessages();
+  const matchingRows = filteredMessages();
   const signatureCounts = getCounts(c.messages);
   const countsByPosition = Array.from({length:frameWidth(c)}, (_,pos) => {
     const map = new Map();
     c.messages.forEach(m => map.set(m.bytes[pos], (map.get(m.bytes[pos]) || 0) + 1));
     return map;
   });
+  virtualMessageView = { c, matchingRows, signatureCounts, countsByPosition };
+  renderVirtualRows();
+}
+
+function virtualRange(total) {
+  const viewport = $(".table-wrap");
+  const visibleRows = Math.ceil(viewport.clientHeight / VIRTUAL_ROW_HEIGHT);
+  const maxFirstVisible = Math.max(0, total - visibleRows);
+  const firstVisible = Math.min(Math.floor(viewport.scrollTop / VIRTUAL_ROW_HEIGHT), maxFirstVisible);
+  const start = Math.max(0, firstVisible - VIRTUAL_OVERSCAN);
+  const end = Math.min(total, firstVisible + visibleRows + VIRTUAL_OVERSCAN);
+  return { start, end };
+}
+
+function renderVirtualRows() {
+  const view = virtualMessageView;
+  if (!view) return;
+  const { c, matchingRows, signatureCounts, countsByPosition } = view;
+  const { start, end } = virtualRange(matchingRows.length);
+  const rows = matchingRows.slice(start, end);
   const mode = $("#displayMode").value;
   const highlight = $("#uniqueToggle").checked;
+  const rowsForTransitions = matchingRows.slice(Math.max(0, start - 1), end);
   const frames = highlight
-    ? transitionFrames(rows)
+    ? transitionFrames(rowsForTransitions).slice(start > 0 ? 1 : 0)
     : rows.map(row => row.bytes.map(() => ({ incoming: null, outgoing: null })));
-  const telegramCount = rows.reduce((sum, row) => sum + row._repeats, 0);
-  $("#visibleCount").textContent = telegramCount === rows.length
-    ? `${rows.length} row${rows.length === 1 ? "" : "s"}`
-    : `${rows.length} rows · ${telegramCount} telegrams`;
-  let previousSectionId = null;
-  $("#messageBody").innerHTML = rows.map((m,i) => {
+  const telegramCount = matchingRows.reduce((sum, row) => sum + row._repeats, 0);
+  const visibleSummary = matchingRows.length
+    ? `${matchingRows.length.toLocaleString()} row${matchingRows.length === 1 ? "" : "s"}`
+    : "0 rows";
+  $("#visibleCount").textContent = telegramCount === matchingRows.length
+    ? visibleSummary
+    : `${visibleSummary} · ${telegramCount.toLocaleString()} telegrams`;
+  let previousSectionId = start ? matchingRows[start - 1]?.sectionId : null;
+  const topSpacer = start ? `<tr class="virtual-spacer" aria-hidden="true"><td colspan="6" style="height:${start * VIRTUAL_ROW_HEIGHT}px"></td></tr>` : "";
+  const bottomSpacer = end < matchingRows.length ? `<tr class="virtual-spacer" aria-hidden="true"><td colspan="6" style="height:${(matchingRows.length - end) * VIRTUAL_ROW_HEIGHT}px"></td></tr>` : "";
+  const rowsHtml = rows.map((m,i) => {
     const messageNote = c.annotations[m.id];
     const originalRow = m._originalStart + 1;
     const sequenceNote = (c.notes || []).find(n => n.type === "sequence" && originalRow >= n.start && originalRow <= n.end);
@@ -620,8 +675,9 @@ function renderMessages() {
         const frame = frames[i][pos] || {};
         const incoming = frame.incoming;
         const outgoing = frame.outgoing;
-        const previousIsAdjacent = i && m._originalStart === rows[i-1]._originalEnd + 1 && m.sectionId === rows[i-1].sectionId;
-        const changedFromPrevious = previousIsAdjacent && rows[i-1].bytes[pos] !== byte;
+        const previousRow = i ? rows[i - 1] : matchingRows[start - 1];
+        const previousIsAdjacent = previousRow && m._originalStart === previousRow._originalEnd + 1 && m.sectionId === previousRow.sectionId;
+        const changedFromPrevious = previousIsAdjacent && previousRow.bytes[pos] !== byte;
         const changed = highlight && (changedFromPrevious || incoming || outgoing);
         const noted = c.annotations[`${m.id}:${pos}`];
         const sent = m.directions?.[pos] === "tx";
@@ -660,6 +716,7 @@ function renderMessages() {
       <td><button class="note-link ${messageNote || sequenceNote ? "" : "add-note"}" data-message-note="${m.id}">${escapeHtml(messageNote?.text || (sequenceNote ? `↳ ${sequenceNote.text}` : "＋ Add note"))}</button></td>
     </tr>`;
   }).join("");
+  $("#messageBody").innerHTML = `${topSpacer}${rowsHtml}${bottomSpacer}`;
   const marker = c.previewMode === "marker" ? markerBytes(c.frameMarker) : [];
   $("#emptyState").classList.toggle("hidden", c.messages.length > 0);
   $("#emptyState h2").textContent = c.previewMode === "marker"
@@ -990,6 +1047,7 @@ async function connectSerial() {
 }
 
 async function disconnectSerial() {
+  flushLiveBytes();
   recording = false; readAbort = true;
   try { await reader?.cancel(); reader?.releaseLock(); await port?.close(); } catch {}
   reader = null; port = null;
@@ -1020,17 +1078,48 @@ async function readSerialLoop() {
   }
 }
 
-function ingestChunk(bytes) {
+function queueLiveBytes(bytes, direction) {
+  const timestamp = performance.timeOrigin + performance.now();
+  for (const value of bytes) pendingLiveBytes.push({ value, timestamp, direction });
+  if (!liveRefreshTimer) liveRefreshTimer = setTimeout(flushLiveBytes, LIVE_REFRESH_MS);
+}
+
+function trimCapture(c) {
+  const excess = c.byteStream.length - MAX_CAPTURE_BYTES;
+  if (excess <= 0) return false;
+  const firstRollover = !c.rollingBuffer;
+  c.rollingBuffer = true;
+  c.byteStream.splice(0, excess);
+  c.frameSections = (c.frameSections || [])
+    .filter(section => section.start >= excess)
+    .map(section => ({ ...section, start: section.start - excess }));
+  // Message IDs are derived from stream positions, so old message-specific notes
+  // cannot safely be attached after the oldest portion rolls off.
+  c.annotations = {};
+  c.notes = (c.notes || []).filter(note => note.type !== "sequence");
+  return firstRollover;
+}
+
+function flushLiveBytes() {
+  liveRefreshTimer = null;
+  if (!pendingLiveBytes.length) return;
   const c = capture();
-  const receivedAt = performance.timeOrigin + performance.now();
-  c.byteStream.push(...Array.from(bytes, value => ({
-    value,
-    timestamp: receivedAt,
-    direction: "rx"
-  })));
+  if (!c) {
+    pendingLiveBytes = [];
+    return;
+  }
+  for (const record of pendingLiveBytes) c.byteStream.push(record);
+  pendingLiveBytes = [];
+  const trimmed = trimCapture(c);
   rebuildPreview(c);
   saveState();
-  renderHeader(); renderStats(); renderMessages(); renderAnalysis();
+  renderHeader(); renderStats(); renderMessages();
+  if ($("#patternsPanel").classList.contains("active")) renderAnalysis();
+  if (trimmed) showToast(`Capture limit reached; keeping the newest ${MAX_CAPTURE_BYTES.toLocaleString()} bytes`);
+}
+
+function ingestChunk(bytes) {
+  queueLiveBytes(bytes, "rx");
 }
 
 async function sendBytes() {
@@ -1044,13 +1133,8 @@ async function sendBytes() {
     const writer = port.writable.getWriter();
     try { await writer.write(parsed.bytes); }
     finally { writer.releaseLock(); }
-    const sentAt = performance.timeOrigin + performance.now();
-    const c = capture();
-    c.byteStream.push(...Array.from(parsed.bytes, value => ({ value, timestamp: sentAt, direction: "tx" })));
-    rebuildPreview(c);
-    saveState();
+    queueLiveBytes(parsed.bytes, "tx");
     $("#transmitHex").value = "";
-    renderHeader(); renderStats(); renderMessages(); renderAnalysis();
     updateTransmitValidity();
     showToast(`${parsed.bytes.length} byte${parsed.bytes.length === 1 ? "" : "s"} sent to RS-485`);
   } catch (error) {
@@ -1063,6 +1147,10 @@ async function sendBytes() {
 
 function toggleRecording() {
   recording = !recording;
+  if (!recording) {
+    flushLiveBytes();
+    saveState({ immediate: true });
+  }
   $("#recordBtn").classList.toggle("recording",recording);
   $("#recordBtn").innerHTML = recording ? "<span></span> Stop capture" : "<span></span> Start capture";
   renderHeader(); renderTransmitPanel();
@@ -1162,7 +1250,7 @@ $("#captureTitle").onchange = e => {
   capture().name=e.target.value.trim()||"Untitled capture"; saveState(); renderCaptureList();
 };
 $("#captureSearch").oninput = renderCaptureList;
-$("#messageFilter").oninput = renderMessages;
+$("#messageFilter").oninput = () => { $(".table-wrap").scrollTop = 0; renderMessages(); };
 $("#displayMode").onchange = renderMessages;
 $("#uniqueToggle").onchange = renderMessages;
 $("#collapseToggle").onchange = renderMessages;
@@ -1267,7 +1355,19 @@ $("#importBtn").onclick = () => $("#fileInput").click();
 $("#fileInput").onchange = e => { if(e.target.files[0]) importFile(e.target.files[0]); e.target.value=""; };
 $("#exportBtn").onclick = () => $("#exportDialog").showModal();
 $$("[data-export]").forEach(btn => btn.onclick = () => exportData(btn.dataset.export));
+$(".table-wrap").addEventListener("scroll", () => {
+  if (!virtualMessageView || virtualRenderPending) return;
+  virtualRenderPending = true;
+  requestAnimationFrame(() => {
+    virtualRenderPending = false;
+    renderVirtualRows();
+  });
+});
 document.addEventListener("click",e => { if (!e.target.closest(".header-actions")) $("#moreMenu").classList.add("hidden"); });
-window.addEventListener("beforeunload",() => { if(port) disconnectSerial(); });
+window.addEventListener("beforeunload",() => {
+  flushLiveBytes();
+  persistState();
+  if (port) disconnectSerial();
+});
 
 render();

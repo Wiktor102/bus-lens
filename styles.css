@@ -262,6 +262,7 @@ input:checked + .switch::after { left: 13px; background: var(--acid); }
 .message-table thead { position: sticky; top: 0; z-index: 2; background: #121613; }
 .message-table th { color: var(--muted); font-size: 8px; font-weight: 400; letter-spacing: .12em; text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); }
 .message-table td { border-bottom: 1px solid var(--line-soft); padding: 7px 12px; color: #b4bcb3; height: 36px; }
+.message-table .virtual-spacer > td { height: var(--virtual-space, 0); padding: 0; border: 0; }
 .message-table tr:hover td { background: #181d19; }
 .message-table tr.sequence-noted td:first-child { border-left: 2px solid var(--blue); }
 .message-table tr.unique-message td:first-child,
