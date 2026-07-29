@@ -83,7 +83,8 @@ messages can also be replayed directly from the message table.
 - **Frame changes** connects adjacent byte changes vertically whenever the
   telegrams still share at least one byte. Repeated transitions reuse the same
   frame color.
-- **Collapse runs** combines only consecutive identical telegrams and shows
-  their approximate cadence when the intervals are near-constant.
+- **Collapse runs** combines only consecutive identical telegrams outside
+  recognized sequences, and shows their approximate cadence when the intervals
+  are near-constant.
 - Pattern analysis shows bit variance, byte vocabulary, message frequency, and
   common transitions.

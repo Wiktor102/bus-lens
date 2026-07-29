@@ -947,6 +947,9 @@ function filteredMessages() {
 		} catch {}
 	}
 	const sectionsById = new Map((c?.frameSections || []).map(section => [section.id, section]));
+	// Keep recognized exchanges intact: collapsing one of their repeated states
+	// makes the sequence harder to read and breaks its row-by-row annotation.
+	const sequenceMembers = recognizeMessagePatterns(c).membership;
 	if ($("#collapseToggle").checked || c?.previewMode === "sections") {
 		const collapsed = [];
 		rows.forEach(m => {
@@ -956,7 +959,8 @@ function filteredMessages() {
 				c.previewMode === "sections"
 					? Boolean(sectionsById.get(m.sectionId)?.collapseRuns)
 					: $("#collapseToggle").checked;
-			if (collapseThisSection && isAdjacent && signature(last) === signature(m)) {
+			const isSequenceMember = sequenceMembers.has(m._originalStart) || sequenceMembers.has(last?._originalEnd);
+			if (collapseThisSection && !isSequenceMember && isAdjacent && signature(last) === signature(m)) {
 				last._repeats++;
 				last._originalEnd = m._originalEnd;
 				last._runEnd = m.timestamp;
