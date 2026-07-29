@@ -2338,6 +2338,7 @@ $$(".tab").forEach(
 function setSendPopupOpen(open, { focusComposer = false } = {}) {
 	const popup = $("#sendPanel");
 	popup.classList.toggle("collapsed", !open);
+	$("#toast").classList.toggle("send-popup-open", open);
 	$("#toggleSendPopupBtn").setAttribute("aria-expanded", String(open));
 	$("#minimizeSendPopupBtn").setAttribute("aria-label", open ? "Minimize composer" : "Open composer");
 	if (open) {

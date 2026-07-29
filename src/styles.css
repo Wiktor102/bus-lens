@@ -1998,6 +1998,10 @@ tr:hover .add-note {
 	transform: translateY(0);
 	opacity: 1;
 }
+.toast.send-popup-open {
+	left: 22px;
+	right: auto;
+}
 
 @media (max-width: 1100px) {
 	.capture-header {
