@@ -93,12 +93,12 @@ function CaptureHeader() {
 						aria-label="Capture description"
 					/>
 					<div id="captureMeta" className="capture-meta" />
-					<div id="captureSummary" className="capture-summary" aria-label="Capture summary">
-						<span>Messages <strong id="statMessages">0</strong></span>
-						<span>Unique <strong id="statUnique">0</strong></span>
-						<span title="The sum of each recording session from its first received byte to its last received byte" aria-label="Capture length: sum of each recording session from its first received byte to its last received byte">Capture length <strong id="statCaptureLength">0 s</strong></span>
-						<span title="Received raw bytes only; transmitted bytes are excluded" aria-label="Captured: received raw bytes only; transmitted bytes are excluded">Captured <strong id="statCapturedBytes">0 B</strong></span>
-					</div>
+				</div>
+				<div id="captureSummary" className="capture-summary" aria-label="Capture summary">
+					<span>Messages <strong id="statMessages">0</strong></span>
+					<span>Unique <strong id="statUnique">0</strong></span>
+					<span title="The sum of each recording session from its first received byte to its last received byte" aria-label="Capture length: sum of each recording session from its first received byte to its last received byte">Capture length <strong id="statCaptureLength">0 s</strong></span>
+					<span title="Received raw bytes only; transmitted bytes are excluded" aria-label="Captured: received raw bytes only; transmitted bytes are excluded">Captured <strong id="statCapturedBytes">0 B</strong></span>
 				</div>
 				<div className="header-actions">
 					<button id="editContextBtn" className="btn btn-secondary">
