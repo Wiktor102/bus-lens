@@ -533,6 +533,7 @@ function renderSendWorkbench() {
 		: "Connect a serial port to send. Drafts and queue stay saved locally.";
 	$("#queueCount").textContent = state.sendQueue.length;
 	$("#queueTabCount").textContent = state.sendQueue.length;
+	$("#queueTabCount").classList.toggle("hidden", !state.sendQueue.length);
 	$("#historyCount").textContent = state.sendHistory.length;
 	$("#queueList").innerHTML = state.sendQueue.length
 		? state.sendQueue
@@ -2331,10 +2332,23 @@ $$(".tab").forEach(
 			$$(".tab").forEach(x => x.classList.toggle("active", x === tab));
 			$$(".tab-panel").forEach(x => x.classList.remove("active"));
 			$(`#${tab.dataset.panel}Panel`).classList.add("active");
-			$(".toolbar").classList.toggle("send-view", tab.dataset.panel === "send");
-			if (tab.dataset.panel === "send") renderSendWorkbench();
+			$(".toolbar").classList.remove("send-view");
 		})
 );
+function setSendPopupOpen(open, { focusComposer = false } = {}) {
+	const popup = $("#sendPanel");
+	popup.classList.toggle("collapsed", !open);
+	$("#toast").classList.toggle("send-popup-open", open);
+	$("#toggleSendPopupBtn").setAttribute("aria-expanded", String(open));
+	$("#minimizeSendPopupBtn").setAttribute("aria-label", open ? "Minimize composer" : "Open composer");
+	if (open) {
+		renderSendWorkbench();
+		if (focusComposer) requestAnimationFrame(() => $("#transmitHex").focus());
+	}
+}
+$("#toggleSendPopupBtn").onclick = () =>
+	setSendPopupOpen($("#sendPanel").classList.contains("collapsed"), { focusComposer: true });
+$("#minimizeSendPopupBtn").onclick = () => setSendPopupOpen(false);
 $("#captureNoteForm").onsubmit = e => {
 	e.preventDefault();
 	if (!capture()) return;
