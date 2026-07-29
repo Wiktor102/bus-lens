@@ -1167,6 +1167,7 @@ input:checked + .switch::after {
 }
 .send-popup.collapsed .send-popup-content { display: none; }
 .send-popup.collapsed .send-popup-titlebar { border-bottom: 0; }
+.send-popup.collapsed .send-popup-minimize { display: none; }
 .send-popup-meta {
 	display: flex;
 	align-items: center;
