@@ -1328,7 +1328,7 @@ function renderVirtualRows() {
 					}" data-pattern-id="${pattern.id}" title="${escapeHtml(
 						`Sequence ${String(patternNumbers.get(pattern.id)).padStart(2, "0")} · occurrence ${patternMember.occurrenceIndex + 1} of ${pattern.starts.length} · ${pattern.length} messages${pattern.remark ? ` · shared note: ${pattern.remark}` : " · add a shared note"}`
 					)}" aria-label="${pattern.remark ? "Edit shared sequence note" : "Add shared sequence note"}">
-            <span class="sequence-rail" aria-hidden="true"></span>
+            <span class="sequence-rail" aria-hidden="true"><span class="sequence-rail-endcap"></span></span>
             ${
 						isPatternStart
 							? `<span class="sequence-summary">

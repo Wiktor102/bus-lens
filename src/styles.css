@@ -1410,7 +1410,7 @@ tr:hover .row-action,
 	min-height: 36px;
 	padding: 0;
 	border: 0;
-	background: color-mix(in srgb, var(--pattern-color) 6%, transparent);
+	background: color-mix(in srgb, var(--pattern-color) 6%, var(--panel));
 	color: var(--ink);
 	font: 10px var(--mono);
 	text-align: left;
@@ -1425,7 +1425,7 @@ tr:hover .row-action,
 }
 .sequence-group:hover,
 .sequence-group:focus-visible {
-	background: color-mix(in srgb, var(--pattern-color) 13%, transparent);
+	background: color-mix(in srgb, var(--pattern-color) 13%, var(--panel));
 	outline: 0;
 }
 .sequence-group:focus-visible {
@@ -1443,14 +1443,14 @@ tr:hover .row-action,
 	bottom: 0;
 	border-left: 2px solid var(--sequence-line);
 }
+/* The first control spans the entire repeated run. Draw both rail caps there
+   rather than relying on the last virtual row beneath it. */
 .sequence-group-start .sequence-rail::before {
 	top: 9px;
-}
-.sequence-group-end .sequence-rail::before {
 	bottom: 9px;
 }
 .sequence-group-start .sequence-rail::after,
-.sequence-group-end .sequence-rail::after {
+.sequence-group-end:not(.sequence-group-start) .sequence-rail::after {
 	content: "";
 	position: absolute;
 	left: 9px;
@@ -1460,8 +1460,22 @@ tr:hover .row-action,
 .sequence-group-start .sequence-rail::after {
 	top: 9px;
 }
-.sequence-group-end .sequence-rail::after {
+.sequence-group-end:not(.sequence-group-start) .sequence-rail::after {
 	bottom: 9px;
+}
+.sequence-rail-endcap {
+	display: none;
+}
+.sequence-group-start .sequence-rail-endcap {
+	display: block;
+	position: absolute;
+	left: 9px;
+	bottom: 9px;
+	width: 8px;
+	border-top: 2px solid var(--sequence-line);
+}
+.sequence-group:not(.sequence-group-start) .sequence-rail {
+	display: none;
 }
 .sequence-summary {
 	display: grid;
