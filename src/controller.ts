@@ -7,6 +7,7 @@ import {
 	observeElementOffset,
 	observeElementRect
 } from "@tanstack/virtual-core";
+import { collapseAdjacentRuns } from "./collapse-runs";
 
 const STORAGE_KEY = "bus-lens-state-v1";
 const $ = selector => document.querySelector(selector);
@@ -940,6 +941,7 @@ function renderStats() {
 
 function filteredMessages() {
 	const c = capture();
+	const patternMembership = recognizeMessagePatterns(c).membership;
 	const sequenceNoteRows = new Set();
 	const maxMessageIndex = (c?.messages?.length || 0) - 1;
 	for (const note of c?.notes || []) {
@@ -949,16 +951,20 @@ function filteredMessages() {
 		if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) continue;
 		for (let index = start; index <= end; index++) sequenceNoteRows.add(index);
 	}
-	let rows = (c?.messages || []).map((message, originalIndex) => ({
-		...message,
-		_originalStart: originalIndex,
-		_originalEnd: originalIndex,
-		_hasSequenceNote: sequenceNoteRows.has(originalIndex),
-		_runStart: message.timestamp,
-		_runEnd: message.timestamp,
-		_runMessages: [message],
-		_repeats: 1
-	}));
+	let rows = (c?.messages || []).map((message, originalIndex) => {
+		const patternMember = patternMembership.get(originalIndex);
+		return {
+			...message,
+			_originalStart: originalIndex,
+			_originalEnd: originalIndex,
+			_hasSequenceNote: sequenceNoteRows.has(originalIndex),
+			_patternOccurrence: patternMember ? `${patternMember.group.id}:${patternMember.occurrenceIndex}` : null,
+			_runStart: message.timestamp,
+			_runEnd: message.timestamp,
+			_runMessages: [message],
+			_repeats: 1
+		};
+	});
 	const query = $("#messageFilter").value.trim().toUpperCase();
 	if (query) {
 		const pattern = query
@@ -972,28 +978,14 @@ function filteredMessages() {
 	}
 	const sectionsById = new Map((c?.frameSections || []).map(section => [section.id, section]));
 	if ($("#collapseToggle").checked || c?.previewMode === "sections") {
-		const collapsed = [];
-		rows.forEach(m => {
-			const last = collapsed.at(-1);
-			const isAdjacent = last && m._originalStart === last._originalEnd + 1 && m.sectionId === last.sectionId;
-			const collapseThisSection =
+		rows = collapseAdjacentRuns(
+			rows,
+			m =>
 				c.previewMode === "sections"
 					? Boolean(sectionsById.get(m.sectionId)?.collapseRuns)
-					: $("#collapseToggle").checked;
-			if (
-				collapseThisSection &&
-				isAdjacent &&
-				!last._hasSequenceNote &&
-				!m._hasSequenceNote &&
-				signature(last) === signature(m)
-			) {
-				last._repeats++;
-				last._originalEnd = m._originalEnd;
-				last._runEnd = m.timestamp;
-				last._runMessages.push(m);
-			} else collapsed.push(m);
-		});
-		rows = collapsed;
+					: $("#collapseToggle").checked,
+			signature
+		);
 	}
 	return rowsWithDelta(rows.map(summarizeRunCadence));
 }
