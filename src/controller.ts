@@ -680,7 +680,7 @@ function renderFolderGroup(group, searching) {
 			<header class="folder-header">
 				<button class="folder-toggle" type="button" data-folder-toggle="${escapeHtml(group.id)}"
 					aria-expanded="${!collapsed}" aria-label="${collapsed ? "Expand" : "Collapse"} ${escapeHtml(group.name)}">
-					<span class="folder-chevron">⌄</span>
+					<span class="folder-chevron" aria-hidden="true"></span>
 					<span class="folder-icon">${FOLDER_ICON}</span>
 					<strong>${escapeHtml(group.name)}</strong>
 					<small>${group.captures.length}</small>

@@ -328,12 +328,16 @@ p {
 	text-align: right;
 }
 .folder-chevron {
-	font: 12px var(--mono);
-	transform: rotate(0);
+	width: 6px;
+	height: 6px;
+	flex: 0 0 6px;
+	border-right: 1px solid currentColor;
+	border-bottom: 1px solid currentColor;
+	transform: translateY(-1px) rotate(45deg);
 	transition: transform 0.15s ease;
 }
 .capture-folder.collapsed .folder-chevron {
-	transform: rotate(-90deg);
+	transform: translate(-1px, -1px) rotate(-45deg);
 }
 .folder-icon {
 	display: inline-flex;
