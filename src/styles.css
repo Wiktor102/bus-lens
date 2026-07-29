@@ -1103,7 +1103,7 @@ input:checked + .switch::after {
 	align-items: center;
 	gap: 9px;
 }
-.replay-link {
+.row-action {
 	flex: 0 0 auto;
 	padding: 3px 5px;
 	border: 1px solid transparent;
@@ -1113,11 +1113,11 @@ input:checked + .switch::after {
 	font: 9px var(--mono);
 	opacity: 0;
 }
-tr:hover .replay-link,
-.replay-link:focus-visible {
+tr:hover .row-action,
+.row-action:focus-visible {
 	opacity: 1;
 }
-.replay-link:hover {
+.row-action:hover {
 	color: var(--blue);
 	border-color: color-mix(in srgb, var(--blue) 38%, var(--line));
 }
@@ -1369,45 +1369,25 @@ tr:hover .replay-link,
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
-.annotation-stack {
-	display: grid;
-	gap: 3px;
-}
-.pattern-link {
-	display: flex;
+.sequence-action {
+	display: inline-flex;
 	align-items: center;
-	gap: 7px;
-	max-width: 260px;
-	padding: 0;
-	border: 0;
-	background: transparent;
-	color: var(--muted);
-	font: 9px var(--mono);
-	text-align: left;
-	white-space: nowrap;
-	cursor: pointer;
+	justify-content: center;
+	width: 18px;
+	padding-inline: 0;
+	opacity: 0.72;
 }
-.pattern-link i {
+.sequence-action i {
 	flex: 0 0 auto;
 	width: 7px;
 	height: 7px;
 	background: var(--pattern-color);
 	box-shadow: 0 0 8px color-mix(in srgb, var(--pattern-color) 45%, transparent);
 }
-.pattern-link.remarked {
-	color: var(--ink);
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-.pattern-link:hover {
-	color: var(--pattern-color);
-}
-.add-note {
-	opacity: 0;
-	color: var(--faint);
-}
-tr:hover .add-note {
-	opacity: 1;
+.sequence-action.remarked i {
+	box-shadow:
+		0 0 8px color-mix(in srgb, var(--pattern-color) 55%, transparent),
+		0 0 0 1px color-mix(in srgb, var(--pattern-color) 72%, white);
 }
 .empty-state {
 	text-align: center;

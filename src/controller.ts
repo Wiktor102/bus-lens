@@ -1243,18 +1243,19 @@ function renderVirtualRows() {
 					: "";
 			previousSectionId = m.sectionId;
 			const patternStyle = pattern ? ` style="--pattern-color:${pattern.color}"` : "";
-			const noteControl = `<button class="note-link ${messageNote || sequenceNote ? "" : "add-note"}" data-message-note="${m.id}">${escapeHtml(messageNote?.text || (sequenceNote ? `↳ ${sequenceNote.text}` : "＋ Add note"))}</button>`;
-			const annotationControl = `<div class="${pattern ? "annotation-stack" : "row-actions"}">
+			const noteControl = messageNote || sequenceNote
+				? `<button class="note-link" data-message-note="${m.id}">${escapeHtml(messageNote?.text || `↳ ${sequenceNote.text}`)}</button>`
+				: `<button class="row-action add-note" data-message-note="${m.id}">＋ Add note</button>`;
+			const annotationControl = `<div class="row-actions">
           ${
 						pattern
-							? `<button class="pattern-link ${pattern.remark ? "remarked" : ""}" data-pattern-id="${pattern.id}" title="Add or edit a shared remark for this recognized sequence">
+							? `<button class="row-action sequence-action ${pattern.remark ? "remarked" : ""}" data-pattern-id="${pattern.id}" title="${pattern.remark ? `Sequence remark: ${escapeHtml(pattern.remark)}` : `Repeated ${pattern.length}-message sequence · add a shared remark`}" aria-label="${pattern.remark ? "Edit sequence remark" : "Add sequence remark"}">
             <i style="--pattern-color:${pattern.color}"></i>
-            ${pattern.remark ? escapeHtml(pattern.remark) : `${pattern.length}-message sequence`}
           </button>`
 							: ""
 					}
           ${noteControl}
-          <button class="replay-link" data-message-replay="${m.id}" title="Replay this message on the connected serial port">↻ Replay</button>
+          <button class="row-action replay-link" data-message-replay="${m.id}" title="Replay this message on the connected serial port">↻ Replay</button>
         </div>`;
 			return `${sectionDivider}<tr data-message-id="${m.id}" class="${rowClasses}"${patternStyle} title="${escapeHtml(rowTitles)}">
       <td>${rowLabel}</td>
