@@ -85,19 +85,21 @@ function CaptureHeader() {
 						defaultValue="Overview · Speed 1"
 						aria-label="Capture title"
 					/>
+					<textarea
+						id="captureDescription"
+						className="capture-description"
+						rows={1}
+						placeholder="Add a description…"
+						aria-label="Capture description"
+					/>
 					<div id="captureMeta" className="capture-meta" />
+					<div id="captureSummary" className="capture-summary" aria-label="Capture summary">
+						<span>Messages <strong id="statMessages">0</strong></span>
+						<span>Unique <strong id="statUnique">0</strong></span>
+						<span title="The sum of each recording session from its first received byte to its last received byte" aria-label="Capture length: sum of each recording session from its first received byte to its last received byte">Capture length <strong id="statCaptureLength">0 s</strong></span>
+						<span title="Received raw bytes only; transmitted bytes are excluded" aria-label="Captured: received raw bytes only; transmitted bytes are excluded">Captured <strong id="statCapturedBytes">0 B</strong></span>
+					</div>
 				</div>
-				<section id="captureNoteRail" className="capture-note-rail" aria-label="Capture notes">
-					<header>
-						<span className="eyebrow">
-							Capture notes <i id="headerNoteCount">0</i>
-						</span>
-						<button id="addCaptureNoteBtn" className="text-btn" type="button">
-							＋ Add note
-						</button>
-					</header>
-					<div id="headerCaptureNotes" className="header-capture-notes" />
-				</section>
 				<div className="header-actions">
 					<button id="editContextBtn" className="btn btn-secondary">
 						Edit context
@@ -112,28 +114,6 @@ function CaptureHeader() {
 							Delete capture
 						</button>
 					</div>
-				</div>
-			</div>
-			<div className="stat-strip">
-				<div>
-					<span>MESSAGES</span>
-					<strong id="statMessages">0</strong>
-				</div>
-				<div>
-					<span>UNIQUE</span>
-					<strong id="statUnique">0</strong>
-				</div>
-				<div>
-					<span>DUPLICATION</span>
-					<strong id="statDuplicate">0%</strong>
-				</div>
-				<div>
-					<span>AVG. INTERVAL</span>
-					<strong id="statInterval">—</strong>
-				</div>
-				<div>
-					<span>BYTE VARIANTS</span>
-					<strong id="statVariants">—</strong>
 				</div>
 			</div>
 		</>
@@ -203,6 +183,19 @@ function Toolbar() {
 					<input id="collapseToggle" type="checkbox" />
 					<span className="switch" /> Collapse runs
 				</label>
+				<button
+					id="toggleMessageFilterBtn"
+					className="icon-btn message-filter-toggle"
+					type="button"
+					title="Show message filter"
+					aria-label="Show message filter"
+					aria-expanded="false"
+					aria-controls="streamFilter"
+				>
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M3.75 5.25h16.5l-6.6 7.45v5.3l-3.3 1.75V12.7l-6.6-7.45Z" />
+					</svg>
+				</button>
 			</div>
 		</div>
 	);
@@ -211,7 +204,7 @@ function Toolbar() {
 function StreamPanel() {
 	return (
 		<div id="streamPanel" className="tab-panel active">
-			<div className="stream-filter">
+			<div id="streamFilter" className="stream-filter collapsed">
 				<label>
 					<span>⌕</span>
 					<input id="messageFilter" placeholder="Filter bytes, e.g. C2 ?? 5D" />
@@ -419,16 +412,9 @@ function NotesPanel() {
 					<div id="notesList" className="notes-list" />
 				</div>
 				<form id="captureNoteForm" className="note-composer">
-					<span className="eyebrow">Capture note</span>
-					<h2>Record an observation</h2>
-					<label className="field">
-						Attach to
-						<select id="noteScope" defaultValue="capture">
-							<option value="capture">Entire capture</option>
-							<option value="sequence">Message sequence</option>
-						</select>
-					</label>
-					<div id="sequenceRange" className="sequence-range hidden">
+					<span className="eyebrow">Sequence observation</span>
+					<h2>Record a message sequence</h2>
+					<div id="sequenceRange" className="sequence-range">
 						<label className="field">
 							From row
 							<input id="sequenceStart" type="number" min="1" defaultValue="1" />
@@ -441,10 +427,10 @@ function NotesPanel() {
 					<textarea
 						id="captureNoteText"
 						required
-						placeholder="What did the controller do? What changed on the bus?"
+						placeholder="What does this message sequence appear to represent?"
 					/>
 					<button className="btn btn-primary" type="submit">
-						Add note
+						Add sequence note
 					</button>
 				</form>
 			</div>
@@ -587,46 +573,6 @@ function AnnotationDialog() {
 	);
 }
 
-function CaptureNoteDialog() {
-	return (
-		<dialog id="captureNoteDialog" className="modal note-modal">
-			<form id="captureNoteEditorForm" method="dialog">
-				<div className="modal-heading">
-					<div>
-						<span className="eyebrow">Capture notebook</span>
-						<h2 id="captureNoteEditorTitle">Add capture note</h2>
-					</div>
-					<button className="icon-btn" value="cancel" formMethod="dialog" formNoValidate aria-label="Close">
-						×
-					</button>
-				</div>
-				<label className="field">
-					Note
-					<textarea
-						id="captureNoteEditorText"
-						placeholder="What should remain visible while analyzing this capture?"
-					/>
-				</label>
-				<div id="captureNoteEditorHint" className="validation-hint" aria-live="polite">
-					Enter a note to enable saving.
-				</div>
-				<div className="modal-actions">
-					<button id="deleteCaptureNoteBtn" className="btn btn-danger" type="button">
-						Delete note
-					</button>
-					<span />
-					<button className="btn btn-secondary" value="cancel" formMethod="dialog" formNoValidate>
-						Cancel
-					</button>
-					<button id="saveCaptureNoteBtn" className="btn btn-primary" value="default" disabled>
-						Save note
-					</button>
-				</div>
-			</form>
-		</dialog>
-	);
-}
-
 function PatternRemarkDialog() {
 	return (
 		<dialog id="patternDialog" className="modal note-modal">
@@ -741,7 +687,6 @@ function App() {
 			<ContextDialog />
 			<SectionsDialog />
 			<AnnotationDialog />
-			<CaptureNoteDialog />
 			<PatternRemarkDialog />
 			<ExportDialog />
 			<FolderDialog />
