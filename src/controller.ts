@@ -687,7 +687,7 @@ function renderFolderGroup(group, searching) {
 				</button>
 				${
 					group.system
-						? ""
+						? `<span class="folder-actions folder-actions-placeholder" aria-hidden="true"></span>`
 						: `<span class="folder-actions">
 							<button type="button" data-folder-rename="${escapeHtml(group.id)}" title="Rename folder" aria-label="Rename ${escapeHtml(group.name)}">✎</button>
 							<button type="button" data-folder-delete="${escapeHtml(group.id)}" title="Delete folder" aria-label="Delete ${escapeHtml(group.name)}">×</button>

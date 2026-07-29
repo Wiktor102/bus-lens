@@ -353,8 +353,12 @@ p {
 }
 .folder-actions {
 	display: flex;
+	flex: 0 0 48px;
 	opacity: 0;
 	transition: opacity 0.15s ease;
+}
+.folder-actions-placeholder {
+	pointer-events: none;
 }
 .folder-header:hover .folder-actions,
 .folder-actions:focus-within {
