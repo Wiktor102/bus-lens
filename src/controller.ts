@@ -39,6 +39,7 @@ const LIVE_REFRESH_MS = 120;
 const VIRTUAL_ROW_HEIGHT = 56;
 const VIRTUAL_OVERSCAN = 8;
 const MAX_SEND_HISTORY = 250;
+const FOLDER_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.75 6.75h5.1l1.8 2.1h9.6v8.4a1.5 1.5 0 0 1-1.5 1.5h-15a1.5 1.5 0 0 1-1.5-1.5v-9a1.5 1.5 0 0 1 1.5-1.5Z" /><path d="M2.25 10.35h18" /></svg>`;
 
 const demoCaptures = [
 	{
@@ -680,14 +681,14 @@ function renderFolderGroup(group, searching) {
 			<header class="folder-header">
 				<button class="folder-toggle" type="button" data-folder-toggle="${escapeHtml(group.id)}"
 					aria-expanded="${!collapsed}" aria-label="${collapsed ? "Expand" : "Collapse"} ${escapeHtml(group.name)}">
-					<span class="folder-chevron">⌄</span>
-					<span class="folder-icon" aria-hidden="true">${group.system ? "◇" : "▱"}</span>
+					<span class="folder-chevron" aria-hidden="true"></span>
+					<span class="folder-icon">${FOLDER_ICON}</span>
 					<strong>${escapeHtml(group.name)}</strong>
 					<small>${group.captures.length}</small>
 				</button>
 				${
 					group.system
-						? ""
+						? `<span class="folder-actions folder-actions-placeholder" aria-hidden="true"></span>`
 						: `<span class="folder-actions">
 							<button type="button" data-folder-rename="${escapeHtml(group.id)}" title="Rename folder" aria-label="Rename ${escapeHtml(group.name)}">✎</button>
 							<button type="button" data-folder-delete="${escapeHtml(group.id)}" title="Delete folder" aria-label="Delete ${escapeHtml(group.name)}">×</button>
