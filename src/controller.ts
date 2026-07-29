@@ -7,6 +7,7 @@ import {
 	observeElementOffset,
 	observeElementRect
 } from "@tanstack/virtual-core";
+import { collapseAdjacentRuns, countVisibleRowsByPatternOccurrence } from "./collapse-runs";
 
 const STORAGE_KEY = "bus-lens-state-v1";
 const $ = selector => document.querySelector(selector);
@@ -940,15 +941,30 @@ function renderStats() {
 
 function filteredMessages() {
 	const c = capture();
-	let rows = (c?.messages || []).map((message, originalIndex) => ({
-		...message,
-		_originalStart: originalIndex,
-		_originalEnd: originalIndex,
-		_runStart: message.timestamp,
-		_runEnd: message.timestamp,
-		_runMessages: [message],
-		_repeats: 1
-	}));
+	const patternMembership = recognizeMessagePatterns(c).membership;
+	const sequenceNoteRows = new Set();
+	const maxMessageIndex = (c?.messages?.length || 0) - 1;
+	for (const note of c?.notes || []) {
+		if (note.type !== "sequence") continue;
+		const start = Math.max(0, Math.trunc(Number(note.start)) - 1);
+		const end = Math.min(maxMessageIndex, Math.trunc(Number(note.end)) - 1);
+		if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) continue;
+		for (let index = start; index <= end; index++) sequenceNoteRows.add(index);
+	}
+	let rows = (c?.messages || []).map((message, originalIndex) => {
+		const patternMember = patternMembership.get(originalIndex);
+		return {
+			...message,
+			_originalStart: originalIndex,
+			_originalEnd: originalIndex,
+			_hasSequenceNote: sequenceNoteRows.has(originalIndex),
+			_patternOccurrence: patternMember ? `${patternMember.group.id}:${patternMember.occurrenceIndex}` : null,
+			_runStart: message.timestamp,
+			_runEnd: message.timestamp,
+			_runMessages: [message],
+			_repeats: 1
+		};
+	});
 	const query = $("#messageFilter").value.trim().toUpperCase();
 	if (query) {
 		const pattern = query
@@ -962,22 +978,14 @@ function filteredMessages() {
 	}
 	const sectionsById = new Map((c?.frameSections || []).map(section => [section.id, section]));
 	if ($("#collapseToggle").checked || c?.previewMode === "sections") {
-		const collapsed = [];
-		rows.forEach(m => {
-			const last = collapsed.at(-1);
-			const isAdjacent = last && m._originalStart === last._originalEnd + 1 && m.sectionId === last.sectionId;
-			const collapseThisSection =
+		rows = collapseAdjacentRuns(
+			rows,
+			m =>
 				c.previewMode === "sections"
 					? Boolean(sectionsById.get(m.sectionId)?.collapseRuns)
-					: $("#collapseToggle").checked;
-			if (collapseThisSection && isAdjacent && signature(last) === signature(m)) {
-				last._repeats++;
-				last._originalEnd = m._originalEnd;
-				last._runEnd = m.timestamp;
-				last._runMessages.push(m);
-			} else collapsed.push(m);
-		});
-		rows = collapsed;
+					: $("#collapseToggle").checked,
+			signature
+		);
 	}
 	return rowsWithDelta(rows.map(summarizeRunCadence));
 }
@@ -1169,6 +1177,7 @@ function renderMessages() {
 		? transitionFrames(matchingRows)
 		: matchingRows.map(row => row.bytes.map(() => ({ incoming: null, outgoing: null })));
 	const patternNumbers = new Map(patterns.groups.map((group, index) => [group.id, index + 1]));
+	const visiblePatternRowCounts = countVisibleRowsByPatternOccurrence(matchingRows);
 	const sectionNumbers = new Map((c.frameSections || []).map((section, index) => [section.id, index + 1]));
 	const sectionsById = new Map((c.frameSections || []).map(section => [section.id, section]));
 	const entries = [];
@@ -1203,6 +1212,7 @@ function renderMessages() {
 		countsByPosition,
 		patterns,
 		patternNumbers,
+		visiblePatternRowCounts,
 		entries,
 		frames,
 		mode: $("#displayMode").value,
@@ -1260,8 +1270,19 @@ function updateMessageVirtualizer() {
 function renderVirtualRows() {
 	const view = virtualMessageView;
 	if (!view || !messageVirtualizer) return;
-	const { c, matchingRows, signatureCounts, countsByPosition, patterns, patternNumbers, entries, frames, mode, highlight } =
-		view;
+	const {
+		c,
+		matchingRows,
+		signatureCounts,
+		countsByPosition,
+		patterns,
+		patternNumbers,
+		visiblePatternRowCounts,
+		entries,
+		frames,
+		mode,
+		highlight
+	} = view;
 	const virtualItems = messageVirtualizer.getVirtualItems();
 	const renderKey = `${virtualViewVersion}|${messageVirtualizer.getTotalSize()}|${virtualItems
 		.map(item => `${item.index}:${item.start}:${item.size}`)
@@ -1291,7 +1312,13 @@ function renderVirtualRows() {
 			const patternMember = patterns.membership.get(m._originalStart);
 			const pattern = patternMember?.group;
 			const isPatternStart = patternMember?.offset === 0;
-			const isPatternEnd = patternMember?.offset === pattern?.length - 1;
+			const patternEndMember = patterns.membership.get(m._originalEnd);
+			const isPatternEnd =
+				pattern &&
+				patternEndMember?.group.id === pattern.id &&
+				patternEndMember.occurrenceIndex === patternMember.occurrenceIndex &&
+				patternEndMember.offset === pattern.length - 1;
+			const visiblePatternRowCount = visiblePatternRowCounts.get(m._patternOccurrence) || pattern?.length;
 			const originalRow = m._originalStart + 1;
 			const sequenceNote = (c.notes || []).find(
 				n => n.type === "sequence" && originalRow >= n.start && originalRow <= n.end
@@ -1321,7 +1348,7 @@ function renderVirtualRows() {
 				.filter(Boolean)
 				.join(" · ");
 			const patternStyle = pattern
-				? `;--pattern-color:${pattern.color};--sequence-row-count:${pattern.length};--sequence-row-height:${virtualItem.size}px`
+				? `;--pattern-color:${pattern.color};--sequence-row-count:${visiblePatternRowCount};--sequence-row-height:${virtualItem.size}px`
 				: "";
 			const sequenceControl = pattern
 				? `<td class="sequence-cell" style="--pattern-color:${pattern.color}">
