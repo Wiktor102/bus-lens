@@ -1460,8 +1460,7 @@ tr:hover .row-action,
 	color: var(--muted);
 }
 .sequence-continuation {
-	align-self: center;
-	color: color-mix(in srgb, var(--pattern-color) 70%, var(--muted));
+	min-height: 100%;
 }
 .empty-state {
 	text-align: center;

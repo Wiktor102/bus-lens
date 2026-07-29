@@ -1257,7 +1257,7 @@ function renderVirtualRows() {
                 <span class="sequence-occurrence">${patternMember.occurrenceIndex + 1} / ${pattern.starts.length}</span>
                 <span class="sequence-note ${pattern.remark ? "" : "empty"}">${escapeHtml(pattern.remark || "+ Add shared note")}</span>
               </span>`
-							: `<span class="sequence-continuation">↳</span>`
+							: `<span class="sequence-continuation" aria-hidden="true"></span>`
 					}
           </button>
         </td>`
