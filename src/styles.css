@@ -211,6 +211,16 @@ button {
 	font-size: 18px;
 	border: 1px solid var(--line);
 }
+.icon-btn svg {
+	width: 17px;
+	height: 17px;
+	fill: none;
+	stroke: currentColor;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 1.6;
+	vertical-align: middle;
+}
 
 .workspace {
 	display: grid;
@@ -311,7 +321,11 @@ p {
 .folder-toggle small {
 	margin-left: auto;
 	color: var(--faint);
-	font: 9px var(--mono);
+	min-width: 2.5ch;
+	font: 600 11px var(--mono);
+	font-variant-numeric: tabular-nums;
+	letter-spacing: 0;
+	text-align: right;
 }
 .folder-chevron {
 	font: 12px var(--mono);
@@ -322,8 +336,20 @@ p {
 	transform: rotate(-90deg);
 }
 .folder-icon {
+	display: inline-flex;
+	flex: 0 0 auto;
 	color: var(--acid-dim);
-	font: 14px var(--mono);
+	width: 15px;
+	height: 15px;
+}
+.folder-icon svg {
+	width: 100%;
+	height: 100%;
+	fill: none;
+	stroke: currentColor;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 1.6;
 }
 .folder-actions {
 	display: flex;

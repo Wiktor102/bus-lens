@@ -40,7 +40,10 @@ function Sidebar() {
 				</div>
 				<div className="sidebar-create-actions">
 					<button id="newFolderBtn" className="icon-btn" title="New folder" aria-label="New folder">
-						▱
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M3.75 6.75h5.1l1.8 2.1h9.6v8.4a1.5 1.5 0 0 1-1.5 1.5h-15a1.5 1.5 0 0 1-1.5-1.5v-9a1.5 1.5 0 0 1 1.5-1.5Z" />
+							<path d="M2.25 10.35h18" />
+						</svg>
 					</button>
 					<button id="newCaptureBtn" className="icon-btn" title="New capture" aria-label="New capture">
 						＋
