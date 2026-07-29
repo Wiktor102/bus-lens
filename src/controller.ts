@@ -940,10 +940,20 @@ function renderStats() {
 
 function filteredMessages() {
 	const c = capture();
+	const sequenceNoteRows = new Set();
+	const maxMessageIndex = (c?.messages?.length || 0) - 1;
+	for (const note of c?.notes || []) {
+		if (note.type !== "sequence") continue;
+		const start = Math.max(0, Math.trunc(Number(note.start)) - 1);
+		const end = Math.min(maxMessageIndex, Math.trunc(Number(note.end)) - 1);
+		if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) continue;
+		for (let index = start; index <= end; index++) sequenceNoteRows.add(index);
+	}
 	let rows = (c?.messages || []).map((message, originalIndex) => ({
 		...message,
 		_originalStart: originalIndex,
 		_originalEnd: originalIndex,
+		_hasSequenceNote: sequenceNoteRows.has(originalIndex),
 		_runStart: message.timestamp,
 		_runEnd: message.timestamp,
 		_runMessages: [message],
@@ -970,7 +980,13 @@ function filteredMessages() {
 				c.previewMode === "sections"
 					? Boolean(sectionsById.get(m.sectionId)?.collapseRuns)
 					: $("#collapseToggle").checked;
-			if (collapseThisSection && isAdjacent && signature(last) === signature(m)) {
+			if (
+				collapseThisSection &&
+				isAdjacent &&
+				!last._hasSequenceNote &&
+				!m._hasSequenceNote &&
+				signature(last) === signature(m)
+			) {
 				last._repeats++;
 				last._originalEnd = m._originalEnd;
 				last._runEnd = m.timestamp;
