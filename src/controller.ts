@@ -1186,12 +1186,13 @@ function renderVirtualRows() {
 			? visibleSummary
 			: `${visibleSummary} · ${telegramCount.toLocaleString()} telegrams`;
 	let previousSectionId = start ? matchingRows[start - 1]?.sectionId : null;
+	const patternNumbers = new Map(patterns.groups.map((group, index) => [group.id, index + 1]));
 	const topSpacer = start
-		? `<tr class="virtual-spacer" aria-hidden="true"><td colspan="6" style="height:${start * VIRTUAL_ROW_HEIGHT}px"></td></tr>`
+		? `<tr class="virtual-spacer" aria-hidden="true"><td colspan="7" style="height:${start * VIRTUAL_ROW_HEIGHT}px"></td></tr>`
 		: "";
 	const bottomSpacer =
 		end < matchingRows.length
-			? `<tr class="virtual-spacer" aria-hidden="true"><td colspan="6" style="height:${(matchingRows.length - end) * VIRTUAL_ROW_HEIGHT}px"></td></tr>`
+			? `<tr class="virtual-spacer" aria-hidden="true"><td colspan="7" style="height:${(matchingRows.length - end) * VIRTUAL_ROW_HEIGHT}px"></td></tr>`
 			: "";
 	const rowsHtml = rows
 		.map((m, i) => {
@@ -1211,9 +1212,7 @@ function renderVirtualRows() {
 				sequenceNote ? "sequence-noted" : "",
 				isUnique ? "unique-message" : "",
 				hasSentBytes ? "sent-message" : "",
-				pattern ? "pattern-member" : "",
-				patternMember?.offset === 0 ? "pattern-start" : "",
-				patternMember?.offset === pattern?.length - 1 ? "pattern-end" : ""
+				pattern ? "pattern-member" : ""
 			]
 				.filter(Boolean)
 				.join(" ");
@@ -1232,7 +1231,7 @@ function renderVirtualRows() {
 				c.previewMode === "sections" && m.sectionId !== previousSectionId
 					? `<tr class="section-divider">
           <td class="section-number">${String(sectionNumber).padStart(2, "0")}</td>
-          <td colspan="5"><div class="section-header-content">
+          <td colspan="6"><div class="section-header-content">
             <span>Section · raw byte ${section.start + 1}</span>
             <div class="section-header-controls">
               <label>Message length <input data-section-length="${section.id}" type="number" min="1" max="1024" value="${section.frameSize}" /> bytes</label>
@@ -1243,17 +1242,30 @@ function renderVirtualRows() {
 					: "";
 			previousSectionId = m.sectionId;
 			const patternStyle = pattern ? ` style="--pattern-color:${pattern.color}"` : "";
+			const sequenceControl = pattern
+				? `<td class="sequence-cell"${patternStyle}>
+          <button class="sequence-group ${patternMember.offset === 0 ? "sequence-group-start" : ""} ${
+						patternMember.offset === pattern.length - 1 ? "sequence-group-end" : ""
+					}" data-pattern-id="${pattern.id}" title="${escapeHtml(
+						`Sequence ${String(patternNumbers.get(pattern.id)).padStart(2, "0")} · occurrence ${patternMember.occurrenceIndex + 1} of ${pattern.starts.length} · ${pattern.length} messages${pattern.remark ? ` · shared note: ${pattern.remark}` : " · add a shared note"}`
+					)}" aria-label="${pattern.remark ? "Edit shared sequence note" : "Add shared sequence note"}">
+            <span class="sequence-rail" aria-hidden="true"></span>
+            ${
+						patternMember.offset === 0
+							? `<span class="sequence-summary">
+                <span class="sequence-label">SEQ ${String(patternNumbers.get(pattern.id)).padStart(2, "0")} <b>${pattern.length} rows</b></span>
+                <span class="sequence-occurrence">${patternMember.occurrenceIndex + 1} / ${pattern.starts.length}</span>
+                <span class="sequence-note ${pattern.remark ? "" : "empty"}">${escapeHtml(pattern.remark || "+ Add shared note")}</span>
+              </span>`
+							: `<span class="sequence-continuation">↳</span>`
+					}
+          </button>
+        </td>`
+				: `<td class="sequence-cell"><span class="sequence-empty">—</span></td>`;
 			const noteControl = messageNote || sequenceNote
 				? `<button class="note-link" data-message-note="${m.id}">${escapeHtml(messageNote?.text || `↳ ${sequenceNote.text}`)}</button>`
 				: `<button class="row-action add-note" data-message-note="${m.id}">＋ Add note</button>`;
 			const annotationControl = `<div class="row-actions">
-          ${
-						pattern
-							? `<button class="row-action sequence-action ${pattern.remark ? "remarked" : ""}" data-pattern-id="${pattern.id}" title="${pattern.remark ? `Sequence remark: ${escapeHtml(pattern.remark)}` : `Repeated ${pattern.length}-message sequence · add a shared remark`}" aria-label="${pattern.remark ? "Edit sequence remark" : "Add sequence remark"}">
-            <i style="--pattern-color:${pattern.color}"></i>
-          </button>`
-							: ""
-					}
           ${noteControl}
           <button class="row-action replay-link" data-message-replay="${m.id}" title="Replay this message on the connected serial port">↻ Replay</button>
         </div>`;
@@ -1261,6 +1273,7 @@ function renderVirtualRows() {
       <td>${rowLabel}</td>
       <td>${formatTime(m.timestamp)}${directionTag ? `<span class="direction-tag">${directionTag}</span>` : ""}</td>
       <td>${formatDelta(m._delta)}</td>
+      ${sequenceControl}
       <td><div class="byte-row">${m.bytes
 			.map((byte, pos) => {
 				const count = countsByPosition[pos]?.get(byte) || 0;
@@ -1733,7 +1746,7 @@ function savePatternRemark() {
 	saveState();
 	renderMessages();
 	$("#patternDialog").close();
-	showToast(text ? "Sequence remark saved" : "Sequence remark removed");
+	showToast(text ? "Sequence note saved" : "Sequence note removed");
 }
 
 async function connectSerial() {

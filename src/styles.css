@@ -1212,16 +1212,6 @@ tr:hover .row-action,
 .message-table tr.sent-message td:first-child {
 	border-left: 2px solid var(--blue);
 }
-.message-table tr.pattern-member td:first-child {
-	box-shadow: inset 3px 0 var(--pattern-color);
-	background: linear-gradient(90deg, color-mix(in srgb, var(--pattern-color) 10%, transparent), transparent 88%);
-}
-.message-table tr.pattern-start td:first-child {
-	border-top: 1px solid color-mix(in srgb, var(--pattern-color) 60%, transparent);
-}
-.message-table tr.pattern-end td:first-child {
-	border-bottom-color: color-mix(in srgb, var(--pattern-color) 55%, var(--line-soft));
-}
 .direction-tag {
 	display: inline-block;
 	margin-left: 7px;
@@ -1242,7 +1232,11 @@ tr:hover .row-action,
 .message-table th:nth-child(3) {
 	width: 90px;
 }
-.message-table th:nth-child(5) {
+.message-table th.sequence-heading,
+.message-table td.sequence-cell {
+	width: 190px;
+}
+.message-table th:nth-child(6) {
 	width: 120px;
 }
 .byte-row {
@@ -1369,25 +1363,105 @@ tr:hover .row-action,
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
-.sequence-action {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	width: 18px;
-	padding-inline: 0;
-	opacity: 0.72;
+.message-table td.sequence-cell {
+	padding: 0;
+	vertical-align: middle;
 }
-.sequence-action i {
-	flex: 0 0 auto;
-	width: 7px;
-	height: 7px;
-	background: var(--pattern-color);
-	box-shadow: 0 0 8px color-mix(in srgb, var(--pattern-color) 45%, transparent);
+.sequence-empty {
+	display: block;
+	padding: 7px 12px;
+	color: var(--faint);
+	text-align: center;
 }
-.sequence-action.remarked i {
-	box-shadow:
-		0 0 8px color-mix(in srgb, var(--pattern-color) 55%, transparent),
-		0 0 0 1px color-mix(in srgb, var(--pattern-color) 72%, white);
+.sequence-group {
+	--sequence-line: color-mix(in srgb, var(--pattern-color) 75%, var(--line));
+	position: relative;
+	display: grid;
+	grid-template-columns: 19px minmax(0, 1fr);
+	align-items: stretch;
+	width: 100%;
+	min-height: 36px;
+	padding: 0;
+	border: 0;
+	background: color-mix(in srgb, var(--pattern-color) 6%, transparent);
+	color: var(--ink);
+	font: 10px var(--mono);
+	text-align: left;
+	cursor: pointer;
+}
+.sequence-group:hover,
+.sequence-group:focus-visible {
+	background: color-mix(in srgb, var(--pattern-color) 13%, transparent);
+	outline: 0;
+}
+.sequence-group:focus-visible {
+	box-shadow: inset 0 0 0 1px var(--pattern-color);
+}
+.sequence-rail {
+	position: relative;
+	min-height: 100%;
+}
+.sequence-rail::before {
+	content: "";
+	position: absolute;
+	left: 9px;
+	top: 0;
+	bottom: 0;
+	border-left: 2px solid var(--sequence-line);
+}
+.sequence-group-start .sequence-rail::before {
+	top: 9px;
+}
+.sequence-group-end .sequence-rail::before {
+	bottom: 9px;
+}
+.sequence-group-start .sequence-rail::after,
+.sequence-group-end .sequence-rail::after {
+	content: "";
+	position: absolute;
+	left: 9px;
+	width: 8px;
+	border-top: 2px solid var(--sequence-line);
+}
+.sequence-group-start .sequence-rail::after {
+	top: 9px;
+}
+.sequence-group-end .sequence-rail::after {
+	bottom: 9px;
+}
+.sequence-summary {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 3px 6px;
+	padding: 7px 9px 7px 1px;
+	line-height: 1.15;
+}
+.sequence-label {
+	color: var(--pattern-color);
+	letter-spacing: 0.06em;
+}
+.sequence-label b {
+	color: var(--muted);
+	font-weight: 400;
+	letter-spacing: 0;
+}
+.sequence-occurrence {
+	color: var(--faint);
+}
+.sequence-note {
+	grid-column: 1 / -1;
+	min-width: 0;
+	color: var(--ink);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.sequence-note.empty {
+	color: var(--muted);
+}
+.sequence-continuation {
+	align-self: center;
+	color: color-mix(in srgb, var(--pattern-color) 70%, var(--muted));
 }
 .empty-state {
 	text-align: center;
