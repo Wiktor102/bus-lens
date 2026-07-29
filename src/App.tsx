@@ -150,9 +150,6 @@ function Toolbar() {
 				<button className="tab" data-panel="notes">
 					Notes <span id="notesCount">0</span>
 				</button>
-				<button className="tab transmit-tab" data-panel="send">
-					Send <span id="queueTabCount">0</span>
-				</button>
 			</div>
 			<div className="toolbar-controls">
 				<label className="compact-select">
@@ -256,26 +253,38 @@ function StreamPanel() {
 
 function SendPanel() {
 	return (
-		<div id="sendPanel" className="tab-panel send-workbench">
-			<div className="send-workbench-header">
-				<div>
-					<span className="eyebrow">Serial transmit</span>
-					<h2>Send workbench</h2>
+		<aside id="sendPanel" className="send-popup collapsed" aria-label="Serial message composer">
+			<header className="send-popup-titlebar">
+				<button
+					id="toggleSendPopupBtn"
+					className="send-popup-toggle"
+					type="button"
+					aria-expanded="false"
+					aria-controls="sendPopupContent"
+				>
+					<span className="send-popup-title"><i aria-hidden="true" /> Compose serial message</span>
+					<span id="queueTabCount" className="send-popup-count" aria-label="Messages in queue">0</span>
+				</button>
+				<button id="minimizeSendPopupBtn" className="send-popup-minimize" type="button" aria-label="Minimize composer">
+					—
+				</button>
+			</header>
+			<div id="sendPopupContent" className="send-popup-content">
+				<div className="send-popup-meta">
 					<p id="sendConnectionHint">Connect a serial port to send. Drafts and queue stay saved locally.</p>
+					<span id="sendStatusBadge" className="send-status">
+						<i /> OFFLINE
+					</span>
 				</div>
-				<span id="sendStatusBadge" className="send-status">
-					<i /> OFFLINE
-				</span>
-			</div>
-			<div className="send-grid">
-				<section className="send-card composer-card" aria-label="Compose serial message">
-					<div className="send-card-heading">
-						<div>
-							<span className="eyebrow">Composer</span>
-							<h3>Hex message</h3>
+				<div className="send-grid">
+					<section className="send-card composer-card" aria-label="Compose serial message">
+						<div className="send-card-heading">
+							<div>
+								<span className="eyebrow">Composer</span>
+								<h3>Hex message</h3>
+							</div>
+							<span className="keyboard-hint">Enter to send · Shift+Enter to queue</span>
 						</div>
-						<span className="keyboard-hint">Enter to send · Shift+Enter to queue</span>
-					</div>
 					<label className="transmit-input">
 						<span>HEX</span>
 						<input
@@ -298,9 +307,9 @@ function SendPanel() {
 							Send now
 						</button>
 					</div>
-				</section>
+					</section>
 
-				<section className="send-card queue-card" aria-label="Timed transmit queue">
+					<section className="send-card queue-card" aria-label="Timed transmit queue">
 					<div className="send-card-heading">
 						<div>
 							<span className="eyebrow">Sequence</span>
@@ -325,9 +334,9 @@ function SendPanel() {
 							Run queue
 						</button>
 					</div>
-				</section>
+					</section>
 
-				<section className="send-card history-card" aria-label="Transmit history">
+					<section className="send-card history-card" aria-label="Transmit history">
 					<div className="send-card-heading">
 						<div>
 							<span className="eyebrow">Local history</span>
@@ -338,9 +347,10 @@ function SendPanel() {
 						</button>
 					</div>
 					<div id="sendHistory" className="send-history" />
-				</section>
+					</section>
+				</div>
 			</div>
-		</div>
+		</aside>
 	);
 }
 
@@ -718,12 +728,12 @@ function App() {
 						<CaptureHeader />
 						<Toolbar />
 						<StreamPanel />
-						<SendPanel />
 						<AnalysisPanel />
 						<NotesPanel />
 					</section>
 				</main>
 			</div>
+			<SendPanel />
 			<ContextDialog />
 			<SectionsDialog />
 			<AnnotationDialog />
