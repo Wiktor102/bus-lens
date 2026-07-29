@@ -1318,7 +1318,9 @@ function renderVirtualRows() {
 			]
 				.filter(Boolean)
 				.join(" · ");
-			const patternStyle = pattern ? `;--pattern-color:${pattern.color}` : "";
+			const patternStyle = pattern
+				? `;--pattern-color:${pattern.color};--sequence-row-count:${pattern.length};--sequence-row-height:${virtualItem.size}px`
+				: "";
 			const sequenceControl = pattern
 				? `<td class="sequence-cell" style="--pattern-color:${pattern.color}">
 				  <button class="sequence-group ${isPatternStart ? "sequence-group-start" : ""} ${

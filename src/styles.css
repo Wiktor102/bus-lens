@@ -1382,10 +1382,17 @@ tr:hover .row-action,
 	padding: 0;
 	vertical-align: middle;
 }
-/* A sequence is rendered one virtualized row at a time.  Suppress the
-   intervening cell rules so its shared note reads as one continuous block. */
-.message-table tr.pattern-member:not(.pattern-end) td.sequence-cell {
+.message-table tr.pattern-start {
+	/* Each virtual row is its own stacking context. Keep the spanning
+	   sequence control above the continuation rows that follow it. */
+	z-index: 1;
+}
+.message-table tr.pattern-member td.sequence-cell {
+	position: relative;
 	border-bottom-color: transparent;
+}
+.message-table tr.pattern-end td.sequence-cell {
+	border-bottom-color: var(--line-soft);
 }
 .sequence-empty {
 	display: block;
@@ -1408,6 +1415,13 @@ tr:hover .row-action,
 	font: 10px var(--mono);
 	text-align: left;
 	cursor: pointer;
+}
+.sequence-group-start {
+	position: absolute;
+	z-index: 1;
+	top: 0;
+	left: 0;
+	height: calc(var(--sequence-row-count) * var(--sequence-row-height));
 }
 .sequence-group:hover,
 .sequence-group:focus-visible {
@@ -1452,9 +1466,10 @@ tr:hover .row-action,
 .sequence-summary {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) auto;
+	grid-template-rows: auto minmax(0, 1fr);
 	gap: 3px 6px;
 	padding: 7px 9px 7px 1px;
-	min-height: 100%;
+	height: 100%;
 	line-height: 1.15;
 }
 .sequence-label {
@@ -1473,9 +1488,9 @@ tr:hover .row-action,
 	grid-column: 1 / -1;
 	min-width: 0;
 	color: var(--ink);
-	white-space: nowrap;
+	white-space: normal;
+	overflow-wrap: anywhere;
 	overflow: hidden;
-	text-overflow: ellipsis;
 }
 .sequence-note.empty {
 	color: var(--muted);
