@@ -79,19 +79,21 @@ function CaptureHeader() {
 							SAVED
 						</span>
 					</div>
-					<input
-						id="captureTitle"
-						className="title-input"
-						defaultValue="Overview · Speed 1"
-						aria-label="Capture title"
-					/>
-					<textarea
-						id="captureDescription"
-						className="capture-description"
-						rows={1}
-						placeholder="Add a description…"
-						aria-label="Capture description"
-					/>
+					<div className="capture-title-row">
+						<input
+							id="captureTitle"
+							className="title-input"
+							defaultValue="Overview · Speed 1"
+							aria-label="Capture title"
+						/>
+						<textarea
+							id="captureDescription"
+							className="capture-description"
+							rows={1}
+							placeholder="Add a description…"
+							aria-label="Capture description"
+						/>
+					</div>
 					<div id="captureMeta" className="capture-meta" />
 				</div>
 				<div id="captureSummary" className="capture-summary" aria-label="Capture summary">

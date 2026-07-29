@@ -535,6 +535,12 @@ p {
 	border-color: #63332f;
 	animation: pulse 1s infinite;
 }
+.capture-title-row {
+	width: 100%;
+	display: flex;
+	align-items: center;
+	gap: 18px;
+}
 .title-input {
 	background: transparent;
 	border: 0;
@@ -544,15 +550,16 @@ p {
 	font-size: 25px;
 	font-weight: 600;
 	padding: 4px 0 5px;
-	min-width: min(420px, 100%);
-	width: 100%;
+	min-width: 0;
+	width: min(48%, 420px);
 }
 .title-input:focus {
 	border-bottom-color: var(--acid-dim);
 }
 .capture-description {
 	box-sizing: border-box;
-	width: 100%;
+	min-width: 0;
+	flex: 1;
 	min-height: 28px;
 	max-height: 84px;
 	margin: 1px 0 7px;
@@ -2125,6 +2132,15 @@ tr:hover .row-action,
 }
 
 @media (max-width: 900px) {
+	.capture-title-row {
+		align-items: flex-start;
+		flex-direction: column;
+		gap: 0;
+	}
+	.title-input,
+	.capture-description {
+		width: 100%;
+	}
 	.capture-header {
 		grid-template-columns: minmax(0, 1fr) auto;
 		gap: 20px;
