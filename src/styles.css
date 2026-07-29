@@ -1162,14 +1162,33 @@ tr:hover .row-action,
 }
 .message-table {
 	width: 100%;
+	min-width: 1180px;
 	border-collapse: collapse;
+	display: grid;
 	font: 11px var(--mono);
 }
 .message-table thead {
 	position: sticky;
 	top: 0;
 	z-index: 2;
+	display: grid;
 	background: #121613;
+}
+.message-table thead tr,
+.message-table tbody > tr {
+	display: grid;
+	grid-template-columns: 75px 120px 90px 190px minmax(300px, 1fr) 120px minmax(220px, 0.8fr);
+	width: 100%;
+}
+.message-table tbody {
+	position: relative;
+	display: block;
+	width: 100%;
+}
+.message-table tbody > tr {
+	position: absolute;
+	top: 0;
+	left: 0;
 }
 .message-table th {
 	color: var(--muted);
@@ -1181,15 +1200,11 @@ tr:hover .row-action,
 	border-bottom: 1px solid var(--line);
 }
 .message-table td {
+	min-width: 0;
 	border-bottom: 1px solid var(--line-soft);
 	padding: 7px 12px;
 	color: #b4bcb3;
 	height: 36px;
-}
-.message-table .virtual-spacer > td {
-	height: var(--virtual-space, 0);
-	padding: 0;
-	border: 0;
 }
 .message-table tr:hover td {
 	background: #181d19;
@@ -1234,7 +1249,7 @@ tr:hover .row-action,
 }
 .message-table th.sequence-heading,
 .message-table td.sequence-cell {
-	width: 190px;
+	width: auto;
 }
 .message-table th:nth-child(6) {
 	width: 120px;
@@ -1755,6 +1770,7 @@ tr:hover .row-action,
 }
 .section-divider td {
 	padding: 8px 12px;
+	height: auto;
 	border-top: 1px solid var(--acid-dim);
 	color: var(--muted);
 	background: color-mix(in srgb, var(--acid) 4%, var(--panel));
@@ -1762,10 +1778,13 @@ tr:hover .row-action,
 	letter-spacing: 0.03em;
 }
 .section-divider .section-number {
-	width: 60px;
+	width: auto;
 	color: var(--acid);
 	text-align: center;
 	font: 500 11px var(--mono);
+}
+.section-divider td:nth-child(2) {
+	grid-column: 2 / -1;
 }
 .section-header-content {
 	display: flex;

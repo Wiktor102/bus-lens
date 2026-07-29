@@ -1,6 +1,13 @@
 // The controller remains framework-agnostic so the protocol and Web Serial
 // behavior can stay byte-for-byte compatible with the original implementation.
 // @ts-nocheck
+import {
+	Virtualizer,
+	elementScroll,
+	observeElementOffset,
+	observeElementRect
+} from "@tanstack/virtual-core";
+
 const STORAGE_KEY = "bus-lens-state-v1";
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -36,7 +43,8 @@ const MAX_PATTERN_LENGTH = 8;
 // A capture remains useful at this size while still fitting comfortably in browser storage.
 const MAX_CAPTURE_BYTES = 50_000;
 const LIVE_REFRESH_MS = 120;
-const VIRTUAL_ROW_HEIGHT = 56;
+const VIRTUAL_ROW_HEIGHT = 41;
+const VIRTUAL_SECTION_HEIGHT = 48;
 const VIRTUAL_OVERSCAN = 8;
 const MAX_SEND_HISTORY = 250;
 
@@ -132,7 +140,11 @@ let pendingLiveBytes = [];
 let liveRefreshTimer = null;
 let stateSaveTimer = null;
 let virtualMessageView = null;
+let messageVirtualizer = null;
+let disposeMessageVirtualizer = null;
 let virtualRenderPending = false;
+let virtualViewVersion = 0;
+let renderedVirtualRangeKey = "";
 let sendInFlight = false;
 let queueRunning = false;
 let stopQueueRequested = false;
@@ -1150,33 +1162,30 @@ function renderMessages() {
 		return map;
 	});
 	const patterns = recognizeMessagePatterns(c);
-	virtualMessageView = { c, matchingRows, signatureCounts, countsByPosition, patterns };
-	$("#patternCount").textContent = `${patterns.groups.length} group${patterns.groups.length === 1 ? "" : "s"}`;
-	renderVirtualRows();
-}
-
-function virtualRange(total) {
-	const viewport = $(".table-wrap");
-	const visibleRows = Math.ceil(viewport.clientHeight / VIRTUAL_ROW_HEIGHT);
-	const maxFirstVisible = Math.max(0, total - visibleRows);
-	const firstVisible = Math.min(Math.floor(viewport.scrollTop / VIRTUAL_ROW_HEIGHT), maxFirstVisible);
-	const start = Math.max(0, firstVisible - VIRTUAL_OVERSCAN);
-	const end = Math.min(total, firstVisible + visibleRows + VIRTUAL_OVERSCAN);
-	return { start, end };
-}
-
-function renderVirtualRows() {
-	const view = virtualMessageView;
-	if (!view) return;
-	const { c, matchingRows, signatureCounts, countsByPosition, patterns } = view;
-	const { start, end } = virtualRange(matchingRows.length);
-	const rows = matchingRows.slice(start, end);
-	const mode = $("#displayMode").value;
 	const highlight = $("#uniqueToggle").checked;
-	const rowsForTransitions = matchingRows.slice(Math.max(0, start - 1), end);
 	const frames = highlight
-		? transitionFrames(rowsForTransitions).slice(start > 0 ? 1 : 0)
-		: rows.map(row => row.bytes.map(() => ({ incoming: null, outgoing: null })));
+		? transitionFrames(matchingRows)
+		: matchingRows.map(row => row.bytes.map(() => ({ incoming: null, outgoing: null })));
+	const patternNumbers = new Map(patterns.groups.map((group, index) => [group.id, index + 1]));
+	const sectionNumbers = new Map((c.frameSections || []).map((section, index) => [section.id, index + 1]));
+	const sectionsById = new Map((c.frameSections || []).map(section => [section.id, section]));
+	const entries = [];
+	let previousSectionId = null;
+	matchingRows.forEach((row, rowIndex) => {
+		if (c.previewMode === "sections" && row.sectionId !== previousSectionId) {
+			const section = sectionsById.get(row.sectionId);
+			if (section) {
+				entries.push({
+					type: "section",
+					key: `section:${section.id}:${row._originalStart}`,
+					section,
+					sectionNumber: sectionNumbers.get(section.id)
+				});
+			}
+		}
+		entries.push({ type: "message", key: `message:${row.id}`, row, rowIndex });
+		previousSectionId = row.sectionId;
+	});
 	const telegramCount = matchingRows.reduce((sum, row) => sum + row._repeats, 0);
 	const visibleSummary = matchingRows.length
 		? `${matchingRows.length.toLocaleString()} row${matchingRows.length === 1 ? "" : "s"}`
@@ -1185,17 +1194,97 @@ function renderVirtualRows() {
 		telegramCount === matchingRows.length
 			? visibleSummary
 			: `${visibleSummary} · ${telegramCount.toLocaleString()} telegrams`;
-	let previousSectionId = start ? matchingRows[start - 1]?.sectionId : null;
-	const patternNumbers = new Map(patterns.groups.map((group, index) => [group.id, index + 1]));
-	const topSpacer = start
-		? `<tr class="virtual-spacer" aria-hidden="true"><td colspan="7" style="height:${start * VIRTUAL_ROW_HEIGHT}px"></td></tr>`
-		: "";
-	const bottomSpacer =
-		end < matchingRows.length
-			? `<tr class="virtual-spacer" aria-hidden="true"><td colspan="7" style="height:${(matchingRows.length - end) * VIRTUAL_ROW_HEIGHT}px"></td></tr>`
-			: "";
-	const rowsHtml = rows
-		.map((m, i) => {
+	virtualMessageView = {
+		c,
+		matchingRows,
+		signatureCounts,
+		countsByPosition,
+		patterns,
+		patternNumbers,
+		entries,
+		frames,
+		mode: $("#displayMode").value,
+		highlight
+	};
+	virtualViewVersion++;
+	renderedVirtualRangeKey = "";
+	$("#patternCount").textContent = `${patterns.groups.length} group${patterns.groups.length === 1 ? "" : "s"}`;
+	updateMessageVirtualizer();
+	renderVirtualRows();
+}
+
+function getVirtualEntryKey(index) {
+	return virtualMessageView?.entries[index]?.key ?? index;
+}
+
+function estimateVirtualEntrySize(index) {
+	return virtualMessageView?.entries[index]?.type === "section" ? VIRTUAL_SECTION_HEIGHT : VIRTUAL_ROW_HEIGHT;
+}
+
+function scheduleVirtualRows() {
+	if (!virtualMessageView || virtualRenderPending) return;
+	virtualRenderPending = true;
+	requestAnimationFrame(() => {
+		virtualRenderPending = false;
+		renderVirtualRows();
+	});
+}
+
+function virtualizerOptions() {
+	return {
+		count: virtualMessageView?.entries.length || 0,
+		getScrollElement: () => $(".table-wrap"),
+		estimateSize: estimateVirtualEntrySize,
+		getItemKey: getVirtualEntryKey,
+		overscan: VIRTUAL_OVERSCAN,
+		scrollToFn: elementScroll,
+		observeElementRect,
+		observeElementOffset,
+		measureElement: element => element.getBoundingClientRect().height,
+		onChange: scheduleVirtualRows
+	};
+}
+
+function updateMessageVirtualizer() {
+	if (!messageVirtualizer) {
+		messageVirtualizer = new Virtualizer(virtualizerOptions());
+		disposeMessageVirtualizer = messageVirtualizer._didMount();
+	} else {
+		messageVirtualizer.setOptions(virtualizerOptions());
+	}
+	messageVirtualizer._willUpdate();
+}
+
+function renderVirtualRows() {
+	const view = virtualMessageView;
+	if (!view || !messageVirtualizer) return;
+	const { c, matchingRows, signatureCounts, countsByPosition, patterns, patternNumbers, entries, frames, mode, highlight } =
+		view;
+	const virtualItems = messageVirtualizer.getVirtualItems();
+	const renderKey = `${virtualViewVersion}|${messageVirtualizer.getTotalSize()}|${virtualItems
+		.map(item => `${item.index}:${item.start}:${item.size}`)
+		.join(",")}`;
+	if (renderKey === renderedVirtualRangeKey) return;
+	renderedVirtualRangeKey = renderKey;
+	const rowsHtml = virtualItems
+		.map(virtualItem => {
+			const entry = entries[virtualItem.index];
+			if (!entry) return "";
+			const virtualStyle = `transform:translateY(${virtualItem.start}px)`;
+			if (entry.type === "section") {
+				const { section, sectionNumber } = entry;
+				return `<tr class="section-divider" data-index="${virtualItem.index}" style="${virtualStyle}">
+          <td class="section-number">${String(sectionNumber).padStart(2, "0")}</td>
+          <td colspan="6"><div class="section-header-content">
+            <span>Section · raw byte ${section.start + 1}</span>
+            <div class="section-header-controls">
+              <label>Message length <input data-section-length="${section.id}" type="number" min="1" max="1024" value="${section.frameSize}" /> bytes</label>
+              <label class="switch-label section-collapse">Collapse runs <input data-section-collapse="${section.id}" type="checkbox" ${section.collapseRuns ? "checked" : ""} /><span class="switch"></span></label>
+            </div>
+          </div></td>
+        </tr>`;
+			}
+			const { row: m, rowIndex } = entry;
 			const messageNote = c.annotations[m.id];
 			const patternMember = patterns.membership.get(m._originalStart);
 			const pattern = patternMember?.group;
@@ -1225,25 +1314,9 @@ function renderVirtualRows() {
 			]
 				.filter(Boolean)
 				.join(" · ");
-			const section = c.frameSections?.find(section => section.id === m.sectionId);
-			const sectionNumber = c.frameSections.findIndex(item => item.id === m.sectionId) + 1;
-			const sectionDivider =
-				c.previewMode === "sections" && m.sectionId !== previousSectionId
-					? `<tr class="section-divider">
-          <td class="section-number">${String(sectionNumber).padStart(2, "0")}</td>
-          <td colspan="6"><div class="section-header-content">
-            <span>Section · raw byte ${section.start + 1}</span>
-            <div class="section-header-controls">
-              <label>Message length <input data-section-length="${section.id}" type="number" min="1" max="1024" value="${section.frameSize}" /> bytes</label>
-              <label class="switch-label section-collapse">Collapse runs <input data-section-collapse="${section.id}" type="checkbox" ${section.collapseRuns ? "checked" : ""} /><span class="switch"></span></label>
-            </div>
-          </div></td>
-        </tr>`
-					: "";
-			previousSectionId = m.sectionId;
-			const patternStyle = pattern ? ` style="--pattern-color:${pattern.color}"` : "";
+			const patternStyle = pattern ? `;--pattern-color:${pattern.color}` : "";
 			const sequenceControl = pattern
-				? `<td class="sequence-cell"${patternStyle}>
+				? `<td class="sequence-cell" style="--pattern-color:${pattern.color}">
           <button class="sequence-group ${patternMember.offset === 0 ? "sequence-group-start" : ""} ${
 						patternMember.offset === pattern.length - 1 ? "sequence-group-end" : ""
 					}" data-pattern-id="${pattern.id}" title="${escapeHtml(
@@ -1269,7 +1342,7 @@ function renderVirtualRows() {
           ${noteControl}
           <button class="row-action replay-link" data-message-replay="${m.id}" title="Replay this message on the connected serial port">↻ Replay</button>
         </div>`;
-			return `${sectionDivider}<tr data-message-id="${m.id}" class="${rowClasses}"${patternStyle} title="${escapeHtml(rowTitles)}">
+			return `<tr data-index="${virtualItem.index}" data-message-id="${m.id}" class="${rowClasses}" style="${virtualStyle}${patternStyle}" title="${escapeHtml(rowTitles)}">
       <td>${rowLabel}</td>
       <td>${formatTime(m.timestamp)}${directionTag ? `<span class="direction-tag">${directionTag}</span>` : ""}</td>
       <td>${formatDelta(m._delta)}</td>
@@ -1277,10 +1350,10 @@ function renderVirtualRows() {
       <td><div class="byte-row">${m.bytes
 			.map((byte, pos) => {
 				const count = countsByPosition[pos]?.get(byte) || 0;
-				const frame = frames[i][pos] || {};
+				const frame = frames[rowIndex][pos] || {};
 				const incoming = frame.incoming;
 				const outgoing = frame.outgoing;
-				const previousRow = i ? rows[i - 1] : matchingRows[start - 1];
+				const previousRow = matchingRows[rowIndex - 1];
 				const previousIsAdjacent =
 					previousRow &&
 					m._originalStart === previousRow._originalEnd + 1 &&
@@ -1330,7 +1403,10 @@ function renderVirtualRows() {
 	    </tr>`;
 		})
 		.join("");
-	$("#messageBody").innerHTML = `${topSpacer}${rowsHtml}${bottomSpacer}`;
+	const messageBody = $("#messageBody");
+	messageBody.style.height = `${messageVirtualizer.getTotalSize()}px`;
+	messageBody.innerHTML = rowsHtml;
+	messageBody.querySelectorAll("[data-index]").forEach(row => messageVirtualizer.measureElement(row));
 	const marker = c.previewMode === "marker" ? markerBytes(c.frameMarker) : [];
 	$("#emptyState").classList.toggle("hidden", c.messages.length > 0);
 	$("#emptyState h2").textContent =
@@ -1346,30 +1422,6 @@ function renderVirtualRows() {
 				: "Type a hex byte sequence such as AA 55 in the Marker field."
 			: "Connect a serial port and start capture, or import a monitor dump.";
 	$(".message-table").classList.toggle("hidden", c.messages.length === 0);
-	$$("[data-message-note]").forEach(el => (el.onclick = () => openAnnotation("message", el.dataset.messageNote)));
-	$$("[data-message-replay]").forEach(
-		el =>
-			(el.onclick = () => {
-				const message = c.messages.find(item => item.id === el.dataset.messageReplay);
-				if (message) void transmitBytes(Uint8Array.from(message.bytes), "replay");
-			})
-	);
-	$$("[data-pattern-id]").forEach(el => (el.onclick = () => openPatternRemark(el.dataset.patternId)));
-	$$("[data-byte-note]").forEach(el => (el.onclick = () => openAnnotation("byte", el.dataset.byteNote)));
-	$$("[data-byte-note]").forEach(
-		el =>
-			(el.oncontextmenu = event => {
-				event.preventDefault();
-				const [messageId, position] = el.dataset.byteNote.split(":");
-				startSectionAtByte(messageId, +position);
-			})
-	);
-	$$("[data-section-length]").forEach(
-		input => (input.onchange = () => setSectionFrameSize(input.dataset.sectionLength, input.value))
-	);
-	$$("[data-section-collapse]").forEach(
-		input => (input.onchange = () => setSectionCollapse(input.dataset.sectionCollapse, input.checked))
-	);
 }
 
 function renderRepeatPill(message) {
@@ -2414,18 +2466,38 @@ $("#fileInput").onchange = e => {
 };
 $("#exportBtn").onclick = () => $("#exportDialog").showModal();
 $$("[data-export]").forEach(btn => (btn.onclick = () => exportData(btn.dataset.export)));
-$(".table-wrap").addEventListener("scroll", () => {
-	if (!virtualMessageView || virtualRenderPending) return;
-	virtualRenderPending = true;
-	requestAnimationFrame(() => {
-		virtualRenderPending = false;
-		renderVirtualRows();
-	});
+$("#messageBody").addEventListener("click", event => {
+	const noteButton = event.target.closest("[data-message-note]");
+	if (noteButton) return openAnnotation("message", noteButton.dataset.messageNote);
+	const replayButton = event.target.closest("[data-message-replay]");
+	if (replayButton) {
+		const message = capture().messages.find(item => item.id === replayButton.dataset.messageReplay);
+		if (message) void transmitBytes(Uint8Array.from(message.bytes), "replay");
+		return;
+	}
+	const patternButton = event.target.closest("[data-pattern-id]");
+	if (patternButton) return openPatternRemark(patternButton.dataset.patternId);
+	const byteButton = event.target.closest("[data-byte-note]");
+	if (byteButton) openAnnotation("byte", byteButton.dataset.byteNote);
+});
+$("#messageBody").addEventListener("contextmenu", event => {
+	const byteButton = event.target.closest("[data-byte-note]");
+	if (!byteButton) return;
+	event.preventDefault();
+	const [messageId, position] = byteButton.dataset.byteNote.split(":");
+	startSectionAtByte(messageId, +position);
+});
+$("#messageBody").addEventListener("change", event => {
+	const lengthInput = event.target.closest("[data-section-length]");
+	if (lengthInput) return setSectionFrameSize(lengthInput.dataset.sectionLength, lengthInput.value);
+	const collapseInput = event.target.closest("[data-section-collapse]");
+	if (collapseInput) setSectionCollapse(collapseInput.dataset.sectionCollapse, collapseInput.checked);
 });
 document.addEventListener("click", e => {
 	if (!e.target.closest(".header-actions")) $("#moreMenu").classList.add("hidden");
 });
 window.addEventListener("beforeunload", () => {
+	disposeMessageVirtualizer?.();
 	flushLiveBytes();
 	persistState();
 	if (port) disconnectSerial();
