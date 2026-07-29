@@ -1230,7 +1230,7 @@ input:checked + .switch::after {
 	align-items: center;
 	gap: 9px;
 }
-.replay-link {
+.row-action {
 	flex: 0 0 auto;
 	padding: 3px 5px;
 	border: 1px solid transparent;
@@ -1240,11 +1240,11 @@ input:checked + .switch::after {
 	font: 9px var(--mono);
 	opacity: 0;
 }
-tr:hover .replay-link,
-.replay-link:focus-visible {
+tr:hover .row-action,
+.row-action:focus-visible {
 	opacity: 1;
 }
-.replay-link:hover {
+.row-action:hover {
 	color: var(--blue);
 	border-color: color-mix(in srgb, var(--blue) 38%, var(--line));
 }
@@ -1289,14 +1289,33 @@ tr:hover .replay-link,
 }
 .message-table {
 	width: 100%;
+	min-width: 1180px;
 	border-collapse: collapse;
+	display: grid;
 	font: 11px var(--mono);
 }
 .message-table thead {
 	position: sticky;
 	top: 0;
 	z-index: 2;
+	display: grid;
 	background: #121613;
+}
+.message-table thead tr,
+.message-table tbody > tr {
+	display: grid;
+	grid-template-columns: 75px 120px 90px 190px minmax(300px, 1fr) 120px minmax(220px, 0.8fr);
+	width: 100%;
+}
+.message-table tbody {
+	position: relative;
+	display: block;
+	width: 100%;
+}
+.message-table tbody > tr {
+	position: absolute;
+	top: 0;
+	left: 0;
 }
 .message-table th {
 	color: var(--muted);
@@ -1308,15 +1327,11 @@ tr:hover .replay-link,
 	border-bottom: 1px solid var(--line);
 }
 .message-table td {
+	min-width: 0;
 	border-bottom: 1px solid var(--line-soft);
 	padding: 7px 12px;
 	color: #b4bcb3;
 	height: 36px;
-}
-.message-table .virtual-spacer > td {
-	height: var(--virtual-space, 0);
-	padding: 0;
-	border: 0;
 }
 .message-table tr:hover td {
 	background: #181d19;
@@ -1339,16 +1354,6 @@ tr:hover .replay-link,
 .message-table tr.sent-message td:first-child {
 	border-left: 2px solid var(--blue);
 }
-.message-table tr.pattern-member td:first-child {
-	box-shadow: inset 3px 0 var(--pattern-color);
-	background: linear-gradient(90deg, color-mix(in srgb, var(--pattern-color) 10%, transparent), transparent 88%);
-}
-.message-table tr.pattern-start td:first-child {
-	border-top: 1px solid color-mix(in srgb, var(--pattern-color) 60%, transparent);
-}
-.message-table tr.pattern-end td:first-child {
-	border-bottom-color: color-mix(in srgb, var(--pattern-color) 55%, var(--line-soft));
-}
 .direction-tag {
 	display: inline-block;
 	margin-left: 7px;
@@ -1369,7 +1374,11 @@ tr:hover .replay-link,
 .message-table th:nth-child(3) {
 	width: 90px;
 }
-.message-table th:nth-child(5) {
+.message-table th.sequence-heading,
+.message-table td.sequence-cell {
+	width: auto;
+}
+.message-table th:nth-child(6) {
 	width: 120px;
 }
 .byte-row {
@@ -1496,45 +1505,139 @@ tr:hover .replay-link,
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
-.annotation-stack {
-	display: grid;
-	gap: 3px;
+.message-table td.sequence-cell {
+	padding: 0;
+	vertical-align: middle;
 }
-.pattern-link {
-	display: flex;
-	align-items: center;
-	gap: 7px;
-	max-width: 260px;
+.message-table tr.pattern-start {
+	/* Each virtual row is its own stacking context. Keep the spanning
+	   sequence control above the continuation rows that follow it. */
+	z-index: 1;
+}
+.message-table tr.pattern-member td.sequence-cell {
+	position: relative;
+	border-bottom-color: transparent;
+}
+.message-table tr.pattern-end td.sequence-cell {
+	border-bottom-color: var(--line-soft);
+}
+.sequence-empty {
+	display: block;
+	padding: 7px 12px;
+	color: var(--faint);
+	text-align: center;
+}
+.sequence-group {
+	--sequence-line: color-mix(in srgb, var(--pattern-color) 75%, var(--line));
+	position: relative;
+	display: grid;
+	grid-template-columns: 19px minmax(0, 1fr);
+	align-items: stretch;
+	width: 100%;
+	min-height: 36px;
 	padding: 0;
 	border: 0;
-	background: transparent;
-	color: var(--muted);
-	font: 9px var(--mono);
+	background: color-mix(in srgb, var(--pattern-color) 6%, var(--panel));
+	color: var(--ink);
+	font: 10px var(--mono);
 	text-align: left;
-	white-space: nowrap;
 	cursor: pointer;
 }
-.pattern-link i {
-	flex: 0 0 auto;
-	width: 7px;
-	height: 7px;
-	background: var(--pattern-color);
-	box-shadow: 0 0 8px color-mix(in srgb, var(--pattern-color) 45%, transparent);
+.sequence-group-start {
+	position: absolute;
+	z-index: 1;
+	top: 0;
+	left: 0;
+	height: calc(var(--sequence-row-count) * var(--sequence-row-height));
 }
-.pattern-link.remarked {
-	color: var(--ink);
-	overflow: hidden;
-	text-overflow: ellipsis;
+.sequence-group:hover,
+.sequence-group:focus-visible {
+	background: color-mix(in srgb, var(--pattern-color) 13%, var(--panel));
+	outline: 0;
 }
-.pattern-link:hover {
+.sequence-group:focus-visible {
+	box-shadow: inset 0 0 0 1px var(--pattern-color);
+}
+.sequence-rail {
+	position: relative;
+	min-height: 100%;
+}
+.sequence-rail::before {
+	content: "";
+	position: absolute;
+	left: 9px;
+	top: 0;
+	bottom: 0;
+	border-left: 2px solid var(--sequence-line);
+}
+/* The first control spans the entire repeated run. Draw both rail caps there
+   rather than relying on the last virtual row beneath it. */
+.sequence-group-start .sequence-rail::before {
+	top: 9px;
+	bottom: 9px;
+}
+.sequence-group-start .sequence-rail::after,
+.sequence-group-end:not(.sequence-group-start) .sequence-rail::after {
+	content: "";
+	position: absolute;
+	left: 9px;
+	width: 8px;
+	border-top: 2px solid var(--sequence-line);
+}
+.sequence-group-start .sequence-rail::after {
+	top: 9px;
+}
+.sequence-group-end:not(.sequence-group-start) .sequence-rail::after {
+	bottom: 9px;
+}
+.sequence-rail-endcap {
+	display: none;
+}
+.sequence-group-start .sequence-rail-endcap {
+	display: block;
+	position: absolute;
+	left: 9px;
+	bottom: 9px;
+	width: 8px;
+	border-top: 2px solid var(--sequence-line);
+}
+.sequence-group:not(.sequence-group-start) .sequence-rail {
+	display: none;
+}
+.sequence-summary {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	grid-template-rows: auto minmax(0, 1fr);
+	gap: 3px 6px;
+	padding: 7px 9px 7px 1px;
+	height: 100%;
+	line-height: 1.15;
+}
+.sequence-label {
 	color: var(--pattern-color);
+	letter-spacing: 0.06em;
 }
-.add-note {
-	opacity: 0;
+.sequence-label b {
+	color: var(--muted);
+	font-weight: 400;
+	letter-spacing: 0;
+}
+.sequence-occurrence {
 	color: var(--faint);
 }
-tr:hover .add-note {
-	opacity: 1;
+.sequence-note {
+	grid-column: 1 / -1;
+	min-width: 0;
+	color: var(--ink);
+	white-space: normal;
+	overflow-wrap: anywhere;
+	overflow: hidden;
+}
+.sequence-note.empty {
+	color: var(--muted);
+}
+.sequence-continuation {
+	min-height: 100%;
 }
 .empty-state {
 	text-align: center;
@@ -1829,6 +1932,7 @@ tr:hover .add-note {
 }
 .section-divider td {
 	padding: 8px 12px;
+	height: auto;
 	border-top: 1px solid var(--acid-dim);
 	color: var(--muted);
 	background: color-mix(in srgb, var(--acid) 4%, var(--panel));
@@ -1836,10 +1940,13 @@ tr:hover .add-note {
 	letter-spacing: 0.03em;
 }
 .section-divider .section-number {
-	width: 60px;
+	width: auto;
 	color: var(--acid);
 	text-align: center;
 	font: 500 11px var(--mono);
+}
+.section-divider td:nth-child(2) {
+	grid-column: 2 / -1;
 }
 .section-header-content {
 	display: flex;

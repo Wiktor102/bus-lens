@@ -219,9 +219,9 @@ function StreamPanel() {
 				<div className="stream-summary">
 					<span
 						className="stream-legend"
-						title="Repeated message sequences reuse a colored edge and can have a shared remark."
+						title="Repeated message sequences are grouped in the Sequence column, where shared notes are shown."
 					>
-						<i className="pattern-swatch" /> repeated sequence <span id="patternCount">0 groups</span>
+						<i className="pattern-swatch" /> repeated sequences <span id="patternCount">0 groups</span>
 					</span>
 					<span id="visibleCount">0 rows</span>
 				</div>
@@ -233,6 +233,7 @@ function StreamPanel() {
 							<th>#</th>
 							<th>TIME</th>
 							<th>Δ</th>
+							<th className="sequence-heading">SEQUENCE</th>
 							<th>
 								MESSAGE · <span id="frameSizeLabel">3 BYTES</span>
 							</th>
@@ -633,7 +634,7 @@ function PatternRemarkDialog() {
 				<div className="modal-heading">
 					<div>
 						<span className="eyebrow">Recognized sequence</span>
-						<h2 id="patternRemarkTitle">Sequence remark</h2>
+						<h2 id="patternRemarkTitle">Sequence note</h2>
 					</div>
 					<button className="icon-btn" value="cancel" formMethod="dialog" formNoValidate aria-label="Close">
 						×
@@ -641,25 +642,25 @@ function PatternRemarkDialog() {
 				</div>
 				<div id="patternRemarkTarget" className="pattern-remark-target" />
 				<label className="field">
-					Shared remark
+					Shared sequence note
 					<textarea
 						id="patternRemarkText"
 						placeholder="What does this repeated exchange appear to represent?"
 					/>
 				</label>
 				<div id="patternRemarkHint" className="validation-hint" aria-live="polite">
-					This remark appears on every occurrence of the sequence.
+					This note appears in the Sequence column for every occurrence.
 				</div>
 				<div className="modal-actions">
 					<button id="deletePatternRemarkBtn" className="btn btn-danger" type="button">
-						Delete remark
+						Delete note
 					</button>
 					<span />
 					<button className="btn btn-secondary" value="cancel" formMethod="dialog" formNoValidate>
 						Cancel
 					</button>
 					<button id="savePatternRemarkBtn" className="btn btn-primary" value="default">
-						Save remark
+						Save note
 					</button>
 				</div>
 			</form>
