@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { collapseAdjacentRuns } from "../src/collapse-runs.ts";
+import {
+	collapseAdjacentRuns,
+	countVisibleRowsByPatternOccurrence
+} from "../src/collapse-runs.ts";
 
 function row(index: number, value: string, patternOccurrence: string | null) {
 	return {
@@ -54,4 +57,20 @@ test("does not merge identical frames across recognized occurrences", () => {
 			[4, 4]
 		]
 	);
+});
+
+test("sequence rails span visible collapsed rows, not raw frames", () => {
+	const rows = [
+		row(6, "E2", "sequence-1:1"),
+		row(9, "C2", "sequence-1:1"),
+		row(12, "C2", null),
+		row(15, "E2", "sequence-1:2"),
+		row(18, "C2", "sequence-1:2")
+	];
+
+	const counts = countVisibleRowsByPatternOccurrence(rows);
+
+	assert.equal(counts.get("sequence-1:1"), 2);
+	assert.equal(counts.get("sequence-1:2"), 2);
+	assert.equal(counts.has("null"), false);
 });

@@ -39,3 +39,14 @@ export function collapseAdjacentRuns<Row extends CollapsibleRow>(
 	});
 	return collapsed;
 }
+
+export function countVisibleRowsByPatternOccurrence(
+	rows: Array<{ _patternOccurrence: string | null }>
+) {
+	const counts = new Map<string, number>();
+	rows.forEach(row => {
+		if (row._patternOccurrence === null) return;
+		counts.set(row._patternOccurrence, (counts.get(row._patternOccurrence) || 0) + 1);
+	});
+	return counts;
+}
