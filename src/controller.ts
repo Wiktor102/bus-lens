@@ -924,7 +924,7 @@ function renderStats() {
 			: "No messages to compare";
 }
 
-function filteredMessages() {
+function filteredMessages(sequenceMembership = new Map()) {
 	const c = capture();
 	let rows = (c?.messages || []).map((message, originalIndex) => ({
 		...message,
@@ -947,9 +947,6 @@ function filteredMessages() {
 		} catch {}
 	}
 	const sectionsById = new Map((c?.frameSections || []).map(section => [section.id, section]));
-	// Keep recognized exchanges intact: collapsing one of their repeated states
-	// makes the sequence harder to read and breaks its row-by-row annotation.
-	const sequenceMembers = recognizeMessagePatterns(c).membership;
 	if ($("#collapseToggle").checked || c?.previewMode === "sections") {
 		const collapsed = [];
 		rows.forEach(m => {
@@ -959,7 +956,7 @@ function filteredMessages() {
 				c.previewMode === "sections"
 					? Boolean(sectionsById.get(m.sectionId)?.collapseRuns)
 					: $("#collapseToggle").checked;
-			const isSequenceMember = sequenceMembers.has(m._originalStart) || sequenceMembers.has(last?._originalEnd);
+			const isSequenceMember = sequenceMembership.has(m._originalStart) || sequenceMembership.has(last?._originalEnd);
 			if (collapseThisSection && !isSequenceMember && isAdjacent && signature(last) === signature(m)) {
 				last._repeats++;
 				last._originalEnd = m._originalEnd;
@@ -1146,14 +1143,14 @@ function transitionFrames(rows) {
 function renderMessages() {
 	const c = capture();
 	if (!c) return;
-	const matchingRows = filteredMessages();
+	const patterns = recognizeMessagePatterns(c);
+	const matchingRows = filteredMessages(patterns.membership);
 	const signatureCounts = getCounts(c.messages);
 	const countsByPosition = Array.from({ length: frameWidth(c) }, (_, pos) => {
 		const map = new Map();
 		c.messages.forEach(m => map.set(m.bytes[pos], (map.get(m.bytes[pos]) || 0) + 1));
 		return map;
 	});
-	const patterns = recognizeMessagePatterns(c);
 	virtualMessageView = { c, matchingRows, signatureCounts, countsByPosition, patterns };
 	$("#patternCount").textContent = `${patterns.groups.length} group${patterns.groups.length === 1 ? "" : "s"}`;
 	renderVirtualRows();
@@ -1618,6 +1615,7 @@ function setSectionCollapse(sectionId, collapseRuns) {
 	if (!section) return;
 	section.collapseRuns = collapseRuns;
 	saveState();
+	$(".table-wrap").scrollTop = 0;
 	renderMessages();
 	showToast(collapseRuns ? "Runs collapse in this section" : "Runs expand in this section");
 }
@@ -2262,7 +2260,10 @@ $("#messageFilter").oninput = () => {
 };
 $("#displayMode").onchange = renderMessages;
 $("#uniqueToggle").onchange = renderMessages;
-$("#collapseToggle").onchange = renderMessages;
+$("#collapseToggle").onchange = () => {
+	$(".table-wrap").scrollTop = 0;
+	renderMessages();
+};
 function applyPreviewSettings() {
 	const c = capture();
 	if (!c) return;
