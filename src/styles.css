@@ -1382,6 +1382,11 @@ tr:hover .row-action,
 	padding: 0;
 	vertical-align: middle;
 }
+/* A sequence is rendered one virtualized row at a time.  Suppress the
+   intervening cell rules so its shared note reads as one continuous block. */
+.message-table tr.pattern-member:not(.pattern-end) td.sequence-cell {
+	border-bottom-color: transparent;
+}
 .sequence-empty {
 	display: block;
 	padding: 7px 12px;
@@ -1449,6 +1454,7 @@ tr:hover .row-action,
 	grid-template-columns: minmax(0, 1fr) auto;
 	gap: 3px 6px;
 	padding: 7px 9px 7px 1px;
+	min-height: 100%;
 	line-height: 1.15;
 }
 .sequence-label {

@@ -1288,6 +1288,8 @@ function renderVirtualRows() {
 			const messageNote = c.annotations[m.id];
 			const patternMember = patterns.membership.get(m._originalStart);
 			const pattern = patternMember?.group;
+			const isPatternStart = patternMember?.offset === 0;
+			const isPatternEnd = patternMember?.offset === pattern?.length - 1;
 			const originalRow = m._originalStart + 1;
 			const sequenceNote = (c.notes || []).find(
 				n => n.type === "sequence" && originalRow >= n.start && originalRow <= n.end
@@ -1301,7 +1303,9 @@ function renderVirtualRows() {
 				sequenceNote ? "sequence-noted" : "",
 				isUnique ? "unique-message" : "",
 				hasSentBytes ? "sent-message" : "",
-				pattern ? "pattern-member" : ""
+				pattern ? "pattern-member" : "",
+				isPatternStart ? "pattern-start" : "",
+				isPatternEnd ? "pattern-end" : ""
 			]
 				.filter(Boolean)
 				.join(" ");
@@ -1317,14 +1321,14 @@ function renderVirtualRows() {
 			const patternStyle = pattern ? `;--pattern-color:${pattern.color}` : "";
 			const sequenceControl = pattern
 				? `<td class="sequence-cell" style="--pattern-color:${pattern.color}">
-          <button class="sequence-group ${patternMember.offset === 0 ? "sequence-group-start" : ""} ${
-						patternMember.offset === pattern.length - 1 ? "sequence-group-end" : ""
+				  <button class="sequence-group ${isPatternStart ? "sequence-group-start" : ""} ${
+						isPatternEnd ? "sequence-group-end" : ""
 					}" data-pattern-id="${pattern.id}" title="${escapeHtml(
 						`Sequence ${String(patternNumbers.get(pattern.id)).padStart(2, "0")} · occurrence ${patternMember.occurrenceIndex + 1} of ${pattern.starts.length} · ${pattern.length} messages${pattern.remark ? ` · shared note: ${pattern.remark}` : " · add a shared note"}`
 					)}" aria-label="${pattern.remark ? "Edit shared sequence note" : "Add shared sequence note"}">
             <span class="sequence-rail" aria-hidden="true"></span>
             ${
-						patternMember.offset === 0
+						isPatternStart
 							? `<span class="sequence-summary">
                 <span class="sequence-label">SEQ ${String(patternNumbers.get(pattern.id)).padStart(2, "0")} <b>${pattern.length} rows</b></span>
                 <span class="sequence-occurrence">${patternMember.occurrenceIndex + 1} / ${pattern.starts.length}</span>
