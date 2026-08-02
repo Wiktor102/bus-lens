@@ -6,6 +6,12 @@ import {
 	subscribeToCaptureHeader
 } from "./capture-header-bridge";
 import { normalizeCaptureDescription, normalizeCaptureTitle } from "./capture-header";
+import {
+	getFramingToolbarActions,
+	getFramingToolbarSnapshot,
+	subscribeToFramingToolbar
+} from "./framing-toolbar-bridge";
+import type { FramingMode, MarkerPosition } from "./framing-toolbar";
 import "./styles.css";
 
 function TopBar() {
@@ -202,6 +208,24 @@ function CaptureHeader() {
 }
 
 function Toolbar() {
+	const snapshot = useSyncExternalStore(
+		subscribeToFramingToolbar,
+		getFramingToolbarSnapshot,
+		getFramingToolbarSnapshot
+	);
+	const actions = getFramingToolbarActions();
+	const markerRef = useRef<HTMLInputElement>(null);
+	const [markerDraft, setMarkerDraft] = useState(snapshot.markerDraft);
+
+	useLayoutEffect(() => {
+		if (document.activeElement !== markerRef.current) setMarkerDraft(snapshot.markerDraft);
+	}, [snapshot.captureId, snapshot.markerDraft]);
+
+	const commitMarker = (value: string) => {
+		setMarkerDraft(value);
+		if (value !== snapshot.markerDraft) actions.updateSettings({ frameMarker: value });
+	};
+
 	return (
 		<div className="toolbar">
 			<div className="view-tabs" role="tablist">
@@ -218,36 +242,80 @@ function Toolbar() {
 			<div className="toolbar-controls">
 				<label className="compact-select">
 					Frame by
-					<select id="framingMode" defaultValue="length">
+					<select
+						id="framingMode"
+						value={snapshot.framingMode}
+						disabled={snapshot.disabled}
+						onChange={event => actions.updateSettings({ previewMode: event.currentTarget.value as FramingMode })}
+					>
 						<option value="length">LENGTH</option>
 						<option value="sections">SECTIONED LENGTH</option>
 						<option value="marker">MARKER</option>
 						<option value="time">TIME GAP</option>
 					</select>
 				</label>
-				<label id="frameLengthControl" className="compact-input">
+				<label id="frameLengthControl" className={`compact-input ${snapshot.visibility.frameLength ? "" : "hidden"}`.trim()}>
 					Bytes
-					<input id="previewFrameSize" type="number" min="1" max="1024" defaultValue="3" />
+					<input
+						id="previewFrameSize"
+						type="number"
+						min="1"
+						max="1024"
+						value={snapshot.frameSize}
+						disabled={snapshot.disabled}
+						onInput={event => actions.updateSettings({ frameSize: event.currentTarget.value })}
+					/>
 				</label>
-				<button id="editSectionsBtn" className="text-btn framing-sections-btn hidden" type="button">
+				<button
+					id="editSectionsBtn"
+					className={`text-btn framing-sections-btn ${snapshot.visibility.sectionsButton ? "" : "hidden"}`.trim()}
+					type="button"
+					disabled={snapshot.disabled}
+					onClick={actions.openSections}
+				>
 					Sections
 				</button>
-				<span id="markerControls" className="preview-mode-controls hidden">
+				<span
+					id="markerControls"
+					className={`preview-mode-controls ${snapshot.visibility.markerControls ? "" : "hidden"}`.trim()}
+				>
 					<label className="compact-input">
 						Marker
-						<input id="frameMarker" placeholder="e.g. AA 55" spellCheck={false} />
+						<input
+							id="frameMarker"
+							ref={markerRef}
+							placeholder="e.g. AA 55"
+							spellCheck={false}
+							value={markerDraft}
+							disabled={snapshot.disabled}
+							onChange={event => setMarkerDraft(event.currentTarget.value)}
+							onBlur={event => commitMarker(event.currentTarget.value)}
+						/>
 					</label>
 					<label className="compact-select">
 						Position
-						<select id="markerPosition" defaultValue="start">
+						<select
+							id="markerPosition"
+							value={snapshot.markerPosition}
+							disabled={snapshot.disabled}
+							onChange={event => actions.updateSettings({ markerPosition: event.currentTarget.value as MarkerPosition })}
+						>
 							<option value="start">STARTS MESSAGE</option>
 							<option value="end">ENDS MESSAGE</option>
 						</select>
 					</label>
 				</span>
-				<label id="timeControls" className="compact-input hidden">
+				<label id="timeControls" className={`compact-input ${snapshot.visibility.timeControls ? "" : "hidden"}`.trim()}>
 					Idle gap ≥
-					<input id="frameTimeGap" type="number" min="0.01" step="0.1" defaultValue="5" /> ms
+					<input
+						id="frameTimeGap"
+						type="number"
+						min="0.01"
+						step="0.1"
+						value={snapshot.frameTimeGap}
+						disabled={snapshot.disabled}
+						onInput={event => actions.updateSettings({ frameTimeGap: event.currentTarget.value })}
+					/> ms
 				</label>
 				<label className="compact-select">
 					Display
@@ -260,7 +328,7 @@ function Toolbar() {
 					<input id="uniqueToggle" type="checkbox" defaultChecked />
 					<span className="switch" /> Frame changes
 				</label>
-				<label id="collapseControl" className="switch-label">
+				<label id="collapseControl" className={`switch-label ${snapshot.visibility.collapseControl ? "" : "hidden"}`.trim()}>
 					<input id="collapseToggle" type="checkbox" />
 					<span className="switch" /> Collapse runs
 				</label>
@@ -283,6 +351,12 @@ function Toolbar() {
 }
 
 function StreamPanel() {
+	const framing = useSyncExternalStore(
+		subscribeToFramingToolbar,
+		getFramingToolbarSnapshot,
+		getFramingToolbarSnapshot
+	);
+
 	return (
 		<div id="streamPanel" className="tab-panel active">
 			<div id="streamFilter" className="stream-filter collapsed">
@@ -309,7 +383,7 @@ function StreamPanel() {
 							<th>Δ</th>
 							<th className="sequence-heading">SEQUENCE</th>
 							<th>
-								MESSAGE · <span id="frameSizeLabel">3 BYTES</span>
+								MESSAGE · <span id="frameSizeLabel">{framing.frameSizeLabel}</span>
 							</th>
 							<th>REPEATS</th>
 							<th>ANNOTATION</th>

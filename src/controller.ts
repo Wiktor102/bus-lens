@@ -13,6 +13,14 @@ import { deriveCaptureHeaderSnapshot } from "./capture-header";
 import { publishCaptureHeaderSnapshot, registerCaptureHeaderActions } from "./capture-header-bridge";
 import { collapseAdjacentRuns, countVisibleRowsByPatternOccurrence } from "./collapse-runs";
 import {
+	publishFramingToolbarSnapshot,
+	registerFramingToolbarActions
+} from "./framing-toolbar-bridge";
+import {
+	applyFramingSettings,
+	selectFramingToolbarSnapshot
+} from "./framing-toolbar";
+import {
 	recordReceivedByte
 } from "./capture-summary";
 import {
@@ -277,7 +285,7 @@ function render() {
 	publishArchiveState();
 	publishCaptureHeaderState();
 	syncTransportControls();
-	syncFramingToolbar();
+	publishFramingToolbarState();
 	updateMessageFilterControl();
 	renderSendWorkbench();
 	if (!capture()) {
@@ -501,36 +509,8 @@ function syncTransportControls() {
 	$("#recordBtn").disabled = !port || !capture();
 }
 
-function syncFramingToolbar(c = capture()) {
-	["framingMode", "previewFrameSize", "frameMarker", "markerPosition", "frameTimeGap", "editSectionsBtn"].forEach(
-		id => ($(`#${id}`).disabled = !c)
-	);
-	if (!c) {
-		$("#frameSizeLabel").textContent = "—";
-		$("#collapseControl").classList.remove("hidden");
-		return;
-	}
-	const markerInput = $("#frameMarker");
-	const editingMarker = document.activeElement === markerInput;
-	$("#framingMode").value = c.previewMode;
-	$("#previewFrameSize").value = c.frameSize;
-	if (!editingMarker) markerInput.value = c.frameMarker;
-	$("#markerPosition").value = c.markerPosition;
-	$("#frameTimeGap").value = c.frameTimeGap;
-	$("#frameLengthControl").classList.toggle("hidden", c.previewMode !== "length");
-	$("#editSectionsBtn").classList.toggle("hidden", c.previewMode !== "sections");
-	$("#markerControls").classList.toggle("hidden", c.previewMode !== "marker");
-	$("#timeControls").classList.toggle("hidden", c.previewMode !== "time");
-	$("#collapseControl").classList.toggle("hidden", c.previewMode === "sections");
-	const width = frameWidth(c);
-	$("#frameSizeLabel").textContent =
-		c.previewMode === "length"
-			? `${c.frameSize} BYTE${c.frameSize === 1 ? "" : "S"}`
-			: c.previewMode === "sections"
-				? `${c.frameSections.length} SECTION${c.frameSections.length === 1 ? "" : "S"} · UP TO ${width} BYTES`
-				: c.previewMode === "marker" && !c.frameMarker
-					? "MARKER PENDING"
-					: `VARIABLE · UP TO ${width} BYTE${width === 1 ? "" : "S"}`;
+function publishFramingToolbarState(c = capture()) {
+	publishFramingToolbarSnapshot(selectFramingToolbarSnapshot(c));
 }
 
 function getCounts(messages) {
@@ -1282,6 +1262,16 @@ function openSectionsEditor() {
 	$("#sectionsDialog").showModal();
 }
 
+function updateFramingSettings(update) {
+	const c = capture();
+	if (!c) return;
+	applyFramingSettings(c, update);
+	normalizeSections(c);
+	rebuildPreview(c);
+	saveState();
+	render();
+}
+
 function renderSectionRows(sections) {
 	$("#sectionRows").innerHTML = "";
 	sections.forEach(section => addSectionRow(section));
@@ -1556,7 +1546,6 @@ async function disconnectSerial() {
 	$("#recordBtn").classList.remove("recording");
 	$("#recordBtn").innerHTML = "<span></span> Start capture";
 	publishCaptureHeaderState();
-	syncFramingToolbar();
 	updateMessageFilterControl();
 	renderSendWorkbench();
 }
@@ -1621,7 +1610,7 @@ function flushLiveBytes() {
 	rebuildPreview(c);
 	saveState();
 	publishCaptureHeaderState();
-	syncFramingToolbar();
+	publishFramingToolbarState(c);
 	updateMessageFilterControl();
 	renderMessages();
 	if ($("#patternsPanel").classList.contains("active")) renderAnalysis();
@@ -2045,27 +2034,6 @@ $("#toggleMessageFilterBtn").onclick = () =>
 $("#displayMode").onchange = renderMessages;
 $("#uniqueToggle").onchange = renderMessages;
 $("#collapseToggle").onchange = renderMessages;
-function applyPreviewSettings() {
-	const c = capture();
-	if (!c) return;
-	c.previewMode = $("#framingMode").value;
-	c.frameSize = Math.max(1, Math.min(1024, +$("#previewFrameSize").value || 3));
-	const marker = markerBytes($("#frameMarker").value);
-	c.markerConfigured = marker.length > 0;
-	c.frameMarker = marker.map(hexByte).join(" ");
-	c.markerPosition = $("#markerPosition").value;
-	c.frameTimeGap = Math.max(0.01, +$("#frameTimeGap").value || 5);
-	normalizeSections(c);
-	rebuildPreview(c);
-	saveState();
-	render();
-}
-$("#framingMode").onchange = applyPreviewSettings;
-$("#previewFrameSize").oninput = applyPreviewSettings;
-$("#frameMarker").onchange = applyPreviewSettings;
-$("#markerPosition").onchange = applyPreviewSettings;
-$("#frameTimeGap").oninput = applyPreviewSettings;
-$("#editSectionsBtn").onclick = openSectionsEditor;
 $("#addSectionBtn").onclick = addSectionRow;
 $("#sectionsForm").addEventListener("submit", event => {
 	if (event.submitter?.value === "cancel") return;
@@ -2232,6 +2200,11 @@ registerArchiveActions({
 	saveFolder,
 	deleteFolder,
 	importFile
+});
+
+registerFramingToolbarActions({
+	updateSettings: updateFramingSettings,
+	openSections: openSectionsEditor
 });
 
 render();
