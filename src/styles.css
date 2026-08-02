@@ -607,16 +607,19 @@ p {
 .capture-summary {
 	display: grid;
 	grid-template-columns: max-content;
-	gap: 9px;
+	gap: 4px;
 	align-content: start;
 	margin-top: 3px;
 	color: var(--muted);
 	font: 10px var(--mono);
+	width: max-content;
+	max-width: 100%;
 }
 .capture-summary span {
-	display: flex;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) max-content;
 	align-items: baseline;
-	justify-content: space-between;
+	column-gap: 5px;
 	white-space: nowrap;
 	width: 100%;
 }
