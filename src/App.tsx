@@ -12,6 +12,9 @@ import {
 	subscribeToFramingToolbar
 } from "./framing-toolbar-bridge";
 import type { FramingMode, MarkerPosition } from "./framing-toolbar";
+import { getSendActions, getSendSnapshot, subscribeToSend } from "./send-bridge";
+import { deriveSendViewModel, formatSendTime, parseTransmitHex } from "./send";
+import { getToastSnapshot, subscribeToToast } from "./toast-bridge";
 import "./styles.css";
 
 function TopBar() {
@@ -403,29 +406,101 @@ function StreamPanel() {
 	);
 }
 
-function SendPanel() {
+type SendPanelProps = {
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+};
+
+function SendPanel({ open, onOpenChange }: SendPanelProps) {
+	const snapshot = useSyncExternalStore(subscribeToSend, getSendSnapshot, getSendSnapshot);
+	const actions = getSendActions();
+	const inputRef = useRef<HTMLInputElement>(null);
+	const delayRef = useRef<HTMLInputElement>(null);
+	const [draft, setDraft] = useState(snapshot.draft);
+	const [delayDraft, setDelayDraft] = useState(String(snapshot.delayMs));
+	const [focusComposer, setFocusComposer] = useState(false);
+	const view = deriveSendViewModel({ ...snapshot, draft });
+
+	useLayoutEffect(() => {
+		if (document.activeElement !== inputRef.current) setDraft(snapshot.draft);
+	}, [snapshot.draft]);
+
+	useLayoutEffect(() => {
+		if (document.activeElement !== delayRef.current) setDelayDraft(String(snapshot.delayMs));
+	}, [snapshot.delayMs]);
+
+	useEffect(() => {
+		if (!open || !focusComposer) return;
+		const frame = requestAnimationFrame(() => {
+			inputRef.current?.focus();
+			setFocusComposer(false);
+		});
+		return () => cancelAnimationFrame(frame);
+	}, [open, focusComposer]);
+
+	const sendDraft = () => {
+		const parsed = parseTransmitHex(draft);
+		if (!parsed.bytes?.length) return;
+		void actions.send([...parsed.bytes]).then(sent => {
+			if (sent) setDraft("");
+		});
+	};
+
+	const addDraftToQueue = () => {
+		const parsed = parseTransmitHex(draft);
+		if (!parsed.bytes?.length) return;
+		if (actions.addToQueue([...parsed.bytes])) setDraft("");
+	};
+
+	const commitDelay = () => {
+		actions.setDelay(Number(delayDraft) || 0);
+	};
+
 	return (
-		<aside id="sendPanel" className="send-popup collapsed" aria-label="Serial message composer">
+		<aside
+			id="sendPanel"
+			className={`send-popup ${open ? "" : "collapsed"}`.trim()}
+			aria-label="Serial message composer"
+		>
 			<header className="send-popup-titlebar">
 				<button
 					id="toggleSendPopupBtn"
 					className="send-popup-toggle"
 					type="button"
-					aria-expanded="false"
+					aria-expanded={open}
 					aria-controls="sendPopupContent"
+					onClick={() => {
+						if (open) onOpenChange(false);
+						else {
+							onOpenChange(true);
+							setFocusComposer(true);
+						}
+					}}
 				>
 					<span className="send-popup-title"><i aria-hidden="true" /> Compose serial message</span>
-					<span id="queueTabCount" className="send-popup-count" aria-label="Messages in queue">0</span>
+					<span
+						id="queueTabCount"
+						className={`send-popup-count ${view.queueTabCountHidden ? "hidden" : ""}`.trim()}
+						aria-label="Messages in queue"
+					>
+						{view.queueCount}
+					</span>
 				</button>
-				<button id="minimizeSendPopupBtn" className="send-popup-minimize" type="button" aria-label="Minimize composer">
+				<button
+					id="minimizeSendPopupBtn"
+					className="send-popup-minimize"
+					type="button"
+					aria-label={open ? "Minimize composer" : "Open composer"}
+					onClick={() => onOpenChange(false)}
+				>
 					—
 				</button>
 			</header>
 			<div id="sendPopupContent" className="send-popup-content">
 				<div className="send-popup-meta">
-					<p id="sendConnectionHint">Connect a serial port to send. Drafts and queue stay saved locally.</p>
-					<span id="sendStatusBadge" className="send-status">
-						<i /> OFFLINE
+					<p id="sendConnectionHint">{view.connectionHint}</p>
+					<span id="sendStatusBadge" className={view.statusClassName}>
+						<i /> {view.statusText}
 					</span>
 				</div>
 				<div className="send-grid">
@@ -441,21 +516,43 @@ function SendPanel() {
 						<span>HEX</span>
 						<input
 							id="transmitHex"
+							ref={inputRef}
 							autoComplete="off"
 							autoCapitalize="characters"
 							spellCheck={false}
 							placeholder="e.g. C2 08 5D"
 							aria-describedby="transmitHint"
+							value={draft}
+							onChange={event => {
+								setDraft(event.currentTarget.value);
+								actions.setDraft(event.currentTarget.value);
+							}}
+							onKeyDown={event => {
+								if (event.key !== "Enter") return;
+								event.preventDefault();
+								if (event.shiftKey) addDraftToQueue();
+								else sendDraft();
+							}}
 						/>
 					</label>
-					<p id="transmitHint" className="transmit-hint">
-						Enter whole bytes as hex.
-					</p>
+					<p id="transmitHint" className={view.draftHintClassName}>{view.parsedDraft.message}</p>
 					<div className="composer-actions">
-						<button id="addQueueBtn" className="btn btn-secondary" type="button" disabled>
+						<button
+							id="addQueueBtn"
+							className="btn btn-secondary"
+							type="button"
+							disabled={view.queueDisabled}
+							onClick={addDraftToQueue}
+						>
 							Add to queue
 						</button>
-						<button id="sendBytesBtn" className="btn btn-send" type="button" disabled>
+						<button
+							id="sendBytesBtn"
+							className="btn btn-send"
+							type="button"
+							disabled={view.sendDisabled}
+							onClick={sendDraft}
+						>
 							Send now
 						</button>
 					</div>
@@ -465,24 +562,86 @@ function SendPanel() {
 					<div className="send-card-heading">
 						<div>
 							<span className="eyebrow">Sequence</span>
-							<h3>Timed queue <span id="queueCount">0</span></h3>
+							<h3>Timed queue <span id="queueCount">{view.queueCount}</span></h3>
 						</div>
 						<label className="queue-delay">
 							Gap
-							<input id="queueDelay" type="number" min="0" max="600000" step="10" defaultValue="100" />
+							<input
+								id="queueDelay"
+								ref={delayRef}
+								type="number"
+								min="0"
+								max="600000"
+								step="10"
+								value={delayDraft}
+								onChange={event => setDelayDraft(event.currentTarget.value)}
+								onBlur={commitDelay}
+								onKeyDown={event => {
+									if (event.key === "Enter") commitDelay();
+								}}
+							/>
 							ms
 						</label>
 					</div>
-					<div id="queueList" className="queue-list" />
+					<div id="queueList" className="queue-list">
+						{view.queueCount ? (
+							snapshot.queue.map((item, index) => (
+								<div className="queue-item" key={item.id}>
+									<span className="queue-index">{String(index + 1).padStart(2, "0")}</span>
+									<code>{item.bytes.map(byte => byte.toString(16).padStart(2, "0").toUpperCase()).join(" ")}</code>
+									<button
+										className="icon-btn"
+										data-queue-send={item.id}
+										title="Send this message now"
+										aria-label="Send this message now"
+										type="button"
+										onClick={() => actions.sendQueueItem(item.id)}
+									>
+										▶
+									</button>
+									<button
+										className="icon-btn"
+										data-queue-remove={item.id}
+										title="Remove from queue"
+										aria-label="Remove from queue"
+										type="button"
+										onClick={() => actions.removeQueueItem(item.id)}
+									>
+										×
+									</button>
+								</div>
+							))
+						) : (
+							<div className="send-empty">Queue messages here, then run them with a controlled gap.</div>
+						)}
+					</div>
 					<div className="queue-actions">
-						<button id="clearQueueBtn" className="text-btn" type="button">
+						<button
+							id="clearQueueBtn"
+							className="text-btn"
+							type="button"
+							disabled={view.clearQueueDisabled}
+							onClick={actions.clearQueue}
+						>
 							Clear queue
 						</button>
 						<span />
-						<button id="stopQueueBtn" className="btn btn-danger hidden" type="button">
-							Stop
+						<button
+							id="stopQueueBtn"
+							className={`btn btn-danger ${view.stopQueueHidden ? "hidden" : ""}`.trim()}
+							type="button"
+							disabled={view.stopQueueDisabled}
+							onClick={actions.stopQueue}
+						>
+							{view.stopQueueText}
 						</button>
-						<button id="runQueueBtn" className="btn btn-primary" type="button" disabled>
+						<button
+							id="runQueueBtn"
+							className={`btn btn-primary ${view.runQueueHidden ? "hidden" : ""}`.trim()}
+							type="button"
+							disabled={view.runQueueDisabled}
+							onClick={() => void actions.runQueue()}
+						>
 							Run queue
 						</button>
 					</div>
@@ -492,13 +651,58 @@ function SendPanel() {
 					<div className="send-card-heading">
 						<div>
 							<span className="eyebrow">Local history</span>
-							<h3>Recent sends <span id="historyCount">0</span></h3>
+							<h3>Recent sends <span id="historyCount">{view.historyCount}</span></h3>
 						</div>
-						<button id="clearHistoryBtn" className="text-btn" type="button">
+						<button
+							id="clearHistoryBtn"
+							className="text-btn"
+							type="button"
+							disabled={view.clearHistoryDisabled}
+							onClick={actions.clearHistory}
+						>
 							Clear
 						</button>
 					</div>
-					<div id="sendHistory" className="send-history" />
+					<div id="sendHistory" className="send-history">
+						{view.historyCount ? (
+							snapshot.history.map(item => (
+								<div className={`history-item ${item.ok === false ? "failed" : ""}`.trim()} key={item.id}>
+									<div>
+										<code>{item.bytes.map(byte => byte.toString(16).padStart(2, "0").toUpperCase()).join(" ")}</code>
+										<small>
+											{formatSendTime(item.timestamp)} · {item.captureId ? "captured TX" : "send history"}
+											{item.origin === "queue" ? " · queued" : ""}
+											{item.ok === false ? ` · failed: ${item.error || "unknown error"}` : ""}
+										</small>
+									</div>
+									<button
+										className="text-btn"
+										data-history-load={item.id}
+										type="button"
+										onClick={() => {
+											const loaded = actions.loadHistory(item.id);
+											if (loaded === null) return;
+											setDraft(loaded);
+											requestAnimationFrame(() => inputRef.current?.focus());
+										}}
+									>
+										Load
+									</button>
+									<button
+										className="text-btn"
+										data-history-replay={item.id}
+										type="button"
+										disabled={view.replayDisabled}
+										onClick={() => actions.replayHistory(item.id)}
+									>
+										Replay
+									</button>
+								</div>
+							))
+						) : (
+							<div className="send-empty">Successful and failed sends appear here, including sends made outside a capture.</div>
+						)}
+					</div>
 					</section>
 				</div>
 			</div>
@@ -832,7 +1036,23 @@ function MessageContextMenu() {
 	);
 }
 
+function Toast({ sendPopupOpen }: { sendPopupOpen: boolean }) {
+	const snapshot = useSyncExternalStore(subscribeToToast, getToastSnapshot, getToastSnapshot);
+	return (
+		<div
+			id="toast"
+			className={`toast ${snapshot.visible ? "show" : ""} ${sendPopupOpen ? "send-popup-open" : ""}`.trim()}
+			role="status"
+		>
+			{snapshot.message}
+		</div>
+	);
+}
+
 function App() {
+	const [sendPopupOpen, setSendPopupOpen] = useState(false);
+	const handleSendPopupChange = (open: boolean) => setSendPopupOpen(open);
+
 	useEffect(() => {
 		void import("./controller");
 	}, []);
@@ -852,14 +1072,14 @@ function App() {
 					</section>
 				</main>
 			</div>
-			<SendPanel />
+			<SendPanel open={sendPopupOpen} onOpenChange={handleSendPopupChange} />
 			<ContextDialog />
 			<SectionsDialog />
 			<AnnotationDialog />
 			<PatternRemarkDialog />
 			<ExportDialog />
 			<MessageContextMenu />
-			<div id="toast" className="toast" role="status" />
+			<Toast sendPopupOpen={sendPopupOpen} />
 		</>
 	);
 }

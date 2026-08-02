@@ -16,6 +16,8 @@ import {
 	publishFramingToolbarSnapshot,
 	registerFramingToolbarActions
 } from "./framing-toolbar-bridge";
+import { publishSendSnapshot, registerSendActions } from "./send-bridge";
+import { publishToastSnapshot } from "./toast-bridge";
 import {
 	applyFramingSettings,
 	selectFramingToolbarSnapshot
@@ -154,6 +156,33 @@ function publishArchiveState() {
 	});
 }
 
+function publishSendState() {
+	normalizeSendState(state);
+	publishSendSnapshot({
+		connected: Boolean(port?.writable),
+		recording,
+		sendInFlight,
+		queueRunning,
+		stopQueueRequested,
+		draft: state.sendSettings.draft,
+		delayMs: state.sendSettings.delayMs,
+		queue: state.sendQueue.map(item => ({
+			id: String(item.id),
+			bytes: item.bytes.map(Number),
+			createdAt: Number(item.createdAt)
+		})),
+		history: state.sendHistory.map(item => ({
+			id: String(item.id),
+			timestamp: Number(item.timestamp),
+			bytes: item.bytes.map(Number),
+			origin: String(item.origin || ""),
+			ok: item.ok !== false,
+			error: String(item.error || ""),
+			captureId: item.captureId ? String(item.captureId) : null
+		}))
+	});
+}
+
 function formatTime(ms) {
 	return new Date(ms).toLocaleTimeString("en-GB", {
 		hour: "2-digit",
@@ -198,9 +227,8 @@ function escapeHtml(value = "") {
 
 function showToast(message) {
 	clearTimeout(toastTimer);
-	$("#toast").textContent = message;
-	$("#toast").classList.add("show");
-	toastTimer = setTimeout(() => $("#toast").classList.remove("show"), 2600);
+	publishToastSnapshot({ message, visible: true });
+	toastTimer = setTimeout(() => publishToastSnapshot({ message: "", visible: false }), 2600);
 }
 
 function closeMessageContextMenu({ restoreFocus = false } = {}) {
@@ -287,7 +315,7 @@ function render() {
 	syncTransportControls();
 	publishFramingToolbarState();
 	updateMessageFilterControl();
-	renderSendWorkbench();
+	publishSendState();
 	if (!capture()) {
 		renderEmptyWorkspace();
 		return;
@@ -312,126 +340,6 @@ function renderEmptyWorkspace() {
 	$("#notesList").innerHTML = `<p class="muted">No capture selected.</p>`;
 	$("#notesCount").textContent = "0";
 	updateMessageFilterControl();
-}
-
-function parseTransmitHex(value) {
-	const compact = value.replace(/[\s,:-]/g, "");
-	if (!compact) return { bytes: [], message: "Enter whole bytes as hex." };
-	if (!/^[0-9a-f]+$/i.test(compact) || compact.length % 2)
-		return { bytes: null, message: "Use complete hex bytes, for example C2 08 5D." };
-	return {
-		bytes: Uint8Array.from(compact.match(/.{2}/g).map(pair => parseInt(pair, 16))),
-		message: `${compact.length / 2} byte${compact.length === 2 ? "" : "s"} ready to send.`
-	};
-}
-
-function updateTransmitValidity() {
-	const input = $("#transmitHex");
-	const hint = $("#transmitHint");
-	const parsed = parseTransmitHex(input.value);
-	const valid = Boolean(parsed.bytes?.length);
-	const ready = Boolean(valid && port?.writable && !sendInFlight && !queueRunning);
-	hint.textContent = parsed.message;
-	hint.classList.toggle("ready", ready);
-	hint.classList.toggle("invalid", parsed.bytes === null);
-	$("#sendBytesBtn").disabled = !ready;
-	$("#addQueueBtn").disabled = !valid || queueRunning;
-	return parsed;
-}
-
-function renderSendWorkbench() {
-	normalizeSendState(state);
-	const connected = Boolean(port?.writable);
-	const draftInput = $("#transmitHex");
-	if (document.activeElement !== draftInput && draftInput.value !== state.sendSettings.draft) {
-		draftInput.value = state.sendSettings.draft;
-	}
-	if (document.activeElement !== $("#queueDelay")) $("#queueDelay").value = state.sendSettings.delayMs;
-	$("#sendStatusBadge").classList.toggle("connected", connected);
-	$("#sendStatusBadge").classList.toggle("running", queueRunning);
-	$("#sendStatusBadge").innerHTML = queueRunning
-		? "<i></i> QUEUE RUNNING"
-		: connected
-			? "<i></i> READY"
-			: "<i></i> OFFLINE";
-	$("#sendConnectionHint").textContent = connected
-		? recording
-			? "Sent bytes are recorded as TX in the active capture and in local send history."
-			: "Capture is inactive. Sends are kept in the separate local history."
-		: "Connect a serial port to send. Drafts and queue stay saved locally.";
-	$("#queueCount").textContent = state.sendQueue.length;
-	$("#queueTabCount").textContent = state.sendQueue.length;
-	$("#queueTabCount").classList.toggle("hidden", !state.sendQueue.length);
-	$("#historyCount").textContent = state.sendHistory.length;
-	$("#queueList").innerHTML = state.sendQueue.length
-		? state.sendQueue
-				.map(
-					(item, index) => `
-      <div class="queue-item">
-        <span class="queue-index">${String(index + 1).padStart(2, "0")}</span>
-        <code>${item.bytes.map(hexByte).join(" ")}</code>
-        <button class="icon-btn" data-queue-send="${item.id}" title="Send this message now" aria-label="Send this message now">▶</button>
-        <button class="icon-btn" data-queue-remove="${item.id}" title="Remove from queue" aria-label="Remove from queue">×</button>
-      </div>`
-				)
-				.join("")
-		: `<div class="send-empty">Queue messages here, then run them with a controlled gap.</div>`;
-	$("#sendHistory").innerHTML = state.sendHistory.length
-		? state.sendHistory
-				.map(
-					item => `
-      <div class="history-item ${item.ok === false ? "failed" : ""}">
-        <div>
-          <code>${item.bytes.map(hexByte).join(" ")}</code>
-          <small>${formatTime(item.timestamp)} · ${item.captureId ? "captured TX" : "send history"}${item.origin === "queue" ? " · queued" : ""}${item.ok === false ? ` · failed: ${escapeHtml(item.error || "unknown error")}` : ""}</small>
-        </div>
-        <button class="text-btn" data-history-load="${item.id}">Load</button>
-        <button class="text-btn" data-history-replay="${item.id}" ${connected && !sendInFlight && !queueRunning ? "" : "disabled"}>Replay</button>
-      </div>`
-				)
-				.join("")
-		: `<div class="send-empty">Successful and failed sends appear here, including sends made outside a capture.</div>`;
-	$$("[data-queue-remove]").forEach(
-		button =>
-			(button.onclick = () => {
-				state.sendQueue = state.sendQueue.filter(item => item.id !== button.dataset.queueRemove);
-				saveState();
-				renderSendWorkbench();
-			})
-	);
-	$$("[data-queue-send]").forEach(
-		button =>
-			(button.onclick = () => {
-				const item = state.sendQueue.find(entry => entry.id === button.dataset.queueSend);
-				if (item) void transmitBytes(Uint8Array.from(item.bytes), "manual");
-			})
-	);
-	$$("[data-history-load]").forEach(
-		button =>
-			(button.onclick = () => {
-				const item = state.sendHistory.find(entry => entry.id === button.dataset.historyLoad);
-				if (!item) return;
-				state.sendSettings.draft = item.bytes.map(hexByte).join(" ");
-				saveState();
-				renderSendWorkbench();
-				$("#transmitHex").focus();
-			})
-	);
-	$$("[data-history-replay]").forEach(
-		button =>
-			(button.onclick = () => {
-				const item = state.sendHistory.find(entry => entry.id === button.dataset.historyReplay);
-				if (item) void transmitBytes(Uint8Array.from(item.bytes), "replay");
-			})
-	);
-	$("#runQueueBtn").disabled = !connected || !state.sendQueue.length || queueRunning || sendInFlight;
-	$("#runQueueBtn").classList.toggle("hidden", queueRunning);
-	$("#stopQueueBtn").classList.toggle("hidden", !queueRunning);
-	$("#stopQueueBtn").disabled = false;
-	$("#stopQueueBtn").textContent = "Stop";
-	$("#clearQueueBtn").disabled = !state.sendQueue.length || queueRunning;
-	$("#clearHistoryBtn").disabled = !state.sendHistory.length;
-	updateTransmitValidity();
 }
 
 function selectArchiveCapture(captureId) {
@@ -1517,7 +1425,7 @@ async function connectSerial() {
 		$("#recordBtn").disabled = !capture();
 		readAbort = false;
 		readSerialLoop();
-		renderSendWorkbench();
+		publishSendState();
 	} catch (error) {
 		port = null;
 		showToast(error.name === "NotFoundError" ? "No serial port selected" : `Serial error: ${error.message}`);
@@ -1547,7 +1455,7 @@ async function disconnectSerial() {
 	$("#recordBtn").innerHTML = "<span></span> Start capture";
 	publishCaptureHeaderState();
 	updateMessageFilterControl();
-	renderSendWorkbench();
+	publishSendState();
 }
 
 async function readSerialLoop() {
@@ -1647,7 +1555,7 @@ async function transmitBytes(bytes, origin = "manual") {
 		return false;
 	}
 	sendInFlight = true;
-	renderSendWorkbench();
+	publishSendState();
 	try {
 		const writer = port.writable.getWriter();
 		try {
@@ -1665,34 +1573,92 @@ async function transmitBytes(bytes, origin = "manual") {
 		return false;
 	} finally {
 		sendInFlight = false;
-		renderSendWorkbench();
+		publishSendState();
 	}
 }
 
-async function sendBytes() {
-	const parsed = updateTransmitValidity();
-	if (!parsed.bytes?.length) return;
-	const sent = await transmitBytes(parsed.bytes, "manual");
-	if (!sent) return;
+async function sendBytes(bytes) {
+	if (!bytes?.length) return false;
+	const sent = await transmitBytes(Uint8Array.from(bytes), "manual");
+	if (!sent) return false;
 	state.sendSettings.draft = "";
-	$("#transmitHex").value = "";
 	saveState();
-	renderSendWorkbench();
+	publishSendState();
+	return true;
 }
 
-function addDraftToQueue() {
-	const parsed = updateTransmitValidity();
-	if (!parsed.bytes?.length) return;
+function addDraftToQueue(bytes) {
+	if (!bytes?.length) return false;
 	state.sendQueue.push({
 		id: crypto.randomUUID(),
-		bytes: [...parsed.bytes],
+		bytes: [...bytes],
 		createdAt: Date.now()
 	});
 	state.sendSettings.draft = "";
-	$("#transmitHex").value = "";
 	saveState();
-	renderSendWorkbench();
+	publishSendState();
 	showToast("Message added to transmit queue");
+	return true;
+}
+
+function setSendDraft(value) {
+	state.sendSettings.draft = String(value);
+	saveState();
+	publishSendState();
+}
+
+function setQueueDelay(value) {
+	state.sendSettings.delayMs = Math.max(0, Math.min(600_000, Number(value) || 0));
+	saveState({ immediate: true });
+	publishSendState();
+}
+
+function sendQueueItem(id) {
+	const item = state.sendQueue.find(entry => entry.id === id);
+	if (item) void transmitBytes(Uint8Array.from(item.bytes), "manual");
+}
+
+function removeQueueItem(id) {
+	state.sendQueue = state.sendQueue.filter(item => item.id !== id);
+	saveState();
+	publishSendState();
+}
+
+function loadHistoryItem(id) {
+	const item = state.sendHistory.find(entry => entry.id === id);
+	if (!item) return null;
+	const draft = item.bytes.map(hexByte).join(" ");
+	state.sendSettings.draft = draft;
+	saveState();
+	publishSendState();
+	return draft;
+}
+
+function replayHistoryItem(id) {
+	const item = state.sendHistory.find(entry => entry.id === id);
+	if (item) void transmitBytes(Uint8Array.from(item.bytes), "replay");
+}
+
+function stopSendQueue() {
+	stopQueueRequested = true;
+	queueDelayResolve?.();
+	publishSendState();
+}
+
+function clearSendQueue() {
+	if (!state.sendQueue.length || queueRunning) return;
+	if (!confirm("Clear every message from the transmit queue?")) return;
+	state.sendQueue = [];
+	saveState({ immediate: true });
+	publishSendState();
+}
+
+function clearSendHistory() {
+	if (!state.sendHistory.length) return;
+	if (!confirm("Clear the separate local send history? Captured TX bytes will remain in captures.")) return;
+	state.sendHistory = [];
+	saveState({ immediate: true });
+	publishSendState();
 }
 
 function waitForQueueDelay(ms) {
@@ -1712,7 +1678,7 @@ async function runSendQueue() {
 	if (queueRunning || sendInFlight || !port?.writable || !state.sendQueue.length) return;
 	queueRunning = true;
 	stopQueueRequested = false;
-	renderSendWorkbench();
+	publishSendState();
 	const queued = [...state.sendQueue];
 	let completed = 0;
 	try {
@@ -1723,12 +1689,13 @@ async function runSendQueue() {
 			completed++;
 			state.sendQueue = state.sendQueue.filter(item => item.id !== queued[index].id);
 			saveState({ immediate: true });
+			publishSendState();
 			if (index < queued.length - 1 && !stopQueueRequested) await waitForQueueDelay(state.sendSettings.delayMs);
 		}
 	} finally {
 		queueRunning = false;
 		stopQueueRequested = false;
-		renderSendWorkbench();
+		publishSendState();
 		if (completed) showToast(`Queue sent ${completed} message${completed === 1 ? "" : "s"}`);
 	}
 }
@@ -1753,7 +1720,7 @@ function toggleRecording() {
 	$("#recordBtn").innerHTML = recording ? "<span></span> Stop capture" : "<span></span> Start capture";
 	publishCaptureHeaderState();
 	updateMessageFilterControl();
-	renderSendWorkbench();
+	publishSendState();
 	showToast(recording ? "Capture started" : "Capture saved locally");
 }
 
@@ -1969,48 +1936,6 @@ function exportData(format) {
 
 $("#connectBtn").onclick = connectSerial;
 $("#recordBtn").onclick = toggleRecording;
-$("#sendBytesBtn").onclick = sendBytes;
-$("#addQueueBtn").onclick = addDraftToQueue;
-$("#runQueueBtn").onclick = () => void runSendQueue();
-$("#stopQueueBtn").onclick = () => {
-	stopQueueRequested = true;
-	queueDelayResolve?.();
-	$("#stopQueueBtn").disabled = true;
-	$("#stopQueueBtn").textContent = "Stopping…";
-};
-$("#clearQueueBtn").onclick = () => {
-	if (!state.sendQueue.length || queueRunning) return;
-	if (confirm("Clear every message from the transmit queue?")) {
-		state.sendQueue = [];
-		saveState({ immediate: true });
-		renderSendWorkbench();
-	}
-};
-$("#clearHistoryBtn").onclick = () => {
-	if (!state.sendHistory.length) return;
-	if (confirm("Clear the separate local send history? Captured TX bytes will remain in captures.")) {
-		state.sendHistory = [];
-		saveState({ immediate: true });
-		renderSendWorkbench();
-	}
-};
-$("#queueDelay").onchange = event => {
-	state.sendSettings.delayMs = Math.max(0, Math.min(600_000, +event.target.value || 0));
-	saveState({ immediate: true });
-	renderSendWorkbench();
-};
-$("#transmitHex").oninput = event => {
-	state.sendSettings.draft = event.target.value;
-	saveState();
-	updateTransmitValidity();
-};
-$("#transmitHex").onkeydown = event => {
-	if (event.key === "Enter") {
-		event.preventDefault();
-		if (event.shiftKey) addDraftToQueue();
-		else void sendBytes();
-	}
-};
 $("#addParameterBtn").onclick = () => addParameterRow();
 $("#contextForm").addEventListener("submit", e => {
 	if (e.submitter?.value === "cancel") return;
@@ -2073,20 +1998,6 @@ function setMessageFilterOpen(open, { focusFilter = false } = {}) {
 	if (open && focusFilter) requestAnimationFrame(() => $("#messageFilter").focus());
 }
 
-function setSendPopupOpen(open, { focusComposer = false } = {}) {
-	const popup = $("#sendPanel");
-	popup.classList.toggle("collapsed", !open);
-	$("#toast").classList.toggle("send-popup-open", open);
-	$("#toggleSendPopupBtn").setAttribute("aria-expanded", String(open));
-	$("#minimizeSendPopupBtn").setAttribute("aria-label", open ? "Minimize composer" : "Open composer");
-	if (open) {
-		renderSendWorkbench();
-		if (focusComposer) requestAnimationFrame(() => $("#transmitHex").focus());
-	}
-}
-$("#toggleSendPopupBtn").onclick = () =>
-	setSendPopupOpen($("#sendPanel").classList.contains("collapsed"), { focusComposer: true });
-$("#minimizeSendPopupBtn").onclick = () => setSendPopupOpen(false);
 $("#captureNoteForm").onsubmit = e => {
 	e.preventDefault();
 	const c = capture();
@@ -2205,6 +2116,21 @@ registerArchiveActions({
 registerFramingToolbarActions({
 	updateSettings: updateFramingSettings,
 	openSections: openSectionsEditor
+});
+
+registerSendActions({
+	setDraft: setSendDraft,
+	setDelay: setQueueDelay,
+	send: sendBytes,
+	addToQueue: addDraftToQueue,
+	sendQueueItem,
+	removeQueueItem,
+	loadHistory: loadHistoryItem,
+	replayHistory: replayHistoryItem,
+	runQueue: runSendQueue,
+	stopQueue: stopSendQueue,
+	clearQueue: clearSendQueue,
+	clearHistory: clearSendHistory
 });
 
 render();
