@@ -494,9 +494,6 @@ function openMessageContextMenu(event) {
 	const top = Math.min(event.clientY, window.innerHeight - bounds.height - edge);
 	menu.style.left = `${Math.max(edge, left)}px`;
 	menu.style.top = `${Math.max(edge, top)}px`;
-	requestAnimationFrame(() => {
-		if (!menu.classList.contains("hidden")) menu.querySelector('[role="menuitem"]:not(.hidden)')?.focus();
-	});
 }
 
 function handleMessageContextAction(action) {
