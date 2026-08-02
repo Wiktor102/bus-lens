@@ -702,6 +702,15 @@ p {
 	color: var(--acid);
 	outline: 0;
 }
+.message-context-menu .context-delete {
+	color: var(--red);
+}
+.message-context-menu .context-delete:hover,
+.message-context-menu .context-delete:focus-visible {
+	border-color: color-mix(in srgb, var(--red) 42%, var(--line));
+	background: color-mix(in srgb, var(--red) 10%, var(--panel-2));
+	color: var(--red);
+}
 .message-context-menu .byte-context-action {
 	margin-top: 4px;
 	border-top-color: var(--line);
@@ -1477,6 +1486,15 @@ tr:hover .row-action,
 }
 .byte.noted {
 	box-shadow: inset 0 -2px var(--blue);
+}
+.byte-hidden {
+	display: inline-block;
+	min-width: 30px;
+	padding: 3px 5px;
+	border: 1px dashed var(--line);
+	color: var(--faint);
+	text-align: center;
+	letter-spacing: 0.08em;
 }
 .byte.sent {
 	color: #d4faff;

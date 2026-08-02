@@ -688,6 +688,12 @@ function MessageContextMenu() {
 				</svg>
 				<span>Replay</span>
 			</button>
+			<button type="button" role="menuitem" className="context-delete" data-context-action="delete">
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M5.5 7.5h13M9.5 7.5V5h5v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5.5M14 11v5.5" />
+				</svg>
+				<span data-context-delete-label>Delete message</span>
+			</button>
 			<button type="button" role="menuitem" className="byte-context-action" data-context-action="section">
 				<svg viewBox="0 0 24 24" aria-hidden="true">
 					<path d="M5 4.5v15M19 4.5v15M5 8.5h5M14 8.5h5M5 15.5h5M14 15.5h5" />
