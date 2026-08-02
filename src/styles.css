@@ -614,10 +614,11 @@ p {
 	font: 10px var(--mono);
 }
 .capture-summary span {
-	display: inline-flex;
-	gap: 5px;
+	display: flex;
 	align-items: baseline;
+	justify-content: space-between;
 	white-space: nowrap;
+	width: 100%;
 }
 .capture-summary span + span::before {
 	content: none;
