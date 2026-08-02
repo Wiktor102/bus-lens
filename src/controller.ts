@@ -31,6 +31,7 @@ import { registerNotesActions, publishNotesSnapshot, type SequenceNoteInput } fr
 import { deriveNotesSnapshot } from "./notes";
 import { publishToastSnapshot } from "./toast-bridge";
 import { publishDialogCommand, registerDialogActions } from "./dialog-bridge";
+import { getViewStateSnapshot, subscribeToViewState } from "./view-state-bridge";
 import {
 	annotationTargetLabel,
 	annotationTextIsValid,
@@ -286,7 +287,6 @@ function render() {
 	publishCaptureHeaderState();
 	syncTransportControls();
 	publishFramingToolbarState();
-	updateMessageFilterControl();
 	publishSendState();
 	publishAnalysisState();
 	publishNotesState();
@@ -305,7 +305,6 @@ function renderEmptyWorkspace() {
 	$("#emptyState p").textContent = "Create a capture or import a monitor dump to begin.";
 	$("#visibleCount").textContent = "0 rows";
 	$("#patternCount").textContent = "0 groups";
-	updateMessageFilterControl();
 }
 
 function selectArchiveCapture(captureId) {
@@ -447,7 +446,8 @@ function filteredMessages() {
 			};
 		})
 		.filter(message => !message.hidden);
-	const query = $("#messageFilter").value.trim().toUpperCase();
+	const viewState = getViewStateSnapshot();
+	const query = viewState.filterQuery.trim().toUpperCase();
 	if (query) {
 		const pattern = query
 			.split(/\s+/)
@@ -459,13 +459,13 @@ function filteredMessages() {
 		} catch {}
 	}
 	const sectionsById = new Map((c?.frameSections || []).map(section => [section.id, section]));
-	if ($("#collapseToggle").checked || c?.previewMode === "sections") {
+	if (viewState.collapseRuns || c?.previewMode === "sections") {
 		rows = collapseAdjacentRuns(
 			rows,
 			m =>
 				c.previewMode === "sections"
 					? Boolean(sectionsById.get(m.sectionId)?.collapseRuns)
-					: $("#collapseToggle").checked,
+					: viewState.collapseRuns,
 			signature
 		);
 	}
@@ -487,7 +487,8 @@ function renderMessages() {
 		return map;
 	});
 	const patterns = recognizeMessagePatterns(c);
-	const highlight = $("#uniqueToggle").checked;
+	const viewState = getViewStateSnapshot();
+	const highlight = viewState.showFrameChanges;
 	const frames = highlight
 		? transitionFrames(matchingRows)
 		: matchingRows.map(row => visibleByteEntries(row).map(() => ({ incoming: null, outgoing: null })));
@@ -530,7 +531,7 @@ function renderMessages() {
 		visiblePatternRowCounts,
 		entries,
 		frames,
-		mode: $("#displayMode").value,
+		mode: viewState.displayMode,
 		highlight
 	};
 	virtualViewVersion++;
@@ -1151,7 +1152,6 @@ async function disconnectSerial() {
 	$("#recordBtn").classList.remove("recording");
 	$("#recordBtn").innerHTML = "<span></span> Start capture";
 	publishCaptureHeaderState();
-	updateMessageFilterControl();
 	publishSendState();
 }
 
@@ -1216,9 +1216,8 @@ function flushLiveBytes() {
 	saveState();
 	publishCaptureHeaderState();
 	publishFramingToolbarState(c);
-	updateMessageFilterControl();
 	renderMessages();
-	if ($("#patternsPanel").classList.contains("active")) publishAnalysisState(c);
+	if (getViewStateSnapshot().activePanel === "patterns") publishAnalysisState(c);
 	if (trimmed) publishNotesState(c);
 	if (trimmed) showToast(`Capture limit reached; keeping the newest ${MAX_CAPTURE_BYTES.toLocaleString()} bytes`);
 }
@@ -1417,7 +1416,6 @@ function toggleRecording() {
 	$("#recordBtn").classList.toggle("recording", recording);
 	$("#recordBtn").innerHTML = recording ? "<span></span> Stop capture" : "<span></span> Start capture";
 	publishCaptureHeaderState();
-	updateMessageFilterControl();
 	publishSendState();
 	showToast(recording ? "Capture started" : "Capture saved locally");
 }
@@ -1633,53 +1631,21 @@ function exportData(format) {
 
 $("#connectBtn").onclick = connectSerial;
 $("#recordBtn").onclick = toggleRecording;
-$("#messageFilter").oninput = () => {
-	$(".table-wrap").scrollTop = 0;
-	updateMessageFilterControl();
-	renderMessages();
-};
-$("#messageFilter").onkeydown = event => {
-	if (event.key !== "Escape") return;
-	event.preventDefault();
-	setMessageFilterOpen(false);
-	$("#toggleMessageFilterBtn").focus();
-};
-$("#toggleMessageFilterBtn").onclick = () =>
-	setMessageFilterOpen($("#streamFilter").classList.contains("collapsed"), { focusFilter: true });
-$("#displayMode").onchange = renderMessages;
-$("#uniqueToggle").onchange = renderMessages;
-$("#collapseToggle").onchange = renderMessages;
-$$(".tab").forEach(
-	tab =>
-		(tab.onclick = () => {
-			$$(".tab").forEach(x => x.classList.toggle("active", x === tab));
-			$$(".tab-panel").forEach(x => x.classList.remove("active"));
-			$(`#${tab.dataset.panel}Panel`).classList.add("active");
-			$(".toolbar").classList.remove("send-view");
-			updateMessageFilterControl();
-		})
-);
-function updateMessageFilterControl() {
-	const button = $("#toggleMessageFilterBtn");
-	const input = $("#messageFilter");
-	const streamActive = $("#streamPanel").classList.contains("active");
-	const enabled = Boolean(capture()) && streamActive;
-	button.classList.toggle("hidden", !streamActive);
-	button.disabled = !enabled;
-	button.classList.toggle("active", Boolean(input.value.trim()));
-}
-
-function setMessageFilterOpen(open, { focusFilter = false } = {}) {
-	const filter = $("#streamFilter");
-	const button = $("#toggleMessageFilterBtn");
-	filter.classList.toggle("collapsed", !open);
-	button.setAttribute("aria-expanded", String(open));
-	const label = open ? "Hide message filter" : "Show message filter";
-	button.setAttribute("aria-label", label);
-	button.title = label;
-	updateMessageFilterControl();
-	if (open && focusFilter) requestAnimationFrame(() => $("#messageFilter").focus());
-}
+let previousViewState = getViewStateSnapshot();
+subscribeToViewState(() => {
+	const nextViewState = getViewStateSnapshot();
+	const renderChanged =
+		nextViewState.filterQuery !== previousViewState.filterQuery ||
+		nextViewState.displayMode !== previousViewState.displayMode ||
+		nextViewState.showFrameChanges !== previousViewState.showFrameChanges ||
+		nextViewState.collapseRuns !== previousViewState.collapseRuns;
+	if (nextViewState.filterQuery !== previousViewState.filterQuery) $(".table-wrap").scrollTop = 0;
+	if (renderChanged && capture()) renderMessages();
+	if (nextViewState.activePanel === "patterns" && previousViewState.activePanel !== "patterns") {
+		publishAnalysisState();
+	}
+	previousViewState = nextViewState;
+});
 
 $("#messageBody").addEventListener("click", event => {
 	const noteButton = event.target.closest("[data-message-note]");

@@ -1,4 +1,14 @@
-import { memo, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
+import {
+	memo,
+	useEffect,
+	useLayoutEffect,
+	useReducer,
+	useRef,
+	useState,
+	useSyncExternalStore,
+	type CSSProperties,
+	type RefObject
+} from "react";
 import { ArchiveSidebar } from "./archive-sidebar";
 import { getAnalysisSnapshot, subscribeToAnalysis } from "./analysis-bridge";
 import {
@@ -24,6 +34,14 @@ import {
 	PatternRemarkDialog,
 	SectionsDialog
 } from "./dialogs";
+import { publishViewStateSnapshot } from "./view-state-bridge";
+import {
+	EMPTY_VIEW_STATE_SNAPSHOT,
+	reduceViewState,
+	type DisplayMode,
+	type ViewStateAction,
+	type ViewStateSnapshot
+} from "./view-state";
 import "./styles.css";
 
 function TopBar() {
@@ -219,7 +237,17 @@ function CaptureHeader() {
 	);
 }
 
-function Toolbar() {
+type ViewStateProps = {
+	viewState: ViewStateSnapshot;
+	dispatchViewState: (action: ViewStateAction) => void;
+};
+
+type ToolbarProps = ViewStateProps & {
+	messageFilterRef: RefObject<HTMLInputElement | null>;
+	messageFilterToggleRef: RefObject<HTMLButtonElement | null>;
+};
+
+function Toolbar({ viewState, dispatchViewState, messageFilterRef, messageFilterToggleRef }: ToolbarProps) {
 	const snapshot = useSyncExternalStore(
 		subscribeToFramingToolbar,
 		getFramingToolbarSnapshot,
@@ -229,7 +257,6 @@ function Toolbar() {
 	const actions = getFramingToolbarActions();
 	const markerRef = useRef<HTMLInputElement>(null);
 	const [markerDraft, setMarkerDraft] = useState(snapshot.markerDraft);
-	const [activePanel, setActivePanel] = useState("stream");
 
 	useLayoutEffect(() => {
 		if (document.activeElement !== markerRef.current) setMarkerDraft(snapshot.markerDraft);
@@ -243,13 +270,25 @@ function Toolbar() {
 	return (
 		<div className="toolbar">
 			<div className="view-tabs" role="tablist">
-				<button className={`tab ${activePanel === "stream" ? "active" : ""}`.trim()} data-panel="stream" onClick={() => setActivePanel("stream")}>
+				<button
+					className={`tab ${viewState.activePanel === "stream" ? "active" : ""}`.trim()}
+					data-panel="stream"
+					onClick={() => dispatchViewState({ type: "set-active-panel", activePanel: "stream" })}
+				>
 					Message stream
 				</button>
-				<button className={`tab ${activePanel === "patterns" ? "active" : ""}`.trim()} data-panel="patterns" onClick={() => setActivePanel("patterns")}>
+				<button
+					className={`tab ${viewState.activePanel === "patterns" ? "active" : ""}`.trim()}
+					data-panel="patterns"
+					onClick={() => dispatchViewState({ type: "set-active-panel", activePanel: "patterns" })}
+				>
 					Pattern analysis
 				</button>
-				<button className={`tab ${activePanel === "notes" ? "active" : ""}`.trim()} data-panel="notes" onClick={() => setActivePanel("notes")}>
+				<button
+					className={`tab ${viewState.activePanel === "notes" ? "active" : ""}`.trim()}
+					data-panel="notes"
+					onClick={() => dispatchViewState({ type: "set-active-panel", activePanel: "notes" })}
+				>
 					Notes <span id="notesCount">{notes.count}</span>
 				</button>
 			</div>
@@ -333,27 +372,53 @@ function Toolbar() {
 				</label>
 				<label className="compact-select">
 					Display
-					<select id="displayMode" defaultValue="hex">
+					<select
+						id="displayMode"
+						value={viewState.displayMode}
+						onChange={event =>
+							dispatchViewState({ type: "set-display-mode", displayMode: event.currentTarget.value as DisplayMode })
+						}
+					>
 						<option value="hex">HEX</option>
 						<option value="binary">BINARY</option>
 					</select>
 				</label>
 				<label className="switch-label">
-					<input id="uniqueToggle" type="checkbox" defaultChecked />
+					<input
+						id="uniqueToggle"
+						type="checkbox"
+						checked={viewState.showFrameChanges}
+						onChange={event =>
+							dispatchViewState({ type: "set-frame-changes", showFrameChanges: event.currentTarget.checked })
+						}
+					/>
 					<span className="switch" /> Frame changes
 				</label>
 				<label id="collapseControl" className={`switch-label ${snapshot.visibility.collapseControl ? "" : "hidden"}`.trim()}>
-					<input id="collapseToggle" type="checkbox" />
+					<input
+						id="collapseToggle"
+						type="checkbox"
+						checked={viewState.collapseRuns}
+						onChange={event =>
+							dispatchViewState({ type: "set-collapse-runs", collapseRuns: event.currentTarget.checked })
+						}
+					/>
 					<span className="switch" /> Collapse runs
 				</label>
 				<button
 					id="toggleMessageFilterBtn"
-					className="icon-btn message-filter-toggle"
+					ref={messageFilterToggleRef}
+					className={`icon-btn message-filter-toggle ${viewState.activePanel !== "stream" ? "hidden" : ""} ${viewState.filterQuery.trim() ? "active" : ""}`.trim()}
 					type="button"
-					title="Show message filter"
-					aria-label="Show message filter"
-					aria-expanded="false"
+					disabled={snapshot.disabled}
+					title={viewState.filterOpen ? "Hide message filter" : "Show message filter"}
+					aria-label={viewState.filterOpen ? "Hide message filter" : "Show message filter"}
+					aria-expanded={viewState.filterOpen}
 					aria-controls="streamFilter"
+					onClick={() => {
+						dispatchViewState({ type: "set-filter-open", filterOpen: !viewState.filterOpen });
+						if (!viewState.filterOpen) requestAnimationFrame(() => messageFilterRef.current?.focus());
+					}}
 				>
 					<svg viewBox="0 0 24 24" aria-hidden="true">
 						<path d="M3.75 5.25h16.5l-6.6 7.45v5.3l-3.3 1.75V12.7l-6.6-7.45Z" />
@@ -364,7 +429,7 @@ function Toolbar() {
 	);
 }
 
-function StreamPanel() {
+function StreamPanel({ viewState, dispatchViewState, messageFilterRef, messageFilterToggleRef }: ToolbarProps) {
 	const framing = useSyncExternalStore(
 		subscribeToFramingToolbar,
 		getFramingToolbarSnapshot,
@@ -372,11 +437,28 @@ function StreamPanel() {
 	);
 
 	return (
-		<div id="streamPanel" className="tab-panel active">
-			<div id="streamFilter" className="stream-filter collapsed">
+		<div
+			id="streamPanel"
+			className={`tab-panel ${viewState.activePanel === "stream" ? "active" : ""}`.trim()}
+		>
+			<div id="streamFilter" className={`stream-filter ${viewState.filterOpen ? "" : "collapsed"}`.trim()}>
 				<label>
 					<span>⌕</span>
-					<input id="messageFilter" placeholder="Filter bytes, e.g. C2 ?? 5D" />
+					<input
+						id="messageFilter"
+						ref={messageFilterRef}
+						placeholder="Filter bytes, e.g. C2 ?? 5D"
+						value={viewState.filterQuery}
+						onChange={event =>
+							dispatchViewState({ type: "set-filter-query", filterQuery: event.currentTarget.value })
+						}
+						onKeyDown={event => {
+							if (event.key !== "Escape") return;
+							event.preventDefault();
+							dispatchViewState({ type: "set-filter-open", filterOpen: false });
+							messageFilterToggleRef.current?.focus();
+						}}
+					/>
 				</label>
 				<div className="stream-summary">
 					<span
@@ -721,13 +803,13 @@ function SendPanel({ open, onOpenChange }: SendPanelProps) {
 	);
 }
 
-function AnalysisPanel() {
-	return <AnalysisPanelShell />;
+function AnalysisPanel({ active }: { active: boolean }) {
+	return <AnalysisPanelShell active={active} />;
 }
 
-const AnalysisPanelShell = memo(function AnalysisPanelShell() {
+const AnalysisPanelShell = memo(function AnalysisPanelShell({ active }: { active: boolean }) {
 	return (
-		<div id="patternsPanel" className="tab-panel">
+		<div id="patternsPanel" className={`tab-panel ${active ? "active" : ""}`.trim()}>
 			<AnalysisPanelContent />
 		</div>
 	);
@@ -850,13 +932,13 @@ function AnalysisPanelContent() {
 	);
 }
 
-function NotesPanel() {
-	return <NotesPanelShell />;
+function NotesPanel({ active }: { active: boolean }) {
+	return <NotesPanelShell active={active} />;
 }
 
-const NotesPanelShell = memo(function NotesPanelShell() {
+const NotesPanelShell = memo(function NotesPanelShell({ active }: { active: boolean }) {
 	return (
-		<div id="notesPanel" className="tab-panel">
+		<div id="notesPanel" className={`tab-panel ${active ? "active" : ""}`.trim()}>
 			<NotesPanelContent />
 		</div>
 	);
@@ -1005,11 +1087,16 @@ function Toast({ sendPopupOpen }: { sendPopupOpen: boolean }) {
 
 function App() {
 	const [sendPopupOpen, setSendPopupOpen] = useState(false);
+	const [viewState, dispatchViewState] = useReducer(reduceViewState, EMPTY_VIEW_STATE_SNAPSHOT);
+	const messageFilterRef = useRef<HTMLInputElement>(null);
+	const messageFilterToggleRef = useRef<HTMLButtonElement>(null);
 	const handleSendPopupChange = (open: boolean) => setSendPopupOpen(open);
 
 	useEffect(() => {
 		void import("./controller");
 	}, []);
+
+	useEffect(() => publishViewStateSnapshot(viewState), [viewState]);
 
 	return (
 		<>
@@ -1019,10 +1106,20 @@ function App() {
 					<ArchiveSidebar />
 					<section className="main-panel">
 						<CaptureHeader />
-						<Toolbar />
-						<StreamPanel />
-						<AnalysisPanel />
-						<NotesPanel />
+						<Toolbar
+							viewState={viewState}
+							dispatchViewState={dispatchViewState}
+							messageFilterRef={messageFilterRef}
+							messageFilterToggleRef={messageFilterToggleRef}
+						/>
+						<StreamPanel
+							viewState={viewState}
+							dispatchViewState={dispatchViewState}
+							messageFilterRef={messageFilterRef}
+							messageFilterToggleRef={messageFilterToggleRef}
+						/>
+						<AnalysisPanel active={viewState.activePanel === "patterns"} />
+						<NotesPanel active={viewState.activePanel === "notes"} />
 					</section>
 				</main>
 			</div>
