@@ -660,6 +660,32 @@ p {
 .popover .danger {
 	color: var(--red);
 }
+.popover.capture-menu button {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-height: 34px;
+	padding: 7px 8px;
+	font: 10px var(--mono);
+}
+.popover.capture-menu button:hover,
+.popover.capture-menu button:focus-visible {
+	border: 1px solid transparent;
+	border-color: color-mix(in srgb, var(--acid) 38%, var(--line));
+	background: color-mix(in srgb, var(--acid) 10%, var(--panel-2));
+	color: var(--acid);
+	outline: 0;
+}
+.popover.capture-menu svg {
+	flex: 0 0 17px;
+	width: 17px;
+	height: 17px;
+	fill: none;
+	stroke: currentColor;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 1.6;
+}
 .message-context-menu {
 	position: fixed;
 	width: 214px;
