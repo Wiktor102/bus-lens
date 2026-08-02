@@ -12,11 +12,24 @@ import { collapseAdjacentRuns, countVisibleRowsByPatternOccurrence } from "./col
 import {
 	countDistinctMessageSignatures,
 	countReceivedRawBytes,
-	normalizeCaptureSummaryData,
 	normalizeDescription,
 	recordReceivedByte,
 	sumRecordingSessionDurations
 } from "./capture-summary";
+import {
+	frameWidth,
+	hexByte,
+	makeMessage,
+	markerBytes,
+	normalizeCapture,
+	normalizeSections,
+	parseTime,
+	rebuildPreview,
+	signature,
+	visibleByteEntries,
+	visibleMessages,
+	visiblePositionForRawByte
+} from "./capture-framing";
 
 const STORAGE_KEY = "bus-lens-state-v1";
 const $ = selector => document.querySelector(selector);
@@ -165,27 +178,6 @@ let queueDelayResolve = null;
 let patternRemarkTarget = null;
 const patternRecognitionCache = new WeakMap();
 
-function makeMessage(hex, timestamp = Date.now(), index = 0) {
-	const bytes = typeof hex === "string" ? (hex.match(/[0-9a-f]{2}/gi) || []).map(v => parseInt(v, 16)) : [...hex];
-	return {
-		id: crypto.randomUUID(),
-		timestamp,
-		byteTimestamps: bytes.map(() => timestamp),
-		bytes,
-		hidden: false,
-		hiddenBytes: bytes.map(() => false),
-		sourceIndex: index
-	};
-}
-
-function parseTime(value) {
-	const match = value.match(/(\d{2}):(\d{2}):(\d{2})[.:](\d{3})/);
-	if (!match) return Date.now();
-	const d = new Date();
-	d.setHours(+match[1], +match[2], +match[3], +match[4]);
-	return d.getTime();
-}
-
 function loadState() {
 	try {
 		const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
@@ -246,182 +238,6 @@ function normalizeArchiveState(archive) {
 	archive.captures.forEach(item => {
 		item.folderId = seen.has(item.folderId) ? item.folderId : null;
 	});
-}
-
-function normalizeCapture(c) {
-	c.params ||= [];
-	c.notes ||= [];
-	c.annotations ||= {};
-	c.patternRemarks ||= {};
-	c.messages ||= [];
-	c.messages.forEach(message => {
-		message.hidden = Boolean(message.hidden);
-		message.hiddenBytes = Array.isArray(message.hiddenBytes)
-			? message.bytes.map((_, index) => Boolean(message.hiddenBytes[index]))
-			: message.bytes.map(() => false);
-	});
-	c.notes.forEach(note => (note.id ||= crypto.randomUUID()));
-	c.previewMode ||= "length";
-	c.frameSize = Math.max(1, +c.frameSize || 3);
-	if (c.markerConfigured === undefined) {
-		// 0A was the old UI default, not a marker the user necessarily chose.
-		c.markerConfigured = Boolean(c.frameMarker && c.frameMarker !== "0A");
-	}
-	c.frameMarker = c.markerConfigured ? String(c.frameMarker || "") : "";
-	c.markerPosition ||= "start";
-	c.frameTimeGap = Math.max(0.01, +c.frameTimeGap || 5);
-	if (!Array.isArray(c.byteStream)) {
-		c.byteStream = c.messages.flatMap(message =>
-			message.bytes.map((value, index) => ({
-				value,
-				timestamp: message.byteTimestamps?.[index] ?? message.timestamp,
-				hidden: Boolean(message.hiddenBytes?.[index])
-			}))
-		);
-	}
-	c.byteStream.forEach(record => {
-		record.direction ||= "rx";
-		record.hidden = Boolean(record.hidden);
-	});
-	// Older exports stored byte visibility on framed messages rather than raw
-	// byte records. Copy it across before the preview is rebuilt.
-	c.messages.forEach(message => {
-		if (!Number.isInteger(message._byteStart) && !Array.isArray(message._rawPositions)) return;
-		message.hiddenBytes.forEach((hidden, index) => {
-			const rawPosition = message._rawPositions?.[index] ?? message._byteStart + index;
-			if (hidden && c.byteStream[rawPosition]) c.byteStream[rawPosition].hidden = true;
-		});
-	});
-	normalizeCaptureSummaryData(c);
-	normalizeSections(c);
-	c.messages.forEach(message => {
-		message.byteTimestamps ||= message.bytes.map(() => message.timestamp);
-	});
-	return c;
-}
-
-function normalizeSections(c) {
-	const streamLength = c.byteStream?.length || 0;
-	const byStart = new Map();
-	(Array.isArray(c.frameSections) ? c.frameSections : []).forEach(section => {
-		const start = Math.max(0, Math.min(Math.max(0, streamLength - 1), Math.floor(+section.start || 0)));
-		byStart.set(start, {
-			id: section.id || crypto.randomUUID(),
-			start,
-			frameSize: Math.max(1, Math.min(1024, Math.floor(+section.frameSize || c.frameSize || 3))),
-			collapseRuns: Boolean(section.collapseRuns)
-		});
-	});
-	if (!byStart.has(0)) byStart.set(0, { id: crypto.randomUUID(), start: 0, frameSize: c.frameSize, collapseRuns: false });
-	c.frameSections = [...byStart.values()].sort((a, b) => a.start - b.start);
-}
-
-function frameWidth(c = capture()) {
-	return Math.max(0, ...visibleMessages(c).map(message => visibleByteEntries(message).length));
-}
-
-function markerBytes(value) {
-	return (String(value).match(/[0-9a-f]{2}/gi) || []).map(byte => parseInt(byte, 16));
-}
-
-function markerAt(stream, index, marker) {
-	return marker.length > 0 && marker.every((value, offset) => stream[index + offset]?.value === value);
-}
-
-function rebuildPreview(c = capture()) {
-	if (!c) return;
-	normalizeCapture(c);
-	// A hidden byte is omitted before framing, rather than merely omitted while
-	// rendering. This makes every framing mode behave exactly as though the byte
-	// was never captured, while byteStream remains available for export/history.
-	const stream = c.byteStream
-		.map((record, rawPosition) => ({ ...record, rawPosition }))
-		.filter(record => !record.hidden);
-	const ranges = [];
-	if (c.previewMode === "marker") {
-		const marker = markerBytes(c.frameMarker);
-		if (c.markerPosition === "end") {
-			let start = 0;
-			let foundMarker = false;
-			for (let index = 0; index < stream.length; index++) {
-				if (markerAt(stream, index, marker)) {
-					foundMarker = true;
-					const end = index + marker.length;
-					ranges.push([start, end]);
-					start = end;
-					index = end - 1;
-				}
-			}
-			if (foundMarker && start < stream.length) ranges.push([start, stream.length]);
-		} else {
-			let start = -1;
-			for (let index = 0; index < stream.length; index++) {
-				if (!markerAt(stream, index, marker)) continue;
-				if (start >= 0 && index > start) ranges.push([start, index]);
-				start = index;
-				index += marker.length - 1;
-			}
-			if (start >= 0 && start < stream.length) ranges.push([start, stream.length]);
-		}
-	} else if (c.previewMode === "time") {
-		if (stream.length) {
-			let start = 0;
-			for (let index = 1; index < stream.length; index++) {
-				if (stream[index].timestamp - stream[index - 1].timestamp >= c.frameTimeGap) {
-					ranges.push([start, index]);
-					start = index;
-				}
-			}
-			ranges.push([start, stream.length]);
-		}
-	} else if (c.previewMode === "sections") {
-		normalizeSections(c);
-		c.frameSections.forEach((section, sectionIndex) => {
-			// Section starts are persisted as raw positions. Translate them to the
-			// compact stream so deleting bytes before a section shifts it naturally.
-			const start = stream.findIndex(record => record.rawPosition >= section.start);
-			const nextRawStart = c.frameSections[sectionIndex + 1]?.start;
-			const nextStart = nextRawStart === undefined ? -1 : stream.findIndex(record => record.rawPosition >= nextRawStart);
-			const sectionEnd = nextStart < 0 ? stream.length : nextStart;
-			if (start < 0) return;
-			for (let offset = start; offset < sectionEnd; offset += section.frameSize) {
-				ranges.push([offset, Math.min(offset + section.frameSize, sectionEnd), section.id]);
-			}
-		});
-	} else {
-		for (let start = 0; start < stream.length; start += c.frameSize) {
-			ranges.push([start, Math.min(start + c.frameSize, stream.length)]);
-		}
-	}
-	const oldMessagesByRange = new Map(
-		c.messages.map(message => {
-			const rawPositions =
-				message._rawPositions ||
-				(Number.isInteger(message._byteStart) ? message.bytes.map((_, index) => message._byteStart + index) : []);
-			return [rawPositions.join(","), { id: message.id, hidden: Boolean(message.hidden) }];
-		})
-	);
-	c.messages = ranges
-		.filter(([start, end]) => end > start)
-		.map(([start, end, sectionId], index) => {
-			const records = stream.slice(start, end);
-			const rawPositions = records.map(record => record.rawPosition);
-			const previous = oldMessagesByRange.get(rawPositions.join(","));
-			return {
-				id: previous?.id || crypto.randomUUID(),
-				timestamp: records[0].timestamp,
-				byteTimestamps: records.map(record => record.timestamp),
-				bytes: records.map(record => record.value),
-				directions: records.map(record => record.direction || "rx"),
-				hidden: Boolean(previous?.hidden),
-				hiddenBytes: records.map(() => false),
-				sourceIndex: index,
-				sectionId,
-				_byteStart: start,
-				_byteEnd: end,
-				_rawPositions: rawPositions
-			};
-		});
 }
 
 function persistState() {
@@ -492,20 +308,6 @@ function formatDelta(ms) {
 	return `${ms.toFixed(1)} ms`;
 }
 
-function hexByte(byte) {
-	return byte.toString(16).padStart(2, "0").toUpperCase();
-}
-function visibleByteEntries(message) {
-	return message.bytes
-		.map((value, rawPosition) => ({ value, rawPosition }))
-		.filter(({ rawPosition }) => !message.hiddenBytes?.[rawPosition]);
-}
-function visiblePositionForRawByte(message, rawPosition) {
-	return visibleByteEntries(message).findIndex(entry => entry.rawPosition === rawPosition);
-}
-function signature(message) {
-	return visibleByteEntries(message).map(({ value }) => hexByte(value)).join(" ");
-}
 function hashText(value) {
 	let hash = 2166136261;
 	for (const char of value) {
@@ -536,10 +338,6 @@ function showToast(message) {
 	$("#toast").textContent = message;
 	$("#toast").classList.add("show");
 	toastTimer = setTimeout(() => $("#toast").classList.remove("show"), 2600);
-}
-
-function visibleMessages(c = capture()) {
-	return (c?.messages || []).filter(message => !message.hidden);
 }
 
 function closeMessageContextMenu({ restoreFocus = false } = {}) {
