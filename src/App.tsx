@@ -109,11 +109,25 @@ function CaptureHeader() {
 					<button id="moreBtn" className="icon-btn" aria-label="Capture menu">
 						•••
 					</button>
-					<div id="moreMenu" className="popover hidden">
-						<button id="duplicateCaptureBtn">Duplicate capture</button>
-						<button id="clearMessagesBtn">Clear messages</button>
+					<div id="moreMenu" className="popover capture-menu hidden">
+						<button id="duplicateCaptureBtn">
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<rect x="8" y="8" width="11.5" height="11.5" rx="1" />
+								<path d="M16 8V5.5a1.5 1.5 0 0 0-1.5-1.5h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8" />
+							</svg>
+							<span>Duplicate capture</span>
+						</button>
+						<button id="clearMessagesBtn">
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M4.5 7.5h15M9 7.5V5h6v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5M14 11v5" />
+							</svg>
+							<span>Clear messages</span>
+						</button>
 						<button id="deleteCaptureBtn" className="danger">
-							Delete capture
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M5 7.5h14M9 7.5V5h6v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5M14 11v5" />
+							</svg>
+							<span>Delete capture</span>
 						</button>
 					</div>
 				</div>
