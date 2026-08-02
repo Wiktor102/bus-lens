@@ -8,6 +8,7 @@ import {
 	observeElementRect
 } from "@tanstack/virtual-core";
 import { publishArchiveSnapshot, registerArchiveActions } from "./archive-bridge";
+import { MAX_SEND_HISTORY, STORAGE_KEY, loadState, normalizeSendState } from "./app-state";
 import { collapseAdjacentRuns, countVisibleRowsByPatternOccurrence } from "./collapse-runs";
 import {
 	countDistinctMessageSignatures,
@@ -31,7 +32,6 @@ import {
 	visiblePositionForRawByte
 } from "./capture-framing";
 
-const STORAGE_KEY = "bus-lens-state-v1";
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const BYTE_COLORS = [
@@ -69,87 +69,6 @@ const LIVE_REFRESH_MS = 120;
 const VIRTUAL_ROW_HEIGHT = 41;
 const VIRTUAL_SECTION_HEIGHT = 48;
 const VIRTUAL_OVERSCAN = 8;
-const MAX_SEND_HISTORY = 250;
-
-const demoCaptures = [
-	{
-		id: crypto.randomUUID(),
-		name: "Overview · Speed 1",
-		view: "Overview",
-		params: [
-			{ key: "Speed", value: "1" },
-			{ key: "Mode", value: "auto / program 1" }
-		],
-		createdAt: "2026-07-28T12:39:07.009Z",
-		frameSize: 3,
-		baudRate: 115200,
-		inputFormat: "text",
-		messages: [
-			["12:39:07.009", "C2 08 5D"],
-			["12:39:07.088", "C2 08 5D"],
-			["12:39:07.182", "C2 00 5D"],
-			["12:39:07.222", "C2 08 5D"],
-			["12:39:07.341", "C2 08 5D"],
-			["12:39:07.387", "C2 00 5D"],
-			["12:39:07.481", "C2 08 5D"],
-			["12:39:07.528", "C2 08 5D"],
-			["12:39:07.605", "C2 00 5D"],
-			["12:39:07.648", "C2 08 5D"],
-			["12:39:07.747", "C2 08 5D"],
-			["12:39:07.790", "C2 08 5D"],
-			["12:39:08.167", "C2 00 5D"],
-			["12:39:09.844", "C2 08 4D"],
-			["12:49:49.917", "3B D6 FC"],
-			["12:49:49.960", "C2 88 5D"],
-			["12:49:50.039", "C2 80 5D"],
-			["12:49:50.133", "C2 88 5D"],
-			["12:49:50.177", "C2 88 4D"],
-			["12:49:50.244", "C2 80 5D"]
-		].map(([time, hex], i) => makeMessage(hex, parseTime(time), i)),
-		notes: [
-			{
-				id: crypto.randomUUID(),
-				type: "capture",
-				text: "FC appears once immediately after returning to the Overview view; investigate as a possible screen transition marker.",
-				createdAt: Date.now()
-			}
-		],
-		annotations: {}
-	},
-	{
-		id: crypto.randomUUID(),
-		name: "Speed · 1 → 2",
-		view: "Speed",
-		params: [
-			{ key: "Speed", value: "1 → 2" },
-			{ key: "Ventilation type", value: "full" }
-		],
-		createdAt: "2026-07-28T12:57:39.091Z",
-		frameSize: 3,
-		baudRate: 115200,
-		inputFormat: "text",
-		messages: [
-			["12:57:39.091", "42 3A 9C"],
-			["12:57:39.160", "42 3A DC"],
-			["12:57:39.250", "4A 3A DC"],
-			["12:57:39.344", "42 3A DC"],
-			["12:57:39.390", "4A 3A DC"],
-			["12:57:39.470", "42 3A DC"],
-			["12:57:39.516", "42 E1 9C"],
-			["12:57:39.628", "4A E1 9C"],
-			["12:57:39.674", "42 E9 9C"],
-			["12:57:39.769", "42 E1 9C"],
-			["12:57:39.814", "4A E1 9C"],
-			["12:57:39.894", "4A E9 9C"],
-			["12:57:39.939", "4A E1 8C"],
-			["12:57:40.010", "42 E9 8C"],
-			["12:57:40.098", "42 E1 9C"]
-		].map(([time, hex], i) => makeMessage(hex, parseTime(time), i)),
-		notes: [],
-		annotations: {}
-	}
-];
-
 let state = loadState();
 let activeId = state.activeId || state.captures[0]?.id;
 let port = null;
@@ -177,68 +96,6 @@ let queueDelayTimer = null;
 let queueDelayResolve = null;
 let patternRemarkTarget = null;
 const patternRecognitionCache = new WeakMap();
-
-function loadState() {
-	try {
-		const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-		if (Array.isArray(saved?.captures)) {
-			normalizeArchiveState(saved);
-			saved.captures.forEach(normalizeCapture);
-			saved.captures.forEach(capture => rebuildPreview(capture));
-			normalizeSendState(saved);
-			return saved;
-		}
-	} catch {}
-	demoCaptures.forEach(normalizeCapture);
-	demoCaptures.forEach(capture => rebuildPreview(capture));
-	const initial = { captures: demoCaptures, folders: [], activeId: demoCaptures[0].id };
-	normalizeSendState(initial);
-	return initial;
-}
-
-function normalizeSendState(target = state) {
-	target.sendHistory = Array.isArray(target.sendHistory)
-		? target.sendHistory
-				.filter(item => Array.isArray(item.bytes) && item.bytes.length)
-				.slice(0, MAX_SEND_HISTORY)
-		: [];
-	target.sendQueue = Array.isArray(target.sendQueue)
-		? target.sendQueue
-				.filter(item => Array.isArray(item.bytes) && item.bytes.length)
-				.map(item => ({
-					id: item.id || crypto.randomUUID(),
-					bytes: item.bytes.map(Number),
-					createdAt: item.createdAt || Date.now()
-				}))
-		: [];
-	const savedDelay = Number(target.sendSettings?.delayMs);
-	target.sendSettings = {
-		delayMs: Number.isFinite(savedDelay) ? Math.max(0, Math.min(600_000, savedDelay)) : 100,
-		draft: String(target.sendSettings?.draft || ""),
-		baudRate: Math.max(300, +target.sendSettings?.baudRate || 115200)
-	};
-}
-
-function normalizeArchiveState(archive) {
-	archive.folders = Array.isArray(archive.folders) ? archive.folders : [];
-	const seen = new Set();
-	archive.folders = archive.folders
-		.filter(folder => folder && typeof folder === "object")
-		.map(folder => ({
-			id: String(folder.id || crypto.randomUUID()),
-			name: String(folder.name || "Untitled folder").trim() || "Untitled folder",
-			collapsed: Boolean(folder.collapsed),
-			createdAt: folder.createdAt || new Date().toISOString()
-		}))
-		.filter(folder => {
-			if (seen.has(folder.id)) return false;
-			seen.add(folder.id);
-			return true;
-		});
-	archive.captures.forEach(item => {
-		item.folderId = seen.has(item.folderId) ? item.folderId : null;
-	});
-}
 
 function persistState() {
 	state.activeId = activeId;

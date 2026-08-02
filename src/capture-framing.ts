@@ -34,6 +34,13 @@ export type CaptureSection = {
 };
 
 export type Capture = Omit<CaptureSummaryData, "notes"> & {
+	id?: string;
+	name?: string;
+	view?: string;
+	createdAt?: string;
+	baudRate?: number;
+	inputFormat?: string;
+	folderId?: string | null;
 	notes?: CaptureNote[];
 	params?: unknown[];
 	annotations?: Record<string, unknown>;
@@ -51,12 +58,17 @@ export type Capture = Omit<CaptureSummaryData, "notes"> & {
 type PreviewByteRecord = RawByteRecord & { rawPosition: number };
 type ExistingMessage = { id?: string; hidden: boolean };
 
-const createId = () => crypto.randomUUID();
+const createId: () => string = () => crypto.randomUUID();
 
-export function makeMessage(hex: string | Iterable<number>, timestamp = Date.now(), index = 0): CaptureMessage {
+export function makeMessage(
+	hex: string | Iterable<number>,
+	timestamp = Date.now(),
+	index = 0,
+	generateId = createId
+): CaptureMessage {
 	const bytes = typeof hex === "string" ? (hex.match(/[0-9a-f]{2}/gi) || []).map(value => parseInt(value, 16)) : [...hex];
 	return {
-		id: createId(),
+		id: generateId(),
 		timestamp,
 		byteTimestamps: bytes.map(() => timestamp),
 		bytes,
@@ -66,15 +78,15 @@ export function makeMessage(hex: string | Iterable<number>, timestamp = Date.now
 	};
 }
 
-export function parseTime(value: string): number {
+export function parseTime(value: string, now = Date.now): number {
 	const match = value.match(/(\d{2}):(\d{2}):(\d{2})[.:](\d{3})/);
-	if (!match) return Date.now();
-	const date = new Date();
+	if (!match) return now();
+	const date = new Date(now());
 	date.setHours(+match[1], +match[2], +match[3], +match[4]);
 	return date.getTime();
 }
 
-export function normalizeCapture(capture: Capture): Capture {
+export function normalizeCapture(capture: Capture, generateId = createId): Capture {
 	capture.params ||= [];
 	capture.notes ||= [];
 	capture.annotations ||= {};
@@ -86,7 +98,7 @@ export function normalizeCapture(capture: Capture): Capture {
 			? message.bytes.map((_, index) => Boolean(message.hiddenBytes?.[index]))
 			: message.bytes.map(() => false);
 	});
-	capture.notes.forEach(note => (note.id ||= createId()));
+	capture.notes.forEach(note => (note.id ||= generateId()));
 	capture.previewMode ||= "length";
 	capture.frameSize = Math.max(1, +capture.frameSize! || 3);
 	if (capture.markerConfigured === undefined) {
@@ -118,21 +130,21 @@ export function normalizeCapture(capture: Capture): Capture {
 			if (hidden && capture.byteStream?.[rawPosition]) capture.byteStream[rawPosition].hidden = true;
 		});
 	});
-	normalizeCaptureSummaryData(capture);
-	normalizeSections(capture);
+	normalizeCaptureSummaryData(capture, generateId);
+	normalizeSections(capture, generateId);
 	capture.messages.forEach(message => {
 		message.byteTimestamps ||= message.bytes.map(() => message.timestamp);
 	});
 	return capture;
 }
 
-export function normalizeSections(capture: Capture): void {
+export function normalizeSections(capture: Capture, generateId = createId): void {
 	const streamLength = capture.byteStream?.length || 0;
 	const byStart = new Map<number, CaptureSection>();
 	(Array.isArray(capture.frameSections) ? capture.frameSections : []).forEach(section => {
 		const start = Math.max(0, Math.min(Math.max(0, streamLength - 1), Math.floor(+section.start! || 0)));
 		byStart.set(start, {
-			id: section.id || createId(),
+			id: section.id || generateId(),
 			start,
 			frameSize: Math.max(1, Math.min(1024, Math.floor(+section.frameSize! || capture.frameSize || 3))),
 			collapseRuns: Boolean(section.collapseRuns)
@@ -140,7 +152,7 @@ export function normalizeSections(capture: Capture): void {
 	});
 	if (!byStart.has(0)) {
 		byStart.set(0, {
-			id: createId(),
+			id: generateId(),
 			start: 0,
 			frameSize: capture.frameSize,
 			collapseRuns: false
@@ -161,8 +173,8 @@ export function markerAt(stream: PreviewByteRecord[], index: number, marker: num
 	return marker.length > 0 && marker.every((value, offset) => stream[index + offset]?.value === value);
 }
 
-export function rebuildPreview(capture: Capture): void {
-	normalizeCapture(capture);
+export function rebuildPreview(capture: Capture, generateId = createId): void {
+	normalizeCapture(capture, generateId);
 	// A hidden byte is omitted before framing, rather than merely omitted while
 	// rendering. This makes every framing mode behave exactly as though the byte
 	// was never captured, while byteStream remains available for export/history.
@@ -241,7 +253,7 @@ export function rebuildPreview(capture: Capture): void {
 			const rawPositions = records.map(record => record.rawPosition);
 			const previous = oldMessagesByRange.get(rawPositions.join(","));
 			return {
-				id: previous?.id || createId(),
+				id: previous?.id || generateId(),
 				timestamp: records[0].timestamp,
 				byteTimestamps: records.map(record => record.timestamp),
 				bytes: records.map(record => record.value),
