@@ -1,5 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { ArchiveSidebar } from "./archive-sidebar";
+import { getAnalysisSnapshot, subscribeToAnalysis } from "./analysis-bridge";
 import {
 	getCaptureHeaderActions,
 	getCaptureHeaderSnapshot,
@@ -14,6 +15,7 @@ import {
 import type { FramingMode, MarkerPosition } from "./framing-toolbar";
 import { getSendActions, getSendSnapshot, subscribeToSend } from "./send-bridge";
 import { deriveSendViewModel, formatSendTime, parseTransmitHex } from "./send";
+import { getNotesActions, getNotesSnapshot, subscribeToNotes } from "./notes-bridge";
 import { getToastSnapshot, subscribeToToast } from "./toast-bridge";
 import "./styles.css";
 
@@ -216,9 +218,11 @@ function Toolbar() {
 		getFramingToolbarSnapshot,
 		getFramingToolbarSnapshot
 	);
+	const notes = useSyncExternalStore(subscribeToNotes, getNotesSnapshot, getNotesSnapshot);
 	const actions = getFramingToolbarActions();
 	const markerRef = useRef<HTMLInputElement>(null);
 	const [markerDraft, setMarkerDraft] = useState(snapshot.markerDraft);
+	const [activePanel, setActivePanel] = useState("stream");
 
 	useLayoutEffect(() => {
 		if (document.activeElement !== markerRef.current) setMarkerDraft(snapshot.markerDraft);
@@ -232,14 +236,14 @@ function Toolbar() {
 	return (
 		<div className="toolbar">
 			<div className="view-tabs" role="tablist">
-				<button className="tab active" data-panel="stream">
+				<button className={`tab ${activePanel === "stream" ? "active" : ""}`.trim()} data-panel="stream" onClick={() => setActivePanel("stream")}>
 					Message stream
 				</button>
-				<button className="tab" data-panel="patterns">
+				<button className={`tab ${activePanel === "patterns" ? "active" : ""}`.trim()} data-panel="patterns" onClick={() => setActivePanel("patterns")}>
 					Pattern analysis
 				</button>
-				<button className="tab" data-panel="notes">
-					Notes <span id="notesCount">0</span>
+				<button className={`tab ${activePanel === "notes" ? "active" : ""}`.trim()} data-panel="notes" onClick={() => setActivePanel("notes")}>
+					Notes <span id="notesCount">{notes.count}</span>
 				</button>
 			</div>
 			<div className="toolbar-controls">
@@ -711,9 +715,21 @@ function SendPanel({ open, onOpenChange }: SendPanelProps) {
 }
 
 function AnalysisPanel() {
+	return <AnalysisPanelShell />;
+}
+
+const AnalysisPanelShell = memo(function AnalysisPanelShell() {
 	return (
 		<div id="patternsPanel" className="tab-panel">
-			<div className="analysis-grid">
+			<AnalysisPanelContent />
+		</div>
+	);
+});
+
+function AnalysisPanelContent() {
+	const snapshot = useSyncExternalStore(subscribeToAnalysis, getAnalysisSnapshot, getAnalysisSnapshot);
+	return (
+		<div className="analysis-grid">
 				<article className="analysis-card wide">
 					<div className="card-heading">
 						<div>
@@ -724,7 +740,27 @@ function AnalysisPanel() {
 							<i /> stable <i /> changing
 						</span>
 					</div>
-					<div id="bitMap" className="bit-map" />
+					<div id="bitMap" className="bit-map">
+						{snapshot.bitVariance.map(row => (
+							<div className="bit-row" key={row.label}>
+								<label>{row.label}</label>
+								{row.cells.map(cell => (
+									<div
+										className="bit-cell"
+										key={cell.bit}
+										style={{ "--variance": cell.variance } as CSSProperties}
+										title={`${cell.percentage}% ones`}
+									>
+										<span>
+											b{cell.bit}
+											<br />
+											{cell.percentage}%
+										</span>
+									</div>
+								))}
+							</div>
+						))}
+					</div>
 				</article>
 				<article className="analysis-card">
 					<div className="card-heading">
@@ -733,7 +769,25 @@ function AnalysisPanel() {
 							<h2>Message signatures</h2>
 						</div>
 					</div>
-					<div id="signatureList" className="signature-list" />
+					<div id="signatureList" className="signature-list">
+						{snapshot.signatures.length ? (
+							snapshot.signatures.map(row => (
+								<div className="signature-row" key={row.signature}>
+									<span>{row.signature}</span>
+									<span className="signature-bar">
+										<i style={{ width: `${row.width}%` }} />
+									</span>
+									<small>
+										{row.count} · {row.percentage}%
+									</small>
+								</div>
+							))
+						) : (
+							<span className="muted">
+								{snapshot.captureId ? "No messages to analyze." : "No capture selected."}
+							</span>
+						)}
+					</div>
 				</article>
 				<article className="analysis-card">
 					<div className="card-heading">
@@ -742,7 +796,21 @@ function AnalysisPanel() {
 							<h2>Byte vocabulary</h2>
 						</div>
 					</div>
-					<div id="vocabulary" className="vocabulary" />
+					<div id="vocabulary" className="vocabulary">
+						{snapshot.vocabulary.map(row => (
+							<div className="vocab-row" key={row.label}>
+								<label>{row.label}</label>
+								<div className="vocab-values">
+									{row.values.map(value => (
+										<span key={value.value} title={`${value.count} occurrences`}>
+											{value.hex}
+											<small> ·{value.count}</small>
+										</span>
+									))}
+								</div>
+							</div>
+						))}
+					</div>
 				</article>
 				<article className="analysis-card wide">
 					<div className="card-heading">
@@ -752,48 +820,127 @@ function AnalysisPanel() {
 						</div>
 						<span className="muted">Consecutive message changes</span>
 					</div>
-					<div id="transitionList" className="transition-list" />
+					<div id="transitionList" className="transition-list">
+						{snapshot.transitions.length ? (
+							snapshot.transitions.map(row => (
+								<div className="transition-row" key={`${row.from}|${row.to}`}>
+									<span>{row.from}</span>
+									<b>→</b>
+									<span>{row.to}</span>
+									<small>
+										{row.count}× · {row.diffs} byte{row.diffs === 1 ? "" : "s"} changed
+									</small>
+								</div>
+							))
+						) : (
+							<span className="muted">
+								{snapshot.captureId ? "No transitions yet." : "No capture selected."}
+							</span>
+						)}
+					</div>
 				</article>
 			</div>
-		</div>
 	);
 }
 
 function NotesPanel() {
+	return <NotesPanelShell />;
+}
+
+const NotesPanelShell = memo(function NotesPanelShell() {
 	return (
 		<div id="notesPanel" className="tab-panel">
-			<div className="notes-layout">
+			<NotesPanelContent />
+		</div>
+	);
+});
+
+function NotesPanelContent() {
+	const snapshot = useSyncExternalStore(subscribeToNotes, getNotesSnapshot, getNotesSnapshot);
+	const actions = getNotesActions();
+	const [sequenceStart, setSequenceStart] = useState("1");
+	const [sequenceEnd, setSequenceEnd] = useState("2");
+	const [noteText, setNoteText] = useState("");
+
+	return (
+		<div className="notes-layout">
 				<div>
 					<div className="section-title">
 						<span className="eyebrow">Notebook</span>
 						<h2>Protocol observations</h2>
 					</div>
-					<div id="notesList" className="notes-list" />
+					<div id="notesList" className="notes-list">
+						{snapshot.notes.length ? (
+							snapshot.notes.map(note => (
+								<article className="note-card" key={note.id}>
+									<header>
+										<span>
+											{note.label}
+											{note.targetLabel ? ` · ${note.targetLabel}` : ""}
+										</span>
+										<span>{new Date(note.createdAt).toLocaleString()}</span>
+									</header>
+									<p>{note.text}</p>
+								</article>
+							))
+						) : (
+							<p className="muted">
+								{snapshot.captureId ? "No observations recorded for this capture." : "No capture selected."}
+							</p>
+						)}
+					</div>
 				</div>
-				<form id="captureNoteForm" className="note-composer">
+				<form
+					id="captureNoteForm"
+					className="note-composer"
+					onSubmit={event => {
+						event.preventDefault();
+						if (
+							actions.addSequenceNote({
+								start: sequenceStart,
+								end: sequenceEnd,
+								text: noteText
+							})
+						)
+							setNoteText("");
+					}}
+				>
 					<span className="eyebrow">Sequence observation</span>
 					<h2>Record a message sequence</h2>
 					<div id="sequenceRange" className="sequence-range">
 						<label className="field">
 							From row
-							<input id="sequenceStart" type="number" min="1" defaultValue="1" />
+							<input
+								id="sequenceStart"
+								type="number"
+								min="1"
+								value={sequenceStart}
+								onChange={event => setSequenceStart(event.currentTarget.value)}
+							/>
 						</label>
 						<label className="field">
 							To row
-							<input id="sequenceEnd" type="number" min="1" defaultValue="2" />
+							<input
+								id="sequenceEnd"
+								type="number"
+								min="1"
+								value={sequenceEnd}
+								onChange={event => setSequenceEnd(event.currentTarget.value)}
+							/>
 						</label>
 					</div>
 					<textarea
 						id="captureNoteText"
 						required
 						placeholder="What does this message sequence appear to represent?"
+						value={noteText}
+						onChange={event => setNoteText(event.currentTarget.value)}
 					/>
 					<button className="btn btn-primary" type="submit">
 						Add sequence note
 					</button>
 				</form>
 			</div>
-		</div>
 	);
 }
 

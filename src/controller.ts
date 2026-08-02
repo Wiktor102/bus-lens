@@ -9,6 +9,16 @@ import {
 } from "@tanstack/virtual-core";
 import { publishArchiveSnapshot, registerArchiveActions } from "./archive-bridge";
 import { MAX_SEND_HISTORY, STORAGE_KEY, loadState, normalizeSendState } from "./app-state";
+import {
+	colorForByte,
+	deriveAnalysisSnapshot,
+	getCounts,
+	recognizeMessagePatterns,
+	rowsWithDelta,
+	summarizeRunCadence,
+	transitionFrames
+} from "./analysis";
+import { publishAnalysisSnapshot } from "./analysis-bridge";
 import { deriveCaptureHeaderSnapshot } from "./capture-header";
 import { publishCaptureHeaderSnapshot, registerCaptureHeaderActions } from "./capture-header-bridge";
 import { collapseAdjacentRuns, countVisibleRowsByPatternOccurrence } from "./collapse-runs";
@@ -17,6 +27,8 @@ import {
 	registerFramingToolbarActions
 } from "./framing-toolbar-bridge";
 import { publishSendSnapshot, registerSendActions } from "./send-bridge";
+import { registerNotesActions, publishNotesSnapshot, type SequenceNoteInput } from "./notes-bridge";
+import { deriveNotesSnapshot } from "./notes";
 import { publishToastSnapshot } from "./toast-bridge";
 import {
 	applyFramingSettings,
@@ -42,35 +54,6 @@ import {
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
-const BYTE_COLORS = [
-	"#79D8E7",
-	"#CBF45A",
-	"#F2B84B",
-	"#B99AF7",
-	"#FF8178",
-	"#69D5A5",
-	"#7DA9FF",
-	"#E48AC2",
-	"#5BD6C8",
-	"#F08C62",
-	"#A8B7FF",
-	"#E76F7B"
-];
-const TRANSITION_COLORS = ["#36C8E8", "#9E65F4", "#F39C4A", "#E35D91", "#5A8FFF", "#49C88A"];
-const PATTERN_COLORS = [
-	"#42D9C8",
-	"#B6E94A",
-	"#FFB44C",
-	"#B58AF4",
-	"#F7788A",
-	"#66A3FF",
-	"#E987D0",
-	"#72D28D",
-	"#F08B5D",
-	"#A6B2FF"
-];
-const MIN_PATTERN_LENGTH = 2;
-const MAX_PATTERN_LENGTH = 8;
 // A capture remains useful at this size while still fitting comfortably in browser storage.
 const MAX_CAPTURE_BYTES = 50_000;
 const LIVE_REFRESH_MS = 120;
@@ -103,7 +86,6 @@ let stopQueueRequested = false;
 let queueDelayTimer = null;
 let queueDelayResolve = null;
 let patternRemarkTarget = null;
-const patternRecognitionCache = new WeakMap();
 
 function persistState() {
 	state.activeId = activeId;
@@ -200,24 +182,6 @@ function formatDelta(ms) {
 	return `${ms.toFixed(1)} ms`;
 }
 
-function hashText(value) {
-	let hash = 2166136261;
-	for (const char of value) {
-		hash ^= char.charCodeAt(0);
-		hash = Math.imul(hash, 16777619);
-	}
-	return hash >>> 0;
-}
-function colorForByte(byte) {
-	const paletteIndex = (byte * 13 + (byte >> 4) * 7) % BYTE_COLORS.length;
-	return BYTE_COLORS[paletteIndex];
-}
-function colorForTransition(key) {
-	return TRANSITION_COLORS[hashText(key) % TRANSITION_COLORS.length];
-}
-function colorForPattern(key) {
-	return PATTERN_COLORS[hashText(key) % PATTERN_COLORS.length];
-}
 function escapeHtml(value = "") {
 	return String(value).replace(
 		/[&<>"']/g,
@@ -316,13 +280,13 @@ function render() {
 	publishFramingToolbarState();
 	updateMessageFilterControl();
 	publishSendState();
+	publishAnalysisState();
+	publishNotesState();
 	if (!capture()) {
 		renderEmptyWorkspace();
 		return;
 	}
 	renderMessages();
-	renderAnalysis();
-	renderNotes();
 }
 
 function renderEmptyWorkspace() {
@@ -333,12 +297,6 @@ function renderEmptyWorkspace() {
 	$("#emptyState p").textContent = "Create a capture or import a monitor dump to begin.";
 	$("#visibleCount").textContent = "0 rows";
 	$("#patternCount").textContent = "0 groups";
-	$("#signatureList").innerHTML = `<span class="muted">No capture selected.</span>`;
-	$("#vocabulary").innerHTML = "";
-	$("#bitMap").innerHTML = "";
-	$("#transitionList").innerHTML = `<span class="muted">No capture selected.</span>`;
-	$("#notesList").innerHTML = `<p class="muted">No capture selected.</p>`;
-	$("#notesCount").textContent = "0";
 	updateMessageFilterControl();
 }
 
@@ -421,10 +379,36 @@ function publishFramingToolbarState(c = capture()) {
 	publishFramingToolbarSnapshot(selectFramingToolbarSnapshot(c));
 }
 
-function getCounts(messages) {
-	const counts = new Map();
-	messages.forEach(m => counts.set(signature(m), (counts.get(signature(m)) || 0) + 1));
-	return counts;
+function publishAnalysisState(c = capture()) {
+	publishAnalysisSnapshot(deriveAnalysisSnapshot(c));
+}
+
+function publishNotesState(c = capture()) {
+	publishNotesSnapshot(deriveNotesSnapshot(c));
+}
+
+function addSequenceNote({ start: rawStart, end: rawEnd, text: rawText }: SequenceNoteInput): boolean {
+	const c = capture();
+	const noteText = String(rawText || "").trim();
+	if (!c || !noteText) return false;
+	const max = Math.max(1, c.messages.length);
+	const start = Math.max(1, Math.min(max, Number(rawStart) || 1));
+	const end = Math.max(start, Math.min(max, Number(rawEnd) || start));
+	c.notes ||= [];
+	c.notes.push({
+		id: crypto.randomUUID(),
+		type: "sequence",
+		text: noteText,
+		createdAt: Date.now(),
+		start,
+		end,
+		targetLabel: `rows ${start}–${end}`
+	});
+	saveState();
+	publishNotesState(c);
+	renderMessages();
+	showToast("Sequence observation added");
+	return true;
 }
 
 function filteredMessages() {
@@ -478,188 +462,6 @@ function filteredMessages() {
 		);
 	}
 	return rowsWithDelta(rows.map(summarizeRunCadence));
-}
-
-function rowsWithDelta(rows) {
-	return rows.map((m, i) => ({
-		...m,
-		_delta: i && m._originalStart === rows[i - 1]._originalEnd + 1 ? m._runStart - rows[i - 1]._runEnd : null
-	}));
-}
-
-function summarizeRunCadence(message) {
-	const intervals = message._runMessages
-		.slice(1)
-		.map((item, index) => item.timestamp - message._runMessages[index].timestamp)
-		.filter(interval => Number.isFinite(interval) && interval >= 0);
-	if (!intervals.length) return { ...message, _cadence: null, _cadenceStable: false, _intervals: intervals };
-	const sorted = [...intervals].sort((a, b) => a - b);
-	const middle = Math.floor(sorted.length / 2);
-	const median = sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
-	const tolerance = Math.max(2, median * 0.1);
-	const stable = intervals.every(interval => Math.abs(interval - median) <= tolerance);
-	const average = intervals.reduce((sum, interval) => sum + interval, 0) / intervals.length;
-	return { ...message, _cadence: stable ? average : null, _cadenceStable: stable, _intervals: intervals };
-}
-
-function recognizeMessagePatterns(c = capture()) {
-	const messageEntries = (c?.messages || [])
-		.map((message, originalIndex) => ({ message, originalIndex }))
-		.filter(({ message }) => !message.hidden);
-	const messages = messageEntries.map(({ message }) => message);
-	if (messages.length < MIN_PATTERN_LENGTH * 2) return { groups: [], membership: new Map() };
-	const cacheKey = [
-		c.byteStream?.length || 0,
-		messages.length,
-		JSON.stringify((c.messages || []).map(message => Boolean(message.hidden))),
-		JSON.stringify((c.messages || []).map(message => message.hiddenBytes || [])),
-		c.previewMode,
-		c.frameSize,
-		c.frameMarker,
-		c.markerPosition,
-		c.frameTimeGap,
-		JSON.stringify((c.frameSections || []).map(({ start, frameSize }) => [start, frameSize])),
-		JSON.stringify(c.patternRemarks || {})
-	].join("|");
-	const cached = patternRecognitionCache.get(c);
-	if (cached?.key === cacheKey) return cached.result;
-	const signatures = messages.map(signature);
-	const candidates = [];
-	const maxLength = Math.min(MAX_PATTERN_LENGTH, Math.floor(messages.length / 2));
-
-	for (let length = MIN_PATTERN_LENGTH; length <= maxLength; length++) {
-		const startsByKey = new Map();
-		for (let start = 0; start + length <= messages.length; start++) {
-			const window = messages.slice(start, start + length);
-			if (messageEntries.slice(start, start + length).some((entry, offset) => offset && entry.originalIndex !== messageEntries[start].originalIndex + offset)) continue;
-			if (window.some((message, offset) => offset && message.sectionId !== window[0].sectionId)) continue;
-			const parts = signatures.slice(start, start + length);
-			// A run of one identical telegram is already represented by repeat collapsing;
-			// sequence recognition is reserved for exchanges with at least two states.
-			if (new Set(parts).size < 2) continue;
-			// Do not report A-B-A-B as a four-message pattern when A-B is the
-			// underlying repeated exchange.
-			const hasShorterPeriod = Array.from(
-				{ length: Math.floor(length / 2) - 1 },
-				(_, index) => index + MIN_PATTERN_LENGTH
-			).some(period => length % period === 0 && parts.every((part, index) => part === parts[index % period]));
-			if (hasShorterPeriod) continue;
-			const key = parts.join(" → ");
-			const starts = startsByKey.get(key) || [];
-			starts.push(start);
-			startsByKey.set(key, starts);
-		}
-		startsByKey.forEach((starts, key) => {
-			const nonOverlapping = [];
-			starts.forEach(start => {
-				if (!nonOverlapping.length || start >= nonOverlapping.at(-1) + length) nonOverlapping.push(start);
-			});
-			if (nonOverlapping.length >= 2) {
-				candidates.push({
-					key,
-					length,
-					starts: nonOverlapping,
-					signatures: key.split(" → "),
-					score: length * nonOverlapping.length
-				});
-			}
-		});
-	}
-
-	// Prefer the candidates that explain the most rows, then the longer exchange.
-	// Each table row receives one edge color, keeping dense captures legible.
-	candidates.sort(
-		(a, b) => b.score - a.score || b.length - a.length || b.starts.length - a.starts.length || a.key.localeCompare(b.key)
-	);
-	const claimed = new Set();
-	const groups = [];
-	const groupStartIndexes = new Map();
-	for (const candidate of candidates) {
-		const availableStarts = candidate.starts.filter(start => {
-			for (let offset = 0; offset < candidate.length; offset++) {
-				if (claimed.has(start + offset)) return false;
-			}
-			return true;
-		});
-		if (availableStarts.length < 2) continue;
-		const group = {
-			...candidate,
-			id: `pattern-${hashText(candidate.key).toString(36)}`,
-			starts: availableStarts.map(start => messageEntries[start].originalIndex),
-			color: colorForPattern(candidate.key),
-			remark: c.patternRemarks?.[candidate.key]?.text || ""
-		};
-		groups.push(group);
-		groupStartIndexes.set(group.id, availableStarts);
-		availableStarts.forEach(start => {
-			for (let offset = 0; offset < candidate.length; offset++) claimed.add(start + offset);
-		});
-	}
-
-	const membership = new Map();
-	groups.forEach(group =>
-		groupStartIndexes.get(group.id).forEach((start, occurrenceIndex) => {
-			for (let offset = 0; offset < group.length; offset++) {
-				membership.set(messageEntries[start + offset].originalIndex, { group, occurrenceIndex, offset });
-			}
-		})
-	);
-	const result = { groups, membership };
-	patternRecognitionCache.set(c, { key: cacheKey, result });
-	return result;
-}
-
-function transitionFrames(rows) {
-	const byteRows = rows.map(visibleByteEntries);
-	const frames = byteRows.map(row => row.map(() => ({ incoming: null, outgoing: null })));
-	for (let rowIndex = 0; rowIndex < rows.length - 1; rowIndex++) {
-		const fromRow = rows[rowIndex];
-		const toRow = rows[rowIndex + 1];
-		if (toRow._originalStart !== fromRow._originalEnd + 1 || toRow.sectionId !== fromRow.sectionId) continue;
-		const fromBytes = byteRows[rowIndex];
-		const toBytes = byteRows[rowIndex + 1];
-		const comparable = Math.min(fromBytes.length, toBytes.length);
-		const unchanged = Array.from({ length: comparable }, (_, position) => position).filter(
-			position => fromBytes[position].value === toBytes[position].value
-		);
-		const changed = Array.from({ length: comparable }, (_, position) => position).filter(
-			position => fromBytes[position].value !== toBytes[position].value
-		);
-		if (!unchanged.length || !changed.length) continue;
-
-		const groups = [];
-		changed.forEach(position => {
-			const group = groups.at(-1);
-			if (group && position === group.at(-1) + 1) group.push(position);
-			else groups.push([position]);
-		});
-
-		groups.forEach(group => {
-			const start = group[0];
-			const end = group.at(-1);
-			const from = group.map(position => hexByte(fromBytes[position].value)).join(" ");
-			const to = group.map(position => hexByte(toBytes[position].value)).join(" ");
-			const key = `${from}→${to}`;
-			const descriptor = {
-				color: colorForTransition(key),
-				lane: hashText(key) % 3,
-				label: `${from} → ${to}`
-			};
-			group.forEach(position => {
-				frames[rowIndex][position].outgoing = {
-					...descriptor,
-					start: position === start,
-					end: position === end
-				};
-				frames[rowIndex + 1][position].incoming = {
-					...descriptor,
-					start: position === start,
-					end: position === end
-				};
-			});
-		});
-	}
-	return frames;
 }
 
 function renderMessages() {
@@ -988,88 +790,6 @@ function renderRepeatPill(message) {
 	return `<span class="repeat-pill ${message._cadenceStable ? "steady" : ""}" title="${title}"><strong>×${message._repeats}</strong>${cadence}</span>`;
 }
 
-function renderAnalysis() {
-	const c = capture();
-	if (!c) return;
-	const messages = visibleMessages(c);
-	const counts = [...getCounts(messages).entries()].sort((a, b) => b[1] - a[1]);
-	const maxCount = counts[0]?.[1] || 1;
-	$("#signatureList").innerHTML =
-		counts
-			.slice(0, 10)
-			.map(
-				([sig, n]) => `
-    <div class="signature-row"><span>${sig}</span><span class="signature-bar"><i style="width:${(n / maxCount) * 100}%"></i></span><small>${n} · ${Math.round((n / messages.length) * 100)}%</small></div>
-  `
-			)
-			.join("") || `<span class="muted">No messages to analyze.</span>`;
-
-	$("#vocabulary").innerHTML = Array.from({ length: frameWidth(c) }, (_, pos) => {
-		const values = new Map();
-		messages.forEach(m => {
-			const byte = visibleByteEntries(m)[pos]?.value;
-			if (byte !== undefined) values.set(byte, (values.get(byte) || 0) + 1);
-		});
-		return `<div class="vocab-row"><label>BYTE ${pos + 1}</label><div class="vocab-values">${[...values.entries()]
-			.sort((a, b) => b[1] - a[1])
-			.map(([v, n]) => `<span title="${n} occurrences">${hexByte(v)}<small> ·${n}</small></span>`)
-			.join("")}</div></div>`;
-	}).join("");
-
-	$("#bitMap").innerHTML = Array.from({ length: frameWidth(c) }, (_, pos) => {
-		const bytes = messages.map(m => visibleByteEntries(m)[pos]?.value).filter(v => v !== undefined);
-		return `<div class="bit-row"><label>BYTE ${pos + 1}</label>${Array.from({ length: 8 }, (_, idx) => {
-			const bit = 7 - idx;
-			const ones = bytes.filter(v => (v >> bit) & 1).length;
-			const ratio = bytes.length ? ones / bytes.length : 0;
-			const variance = Math.min(ratio, 1 - ratio) * 2;
-			return `<div class="bit-cell" style="--variance:${variance.toFixed(2)}" title="${Math.round(ratio * 100)}% ones"><span>b${bit}<br>${Math.round(ratio * 100)}%</span></div>`;
-		}).join("")}</div>`;
-	}).join("");
-
-	const transitions = new Map();
-	messages.slice(1).forEach((m, i) => {
-		const from = signature(messages[i]),
-			to = signature(m);
-		if (from !== to) transitions.set(`${from}|${to}`, (transitions.get(`${from}|${to}`) || 0) + 1);
-	});
-	$("#transitionList").innerHTML =
-		[...transitions.entries()]
-			.sort((a, b) => b[1] - a[1])
-			.slice(0, 12)
-			.map(([key, n]) => {
-				const [from, to] = key.split("|");
-				const diffs = from.split(" ").filter((v, i) => v !== to.split(" ")[i]).length;
-				return `<div class="transition-row"><span>${from}</span><b>→</b><span>${to}</span><small>${n}× · ${diffs} byte${diffs === 1 ? "" : "s"} changed</small></div>`;
-			})
-			.join("") || `<span class="muted">No transitions yet.</span>`;
-}
-
-function allNotes() {
-	const c = capture();
-	if (!c) return [];
-	const captureNotes = (c.notes || []).filter(n => n.type === "sequence").map(n => ({ ...n, label: "SEQUENCE" }));
-	const annotations = Object.entries(c.annotations || {}).map(([key, n]) => ({
-		...n,
-		id: key,
-		label: key.includes(":") ? "BYTE" : "MESSAGE"
-	}));
-	return [...captureNotes, ...annotations].sort((a, b) => b.createdAt - a.createdAt);
-}
-
-function renderNotes() {
-	const notes = allNotes();
-	$("#notesCount").textContent = notes.length;
-	$("#notesList").innerHTML =
-		notes
-			.map(
-				n => `
-    <article class="note-card"><header><span>${n.label}${n.targetLabel ? ` · ${escapeHtml(n.targetLabel)}` : ""}</span><span>${new Date(n.createdAt).toLocaleString()}</span></header><p>${escapeHtml(n.text)}</p></article>
-  `
-			)
-			.join("") || `<p class="muted">No observations recorded for this capture.</p>`;
-}
-
 function setCaptureTitle(value) {
 	const c = capture();
 	if (!c) return;
@@ -1377,7 +1097,7 @@ function saveAnnotation() {
 }
 
 function openPatternRemark(id) {
-	const patterns = virtualMessageView?.patterns || recognizeMessagePatterns();
+	const patterns = virtualMessageView?.patterns || recognizeMessagePatterns(capture());
 	const group = patterns.groups.find(item => item.id === id);
 	if (!group) return showToast("This sequence is no longer present in the current framing");
 	patternRemarkTarget = group.key;
@@ -1521,7 +1241,8 @@ function flushLiveBytes() {
 	publishFramingToolbarState(c);
 	updateMessageFilterControl();
 	renderMessages();
-	if ($("#patternsPanel").classList.contains("active")) renderAnalysis();
+	if ($("#patternsPanel").classList.contains("active")) publishAnalysisState(c);
+	if (trimmed) publishNotesState(c);
 	if (trimmed) showToast(`Capture limit reached; keeping the newest ${MAX_CAPTURE_BYTES.toLocaleString()} bytes`);
 }
 
@@ -1998,29 +1719,6 @@ function setMessageFilterOpen(open, { focusFilter = false } = {}) {
 	if (open && focusFilter) requestAnimationFrame(() => $("#messageFilter").focus());
 }
 
-$("#captureNoteForm").onsubmit = e => {
-	e.preventDefault();
-	const c = capture();
-	const noteText = $("#captureNoteText").value.trim();
-	if (!c || !noteText) return;
-	const max = Math.max(1, c.messages.length);
-	const start = Math.max(1, Math.min(max, +$("#sequenceStart").value || 1));
-	const end = Math.max(start, Math.min(max, +$("#sequenceEnd").value || start));
-	c.notes.push({
-		id: crypto.randomUUID(),
-		type: "sequence",
-		text: noteText,
-		createdAt: Date.now(),
-		start,
-		end,
-		targetLabel: `rows ${start}–${end}`
-	});
-	$("#captureNoteText").value = "";
-	saveState();
-	renderNotes();
-	renderMessages();
-	showToast("Sequence observation added");
-};
 $("#annotationText").addEventListener("input", updateAnnotationValidity);
 $("#annotationForm").addEventListener("submit", e => {
 	if (e.submitter?.value === "cancel") return;
@@ -2132,6 +1830,8 @@ registerSendActions({
 	clearQueue: clearSendQueue,
 	clearHistory: clearSendHistory
 });
+
+registerNotesActions({ addSequenceNote });
 
 render();
 
