@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { ArchiveSidebar } from "./archive-sidebar";
 import "./styles.css";
 
 function TopBar() {
@@ -27,44 +28,6 @@ function TopBar() {
 				</button>
 			</div>
 		</header>
-	);
-}
-
-function Sidebar() {
-	return (
-		<aside className="sidebar">
-			<div className="sidebar-heading">
-				<div>
-					<span className="eyebrow">Archive</span>
-					<h1>Capture sets</h1>
-				</div>
-				<div className="sidebar-create-actions">
-					<button id="newFolderBtn" className="icon-btn" title="New folder" aria-label="New folder">
-						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<path d="M3.75 6.75h5.1l1.8 2.1h9.6v8.4a1.5 1.5 0 0 1-1.5 1.5h-15a1.5 1.5 0 0 1-1.5-1.5v-9a1.5 1.5 0 0 1 1.5-1.5Z" />
-							<path d="M2.25 10.35h18" />
-						</svg>
-					</button>
-					<button id="newCaptureBtn" className="icon-btn" title="New capture" aria-label="New capture">
-						＋
-					</button>
-				</div>
-			</div>
-			<label className="search-box">
-				<span>⌕</span>
-				<input id="captureSearch" type="search" placeholder="Filter captures…" />
-			</label>
-			<div id="captureList" className="capture-list" />
-			<div className="sidebar-actions">
-				<button id="importBtn" className="text-btn">
-					↥ Import
-				</button>
-				<button id="exportBtn" className="text-btn">
-					↧ Export
-				</button>
-				<input id="fileInput" type="file" accept=".txt,.json,.csv" hidden />
-			</div>
-		</aside>
 	);
 }
 
@@ -654,31 +617,6 @@ function ExportDialog() {
 	);
 }
 
-function FolderDialog() {
-	return (
-		<dialog id="folderDialog" className="modal folder-modal">
-			<form id="folderForm" method="dialog">
-				<DialogHeading eyebrow="Archive organization" title="Create folder" />
-				<label className="field">
-					Folder name
-					<input id="folderName" required maxLength={80} placeholder="e.g. Ventilation tests" />
-				</label>
-				<div id="folderHint" className="validation-hint" aria-live="polite">
-					Use a short name that describes this group of captures.
-				</div>
-				<div className="modal-actions">
-					<button className="btn btn-secondary" value="cancel" formMethod="dialog" formNoValidate>
-						Cancel
-					</button>
-					<button id="saveFolderBtn" className="btn btn-primary" value="default">
-						Create folder
-					</button>
-				</div>
-			</form>
-		</dialog>
-	);
-}
-
 function MessageContextMenu() {
 	return (
 		<div
@@ -728,7 +666,7 @@ function App() {
 			<div className="app-shell">
 				<TopBar />
 				<main className="workspace">
-					<Sidebar />
+					<ArchiveSidebar />
 					<section className="main-panel">
 						<CaptureHeader />
 						<Toolbar />
@@ -744,7 +682,6 @@ function App() {
 			<AnnotationDialog />
 			<PatternRemarkDialog />
 			<ExportDialog />
-			<FolderDialog />
 			<MessageContextMenu />
 			<div id="toast" className="toast" role="status" />
 		</>

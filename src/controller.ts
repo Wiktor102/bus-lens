@@ -7,6 +7,7 @@ import {
 	observeElementOffset,
 	observeElementRect
 } from "@tanstack/virtual-core";
+import { publishArchiveSnapshot, registerArchiveActions } from "./archive-bridge";
 import { collapseAdjacentRuns, countVisibleRowsByPatternOccurrence } from "./collapse-runs";
 import {
 	countDistinctMessageSignatures,
@@ -56,7 +57,6 @@ const VIRTUAL_ROW_HEIGHT = 41;
 const VIRTUAL_SECTION_HEIGHT = 48;
 const VIRTUAL_OVERSCAN = 8;
 const MAX_SEND_HISTORY = 250;
-const FOLDER_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.75 6.75h5.1l1.8 2.1h9.6v8.4a1.5 1.5 0 0 1-1.5 1.5h-15a1.5 1.5 0 0 1-1.5-1.5v-9a1.5 1.5 0 0 1 1.5-1.5Z" /><path d="M2.25 10.35h18" /></svg>`;
 
 const demoCaptures = [
 	{
@@ -452,6 +452,29 @@ function capture() {
 	return state.captures.find(c => c.id === activeId) || state.captures[0];
 }
 
+function publishArchiveState() {
+	publishArchiveSnapshot({
+		captures: state.captures.map(item => ({
+			id: String(item.id),
+			name: String(item.name ?? ""),
+			view: String(item.view || ""),
+			folderId: item.folderId || null,
+			params: (Array.isArray(item.params) ? item.params : []).map(parameter => ({
+				key: String(parameter.key ?? ""),
+				value: String(parameter.value ?? "")
+			})),
+			messageCount: visibleMessages(item).length
+		})),
+		folders: state.folders.map(folder => ({
+			id: String(folder.id),
+			name: String(folder.name ?? ""),
+			collapsed: Boolean(folder.collapsed)
+		})),
+		activeId,
+		unfiledCollapsed: Boolean(state.unfiledCollapsed)
+	});
+}
+
 function formatTime(ms) {
 	return new Date(ms).toLocaleTimeString("en-GB", {
 		hour: "2-digit",
@@ -598,7 +621,7 @@ function handleMessageContextAction(action) {
 }
 
 function render() {
-	renderCaptureList();
+	publishArchiveState();
 	renderSendWorkbench();
 	if (!capture()) {
 		renderEmptyWorkspace();
@@ -623,7 +646,6 @@ function renderEmptyWorkspace() {
 	$("#moreBtn").disabled = true;
 	$("#connectBtn").disabled = false;
 	$("#recordBtn").disabled = true;
-	$("#exportBtn").disabled = true;
 	$("#statMessages").textContent = "0";
 	$("#statUnique").textContent = "0";
 	$("#statCaptureLength").textContent = "0 s";
@@ -769,172 +791,52 @@ function renderSendWorkbench() {
 	updateTransmitValidity();
 }
 
-function renderCaptureList() {
-	const query = $("#captureSearch").value.trim().toLowerCase();
+function selectArchiveCapture(captureId) {
+	activeId = captureId;
+	saveState();
+	render();
+}
+
+function toggleArchiveFolder(folderId) {
+	if (folderId) {
+		const folder = state.folders.find(item => item.id === folderId);
+		if (folder) folder.collapsed = !folder.collapsed;
+	} else state.unfiledCollapsed = !state.unfiledCollapsed;
+	saveState();
+	publishArchiveState();
+}
+
+function moveArchiveCapture(captureId, folderId) {
+	const item = state.captures.find(capture => capture.id === captureId);
+	if (!item) return;
 	const folderNameById = new Map(state.folders.map(folder => [folder.id, folder.name]));
-	const matches = capture =>
-		`${capture.name} ${capture.view} ${folderNameById.get(capture.folderId) || "unfiled"} ${capture.params
-			.map(p => `${p.key} ${p.value}`)
-			.join(" ")}`
-			.toLowerCase()
-			.includes(query);
-	const visibleCaptures = state.captures.filter(matches);
-	const groups = [
-		...state.folders.map(folder => ({ ...folder, captures: visibleCaptures.filter(c => c.folderId === folder.id) })),
-		{
-			id: "",
-			name: "Unfiled",
-			collapsed: Boolean(state.unfiledCollapsed),
-			captures: visibleCaptures.filter(c => !c.folderId),
-			system: true
-		}
-	].filter(group => !query || group.captures.length);
-	$("#captureList").innerHTML = visibleCaptures.length
-		? groups.map(group => renderFolderGroup(group, Boolean(query))).join("")
-		: `<div class="sidebar-empty"><strong>No matching captures</strong><span>Try another name, folder, view, or parameter.</span></div>`;
-	$$("[data-capture-id]").forEach(
-		el =>
-			(el.onclick = () => {
-				activeId = el.dataset.captureId;
-				saveState();
-				render();
-			})
-	);
-	$$("[data-folder-toggle]").forEach(
-		button =>
-			(button.onclick = () => {
-				const folderId = button.dataset.folderToggle;
-				if (folderId) {
-					const folder = state.folders.find(item => item.id === folderId);
-					if (folder) folder.collapsed = !folder.collapsed;
-				} else state.unfiledCollapsed = !state.unfiledCollapsed;
-				saveState();
-				renderCaptureList();
-			})
-	);
-	$$("[data-folder-rename]").forEach(
-		button => (button.onclick = () => openFolderDialog(button.dataset.folderRename))
-	);
-	$$("[data-folder-delete]").forEach(button => (button.onclick = () => deleteFolder(button.dataset.folderDelete)));
-	$$("[data-capture-folder]").forEach(
-		select =>
-			(select.onchange = event => {
-				const item = state.captures.find(c => c.id === select.dataset.captureFolder);
-				if (!item) return;
-				item.folderId = event.target.value || null;
-				saveState();
-				renderCaptureList();
-				showToast(item.folderId ? `Moved to ${folderNameById.get(item.folderId)}` : "Moved to Unfiled");
-			})
-	);
+	item.folderId = folderId || null;
+	saveState();
+	publishArchiveState();
+	showToast(item.folderId ? `Moved to ${folderNameById.get(item.folderId)}` : "Moved to Unfiled");
 }
 
-function renderFolderGroup(group, searching) {
-	const collapsed = group.collapsed && !searching;
-	const options = [
-		`<option value="">Unfiled</option>`,
-		...state.folders.map(
-			folder =>
-				`<option value="${escapeHtml(folder.id)}" data-folder-option="${escapeHtml(folder.id)}">${escapeHtml(folder.name)}</option>`
-		)
-	].join("");
-	return `
-		<section class="capture-folder ${collapsed ? "collapsed" : ""}" data-folder-id="${escapeHtml(group.id)}">
-			<header class="folder-header">
-				<button class="folder-toggle" type="button" data-folder-toggle="${escapeHtml(group.id)}"
-					aria-expanded="${!collapsed}" aria-label="${collapsed ? "Expand" : "Collapse"} ${escapeHtml(group.name)}">
-					<span class="folder-chevron" aria-hidden="true"></span>
-					<span class="folder-icon">${FOLDER_ICON}</span>
-					<strong>${escapeHtml(group.name)}</strong>
-					<small>${group.captures.length}</small>
-				</button>
-				${
-					group.system
-						? `<span class="folder-actions folder-actions-placeholder" aria-hidden="true"></span>`
-						: `<span class="folder-actions">
-							<button type="button" data-folder-rename="${escapeHtml(group.id)}" title="Rename folder" aria-label="Rename ${escapeHtml(group.name)}">✎</button>
-							<button type="button" data-folder-delete="${escapeHtml(group.id)}" title="Delete folder" aria-label="Delete ${escapeHtml(group.name)}">×</button>
-						</span>`
-				}
-			</header>
-			<div class="folder-captures">
-				${
-					group.captures.length
-						? group.captures.map(c => renderCaptureItem(c, options)).join("")
-						: `<p class="folder-empty">No captures here yet</p>`
-				}
-			</div>
-		</section>`;
-}
-
-function renderCaptureItem(c, options) {
-	const selectedOptions = options.replace(`value="${escapeHtml(c.folderId || "")}"`, `value="${escapeHtml(c.folderId || "")}" selected`);
-	const messageCount = visibleMessages(c).length;
-	return `
-		<div class="capture-item ${c.id === activeId ? "active" : ""}">
-			<button class="capture-open" type="button" data-capture-id="${escapeHtml(c.id)}">
-				<strong>${escapeHtml(c.name)}</strong>
-				<small><span>${escapeHtml(c.view || "Unassigned view")}</span><span>${messageCount} msg</span></small>
-				<span class="capture-tags">${c.params
-					.slice(0, 2)
-					.map(p => `<i>${escapeHtml(p.key)}: ${escapeHtml(p.value)}</i>`)
-					.join("")}</span>
-			</button>
-			<label class="capture-move" title="Move capture to another folder">
-				<span>Move to</span>
-				<select data-capture-folder="${escapeHtml(c.id)}" aria-label="Move ${escapeHtml(c.name)} to folder">${selectedOptions}</select>
-			</label>
-		</div>`;
-}
-
-function openFolderDialog(folderId = null) {
-	const folder = folderId ? state.folders.find(item => item.id === folderId) : null;
-	const dialog = $("#folderDialog");
-	dialog.dataset.folderId = folder?.id || "";
-	$(".folder-modal .modal-heading h2").textContent = folder ? "Rename folder" : "Create folder";
-	$("#saveFolderBtn").textContent = folder ? "Save name" : "Create folder";
-	$("#folderName").value = folder?.name || "";
-	updateFolderValidity();
-	dialog.showModal();
-	$("#folderName").focus();
-}
-
-function updateFolderValidity() {
-	const dialog = $("#folderDialog");
-	const name = $("#folderName").value.trim();
-	const editingId = dialog.dataset.folderId;
+function saveFolder(name, editingId) {
+	const trimmedName = String(name).trim();
 	const duplicate = state.folders.some(
-		folder => folder.id !== editingId && folder.name.toLowerCase() === name.toLowerCase()
+		folder => folder.id !== editingId && folder.name.toLowerCase() === trimmedName.toLowerCase()
 	);
-	$("#saveFolderBtn").disabled = !name || duplicate;
-	$("#folderHint").textContent = duplicate
-		? "A folder with this name already exists."
-		: name
-			? "Ready to save."
-			: "Enter a folder name.";
-	$("#folderHint").classList.toggle("ready", Boolean(name && !duplicate));
-	return Boolean(name && !duplicate);
-}
-
-function saveFolder() {
-	if (!updateFolderValidity()) return false;
-	const dialog = $("#folderDialog");
-	const name = $("#folderName").value.trim();
-	const folder = state.folders.find(item => item.id === dialog.dataset.folderId);
+	if (!trimmedName || duplicate) return false;
+	const folder = state.folders.find(item => item.id === editingId);
 	if (folder) {
-		folder.name = name;
+		folder.name = trimmedName;
 		showToast("Folder renamed");
 	} else {
 		state.folders.push({
 			id: crypto.randomUUID(),
-			name,
+			name: trimmedName,
 			collapsed: false,
 			createdAt: new Date().toISOString()
 		});
 		showToast("Folder created");
 	}
 	saveState();
-	renderCaptureList();
+	publishArchiveState();
 	return true;
 }
 
@@ -951,7 +853,7 @@ function deleteFolder(folderId) {
 	});
 	state.folders = state.folders.filter(item => item.id !== folderId);
 	saveState();
-	renderCaptureList();
+	publishArchiveState();
 	showToast(captureCount ? "Folder deleted; captures moved to Unfiled" : "Folder deleted");
 }
 
@@ -973,7 +875,6 @@ function renderHeader() {
 	$("#moreBtn").disabled = false;
 	$("#connectBtn").disabled = false;
 	$("#recordBtn").disabled = !port;
-	$("#exportBtn").disabled = false;
 	$("#captureMeta").innerHTML = [
 		c.view && `<span class="meta-chip"><b>VIEW</b> ${escapeHtml(c.view)}</span>`,
 		...c.params.map(
@@ -2440,14 +2341,6 @@ $("#transmitHex").onkeydown = event => {
 		else void sendBytes();
 	}
 };
-$("#newCaptureBtn").onclick = () => openContext(true);
-$("#newFolderBtn").onclick = () => openFolderDialog();
-$("#folderName").oninput = updateFolderValidity;
-$("#folderForm").addEventListener("submit", event => {
-	if (event.submitter?.value === "cancel") return;
-	event.preventDefault();
-	if (saveFolder()) $("#folderDialog").close();
-});
 $("#editContextBtn").onclick = () => openContext(false);
 $("#addParameterBtn").onclick = () => addParameterRow();
 $("#contextForm").addEventListener("submit", e => {
@@ -2466,7 +2359,7 @@ $("#captureTitle").onblur = e => {
 	capture().name = normalizeDescription(e.target.value) || "Untitled capture";
 	e.target.value = capture().name;
 	saveState();
-	renderCaptureList();
+	publishArchiveState();
 };
 $("#captureDescription").oninput = e => {
 	if (!capture()) return;
@@ -2481,7 +2374,6 @@ $("#captureDescription").onblur = e => {
 	sizeCaptureDescription();
 	saveState();
 };
-$("#captureSearch").oninput = renderCaptureList;
 $("#messageFilter").oninput = () => {
 	$(".table-wrap").scrollTop = 0;
 	updateMessageFilterControl();
@@ -2657,12 +2549,6 @@ $("#deletePatternRemarkBtn").onclick = () => {
 	$("#patternRemarkText").value = "";
 	savePatternRemark();
 };
-$("#importBtn").onclick = () => $("#fileInput").click();
-$("#fileInput").onchange = e => {
-	if (e.target.files[0]) importFile(e.target.files[0]);
-	e.target.value = "";
-};
-$("#exportBtn").onclick = () => $("#exportDialog").showModal();
 $$("[data-export]").forEach(btn => (btn.onclick = () => exportData(btn.dataset.export)));
 $("#messageBody").addEventListener("click", event => {
 	const noteButton = event.target.closest("[data-message-note]");
@@ -2706,6 +2592,18 @@ window.addEventListener("beforeunload", () => {
 	flushLiveBytes();
 	persistState();
 	if (port) disconnectSerial();
+});
+
+registerArchiveActions({
+	selectCapture: selectArchiveCapture,
+	toggleFolder: toggleArchiveFolder,
+	moveCapture: moveArchiveCapture,
+	openNewCapture: () => openContext(true),
+	openImport: () => $("#fileInput").click(),
+	openExport: () => $("#exportDialog").showModal(),
+	saveFolder,
+	deleteFolder,
+	importFile
 });
 
 render();
