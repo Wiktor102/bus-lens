@@ -22,6 +22,7 @@ the next available port.
 Useful checks:
 
 ```powershell
+pnpm test
 pnpm typecheck
 pnpm build
 pnpm preview
@@ -51,9 +52,12 @@ raw byte stream remains preserved while the framing rule is being set.
 Because the timestamp is recorded when a Web Serial read delivers a byte, multiple
 bytes delivered in the same browser read may have effectively identical times.
 
-Capture context, messages, parameters, and notes are stored locally in the browser.
-Use JSON export for a complete, re-importable backup. CSV and monitor-text exports
-are available for the active capture.
+Capture context, messages, parameters, descriptions, and annotations are stored locally in the browser.
+The lightweight description beneath a capture title records capture-level context; the Notes tab retains
+sequence observations alongside message and byte annotations. The compact header's **Capture length**
+is the sum of every recording session from its first received byte through its last received byte, while
+**Captured** counts received raw bytes only and excludes transmitted (TX) bytes. Use JSON export for a
+complete, re-importable backup. CSV and monitor-text exports are available for the active capture.
 
 ## Sending messages
 
@@ -71,11 +75,11 @@ messages can also be replayed directly from the message table.
 
 - Click any byte to attach a byte-level note.
 - Use **Add note** on a row for a message-level annotation.
-- Capture-level notes can be pinned, edited, and removed directly in the capture
-  header; they also remain available in the **Notes** tab.
-- In **Notes**, choose **Message sequence** and enter a row range to attach an
-  observation to a specific sequence.
-- Use wildcards in stream filtering, for example `C2 ?? 5D`.
+- Add a lightweight capture description directly beneath its title.
+- In **Notes**, enter a row range to attach an observation to a specific message
+  sequence.
+- Use the funnel in **Message stream** to reveal filtering; wildcards such as
+  `C2 ?? 5D` are supported.
 - Telegram signatures that occur only once in the complete capture show their
   row ID and timestamp in orange.
 - Toggle **BINARY** to see readable nibbles such as `1100·0010`.
