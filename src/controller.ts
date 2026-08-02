@@ -30,6 +30,16 @@ import { publishSendSnapshot, registerSendActions } from "./send-bridge";
 import { registerNotesActions, publishNotesSnapshot, type SequenceNoteInput } from "./notes-bridge";
 import { deriveNotesSnapshot } from "./notes";
 import { publishToastSnapshot } from "./toast-bridge";
+import { publishDialogCommand, registerDialogActions } from "./dialog-bridge";
+import {
+	annotationTargetLabel,
+	annotationTextIsValid,
+	contextDraftToValues,
+	normalizeAnnotationText,
+	normalizePatternRemarkText,
+	sectionRowFromModel,
+	serializeSectionDrafts
+} from "./dialog-model";
 import {
 	applyFramingSettings,
 	selectFramingToolbarSnapshot
@@ -67,7 +77,6 @@ let reader = null;
 let recording = false;
 let recordingSessionId = null;
 let readAbort = false;
-let annotationTarget = null;
 let messageContextTarget = null;
 let messageContextOrigin = null;
 let toastTimer = null;
@@ -85,7 +94,6 @@ let queueRunning = false;
 let stopQueueRequested = false;
 let queueDelayTimer = null;
 let queueDelayResolve = null;
-let patternRemarkTarget = null;
 
 function persistState() {
 	state.activeId = activeId;
@@ -249,7 +257,7 @@ function handleMessageContextAction(action) {
 	if (action === "note") {
 		const type = target.position === null ? "message" : "byte";
 		const key = target.position === null ? target.messageId : `${target.messageId}:${target.position}`;
-		openAnnotation(type, key);
+		publishAnnotationDialog(type, key);
 	} else if (action === "replay") {
 		void transmitBytes(Uint8Array.from(visibleByteEntries(message).map(({ value }) => value)), "replay");
 	} else if (action === "delete") {
@@ -865,29 +873,38 @@ function deleteActiveCapture() {
 	render();
 }
 
-function openContext(isNew = false) {
-	const c = isNew ? { name: "Untitled capture", view: "", params: [], baudRate: 115200, folderId: null } : capture();
-	$("#contextDialog").dataset.mode = isNew ? "new" : "edit";
-	$("#contextName").value = c.name;
-	$("#contextView").value = c.view;
-	$("#baudRate").value = c.baudRate;
-	$("#contextFolder").innerHTML = [
-		`<option value="">Unfiled</option>`,
-		...state.folders.map(folder => `<option value="${escapeHtml(folder.id)}">${escapeHtml(folder.name)}</option>`)
-	].join("");
-	$("#contextFolder").value = c.folderId || "";
-	$("#parameterRows").innerHTML = "";
-	c.params.forEach(p => addParameterRow(p.key, p.value));
-	if (!c.params.length) addParameterRow("Speed", "");
-	$("#contextDialog").showModal();
+function publishContextDialog(isNew = false) {
+	const c = isNew
+		? { name: "Untitled capture", view: "", params: [], baudRate: 115200, folderId: null, id: null }
+		: capture();
+	if (!c) return;
+	publishDialogCommand({
+		type: "context",
+		mode: isNew ? "new" : "edit",
+		captureId: isNew ? null : String(c.id),
+		name: String(c.name ?? "Untitled capture"),
+		view: String(c.view ?? ""),
+		folderId: c.folderId ? String(c.folderId) : null,
+		baudRate: Number(c.baudRate || 115200),
+		params: (Array.isArray(c.params) ? c.params : []).map(parameter => ({
+			key: String(parameter.key ?? ""),
+			value: String(parameter.value ?? "")
+		})),
+		folders: state.folders.map(folder => ({ id: String(folder.id), name: String(folder.name || "") }))
+	});
 }
 
-function openSectionsEditor() {
+function publishSectionsDialog() {
 	const c = capture();
 	if (!c) return;
 	normalizeSections(c);
-	renderSectionRows(c.frameSections);
-	$("#sectionsDialog").showModal();
+	publishDialogCommand({
+		type: "sections",
+		captureId: String(c.id),
+		streamLength: c.byteStream.length,
+		frameSize: c.frameSize,
+		sections: c.frameSections.map(sectionRowFromModel)
+	});
 }
 
 function updateFramingSettings(update) {
@@ -900,57 +917,21 @@ function updateFramingSettings(update) {
 	render();
 }
 
-function renderSectionRows(sections) {
-	$("#sectionRows").innerHTML = "";
-	sections.forEach(section => addSectionRow(section));
-}
-
-function addSectionRow(section) {
-	const c = capture();
-	if (!c) return;
-	const streamLength = c.byteStream.length;
-	if (!section && streamLength < 2) {
-		showToast("Capture at least two raw bytes before adding a section");
-		return;
+function commitSectionsDraft(input) {
+	const c = state.captures.find(item => String(item.id) === String(input.captureId));
+	if (!c) return false;
+	const result = serializeSectionDrafts(input.rows, Math.max(0, c.byteStream.length - 1), c.frameSize);
+	if (!result.ok) {
+		showToast(result.error);
+		return false;
 	}
-	const existingStarts = $$("#sectionRows [data-section-start]").map(input => +input.value - 1);
-	const fallbackStart = Math.min(streamLength - 1, Math.max(...existingStarts, 0) + 1);
-	const values = section || { id: crypto.randomUUID(), start: fallbackStart, frameSize: c.frameSize };
-	const row = document.createElement("div");
-	row.className = "section-row";
-	row.dataset.sectionId = values.id;
-	row.innerHTML = `<strong>Section</strong>
-    <label>Starts at raw byte <input data-section-start type="number" min="1" max="${Math.max(1, streamLength)}" value="${values.start + 1}" /></label>
-    <label>Frame length <input data-section-size type="number" min="1" max="1024" value="${values.frameSize}" /> bytes</label>
-    <button class="icon-btn" type="button" aria-label="Remove section">×</button>`;
-	row.querySelector("button").onclick = () => {
-		if ($$("#sectionRows .section-row").length === 1) return showToast("A section is required to frame the capture");
-		row.remove();
-	};
-	$("#sectionRows").append(row);
-}
-
-function saveSections() {
-	const c = capture();
-	if (!c) return;
-	const maxStart = Math.max(0, c.byteStream.length - 1);
-	const draft = $$("#sectionRows .section-row").map(row => ({
-		id: row.dataset.sectionId || crypto.randomUUID(),
-		start: Math.max(0, Math.min(maxStart, Math.floor(+row.querySelector("[data-section-start]").value - 1 || 0))),
-		frameSize: Math.max(1, Math.min(1024, Math.floor(+row.querySelector("[data-section-size]").value || c.frameSize))),
-		collapseRuns: Boolean(c.frameSections.find(section => section.id === row.dataset.sectionId)?.collapseRuns)
-	}));
-	const starts = new Set();
-	if (draft.some(section => starts.has(section.start) || !starts.add(section.start))) {
-		showToast("Each section must start at a different raw byte");
-		return;
-	}
-	c.frameSections = draft;
+	c.frameSections = result.sections;
 	normalizeSections(c);
 	rebuildPreview(c);
 	saveState();
 	render();
 	showToast("Section framing updated");
+	return true;
 }
 
 function startSectionAtByte(messageId, position) {
@@ -1003,30 +984,9 @@ function setSectionCollapse(sectionId, collapseRuns) {
 	showToast(collapseRuns ? "Runs collapse in this section" : "Runs expand in this section");
 }
 
-function addParameterRow(key = "", value = "") {
-	const row = document.createElement("div");
-	row.className = "parameter-row";
-	row.innerHTML = `<input placeholder="Parameter" value="${escapeHtml(key)}"><input placeholder="Value" value="${escapeHtml(value)}"><button type="button" aria-label="Remove">×</button>`;
-	row.querySelector("button").onclick = () => row.remove();
-	$("#parameterRows").append(row);
-}
-
-function saveContext() {
-	const params = $$("#parameterRows .parameter-row")
-		.map(row => {
-			const [key, value] = [...row.querySelectorAll("input")].map(x => x.value.trim());
-			return { key, value };
-		})
-		.filter(p => p.key);
-	const values = {
-		name: $("#contextName").value.trim() || "Untitled capture",
-		view: $("#contextView").value.trim(),
-		folderId: $("#contextFolder").value || null,
-		params,
-		baudRate: +$("#baudRate").value,
-		inputFormat: "raw"
-	};
-	if ($("#contextDialog").dataset.mode === "new") {
+function commitContextDraft(input) {
+	const values = contextDraftToValues(input.draft);
+	if (input.mode === "new") {
 		const c = normalizeCapture({
 			id: crypto.randomUUID(),
 			...values,
@@ -1038,57 +998,60 @@ function saveContext() {
 		});
 		state.captures.unshift(c);
 		activeId = c.id;
-	} else Object.assign(capture(), values);
+	} else {
+		const c = state.captures.find(item => String(item.id) === String(input.captureId)) || capture();
+		if (!c) return false;
+		Object.assign(c, values);
+	}
 	saveState();
 	render();
 	showToast("Capture context saved");
+	return true;
 }
 
-function openAnnotation(type, key) {
+function publishAnnotationDialog(type, key) {
 	const c = capture();
-	annotationTarget = { type, key };
-	const [messageId, posText] = key.split(":");
-	const m = c.messages.find(x => x.id === messageId);
-	const pos = posText === undefined ? null : +posText;
-	const targetKey = type === "byte" ? key : messageId;
-	const existing = c.annotations[targetKey];
-	const visiblePos = type === "byte" ? visiblePositionForRawByte(m, pos) : null;
-	const displayPos = visiblePos >= 0 ? visiblePos : pos;
-	$("#annotationTitle").textContent = type === "byte" ? `Note on byte ${displayPos + 1}` : "Note on message";
-	const byteTime = m.byteTimestamps?.[pos] ?? m.timestamp;
-	$("#annotationTarget").textContent =
+	if (!c) return;
+	const details = annotationTargetLabel(c, type, key);
+	if (!details) return;
+	const [messageId, positionText] = key.split(":");
+	const message = c.messages.find(item => item.id === messageId);
+	if (!message) return;
+	const position = positionText === undefined ? null : +positionText;
+	const existing = c.annotations[details.targetKey];
+	const target =
 		type === "byte"
-			? `${formatTime(byteTime)}  ·  ${signature(m)}  ·  BYTE ${displayPos + 1} = ${hexByte(m.bytes[pos])}`
-			: `${formatTime(m.timestamp)}  ·  ${signature(m)}`;
-	$("#annotationText").value = existing?.text || "";
-	$("#deleteAnnotationBtn").style.visibility = existing ? "visible" : "hidden";
-	updateAnnotationValidity();
-	$("#noteDialog").showModal();
-	$("#annotationText").focus();
+			? `${formatTime(message.byteTimestamps?.[position] ?? message.timestamp)}  ·  ${signature(message)}  ·  BYTE ${details.displayPosition + 1} = ${hexByte(message.bytes[position])}`
+			: `${formatTime(message.timestamp)}  ·  ${signature(message)}`;
+	publishDialogCommand({
+		type: "annotation",
+		captureId: String(c.id),
+		annotationType: type,
+		key,
+		title: details.title,
+		target,
+		text: String(existing?.text || ""),
+		hasExisting: Boolean(existing)
+	});
 }
 
-function updateAnnotationValidity() {
-	const hasText = $("#annotationText").value.trim().length > 0;
-	$("#saveAnnotationBtn").disabled = !hasText;
-	$("#annotationHint").textContent = hasText ? "Ready to save." : "Enter a note to enable saving.";
-	$("#annotationHint").classList.toggle("ready", hasText);
-	return hasText;
-}
-
-function saveAnnotation() {
-	if (!updateAnnotationValidity()) return false;
-	const c = capture();
-	const { type, key } = annotationTarget;
-	const [messageId, pos] = key.split(":");
-	const m = c.messages.find(x => x.id === messageId);
-	const targetKey = type === "byte" ? key : messageId;
-	const visiblePos = type === "byte" ? visiblePositionForRawByte(m, +pos) : null;
-	const displayPos = visiblePos >= 0 ? visiblePos : +pos;
-	c.annotations[targetKey] = {
-		text: $("#annotationText").value.trim(),
+function commitAnnotationDraft(input) {
+	if (!annotationTextIsValid(input.text)) return false;
+	const c = state.captures.find(item => String(item.id) === String(input.captureId));
+	if (!c) return false;
+	const details = annotationTargetLabel(c, input.annotationType, input.key);
+	if (!details) return false;
+	const [messageId] = input.key.split(":");
+	const message = c.messages.find(item => item.id === messageId);
+	if (!message) return false;
+	c.annotations[details.targetKey] = {
+		text: normalizeAnnotationText(input.text),
 		createdAt: Date.now(),
-		type,
-		targetLabel: type === "byte" ? `${signature(m)} · byte ${displayPos + 1}` : signature(m)
+		type: input.annotationType,
+		targetLabel:
+			input.annotationType === "byte"
+				? `${signature(message)} · byte ${details.displayPosition + 1}`
+				: signature(message)
 	};
 	saveState();
 	render();
@@ -1096,32 +1059,46 @@ function saveAnnotation() {
 	return true;
 }
 
-function openPatternRemark(id) {
-	const patterns = virtualMessageView?.patterns || recognizeMessagePatterns(capture());
-	const group = patterns.groups.find(item => item.id === id);
-	if (!group) return showToast("This sequence is no longer present in the current framing");
-	patternRemarkTarget = group.key;
-	$("#patternRemarkTitle").textContent = `${group.length}-message sequence · ${group.starts.length} occurrences`;
-	$("#patternRemarkTarget").innerHTML = group.signatures
-		.map((value, index) => `<span><b>${String(index + 1).padStart(2, "0")}</b>${escapeHtml(value)}</span>`)
-		.join("");
-	$("#patternRemarkText").value = capture().patternRemarks?.[group.key]?.text || "";
-	$("#deletePatternRemarkBtn").style.visibility = $("#patternRemarkText").value ? "visible" : "hidden";
-	$("#patternDialog").style.setProperty("--pattern-color", group.color);
-	$("#patternDialog").showModal();
-	$("#patternRemarkText").focus();
+function removeAnnotationDraft(input) {
+	const c = state.captures.find(item => String(item.id) === String(input.captureId));
+	if (!c) return;
+	const details = annotationTargetLabel(c, input.annotationType, input.key);
+	if (!details) return;
+	delete c.annotations[details.targetKey];
+	saveState();
+	render();
+	showToast("Annotation removed");
 }
 
-function savePatternRemark() {
-	const text = $("#patternRemarkText").value.trim();
+function publishPatternRemarkDialog(id) {
 	const c = capture();
+	const patterns = virtualMessageView?.patterns || recognizeMessagePatterns(c);
+	const group = patterns.groups.find(item => item.id === id);
+	if (!group || !c) return showToast("This sequence is no longer present in the current framing");
+	const text = String(c.patternRemarks?.[group.key]?.text || "");
+	publishDialogCommand({
+		type: "pattern-remark",
+		captureId: String(c.id),
+		patternKey: group.key,
+		title: `${group.length}-message sequence · ${group.starts.length} occurrences`,
+		signatures: group.signatures,
+		color: group.color,
+		text,
+		hasExisting: Boolean(text)
+	});
+}
+
+function commitPatternRemarkDraft(input) {
+	const c = state.captures.find(item => String(item.id) === String(input.captureId));
+	if (!c) return false;
+	const text = normalizePatternRemarkText(input.text);
 	c.patternRemarks ||= {};
-	if (text) c.patternRemarks[patternRemarkTarget] = { text, updatedAt: Date.now() };
-	else delete c.patternRemarks[patternRemarkTarget];
+	if (text) c.patternRemarks[input.patternKey] = { text, updatedAt: Date.now() };
+	else delete c.patternRemarks[input.patternKey];
 	saveState();
 	renderMessages();
-	$("#patternDialog").close();
 	showToast(text ? "Sequence note saved" : "Sequence note removed");
+	return true;
 }
 
 async function connectSerial() {
@@ -1651,19 +1628,11 @@ function exportData(format) {
 		].join("\n");
 		download(context, `${safeName}.txt`, "text/plain");
 	}
-	$("#exportDialog").close();
 	showToast(`${format.toUpperCase()} export created`);
 }
 
 $("#connectBtn").onclick = connectSerial;
 $("#recordBtn").onclick = toggleRecording;
-$("#addParameterBtn").onclick = () => addParameterRow();
-$("#contextForm").addEventListener("submit", e => {
-	if (e.submitter?.value === "cancel") return;
-	e.preventDefault();
-	saveContext();
-	$("#contextDialog").close();
-});
 $("#messageFilter").oninput = () => {
 	$(".table-wrap").scrollTop = 0;
 	updateMessageFilterControl();
@@ -1680,13 +1649,6 @@ $("#toggleMessageFilterBtn").onclick = () =>
 $("#displayMode").onchange = renderMessages;
 $("#uniqueToggle").onchange = renderMessages;
 $("#collapseToggle").onchange = renderMessages;
-$("#addSectionBtn").onclick = addSectionRow;
-$("#sectionsForm").addEventListener("submit", event => {
-	if (event.submitter?.value === "cancel") return;
-	event.preventDefault();
-	saveSections();
-	$("#sectionsDialog").close();
-});
 $$(".tab").forEach(
 	tab =>
 		(tab.onclick = () => {
@@ -1719,33 +1681,9 @@ function setMessageFilterOpen(open, { focusFilter = false } = {}) {
 	if (open && focusFilter) requestAnimationFrame(() => $("#messageFilter").focus());
 }
 
-$("#annotationText").addEventListener("input", updateAnnotationValidity);
-$("#annotationForm").addEventListener("submit", e => {
-	if (e.submitter?.value === "cancel") return;
-	e.preventDefault();
-	if (saveAnnotation()) $("#noteDialog").close();
-});
-$("#deleteAnnotationBtn").onclick = () => {
-	const key = annotationTarget.type === "byte" ? annotationTarget.key : annotationTarget.key.split(":")[0];
-	delete capture().annotations[key];
-	saveState();
-	render();
-	$("#noteDialog").close();
-	showToast("Annotation removed");
-};
-$("#patternRemarkForm").addEventListener("submit", e => {
-	if (e.submitter?.value === "cancel") return;
-	e.preventDefault();
-	savePatternRemark();
-});
-$("#deletePatternRemarkBtn").onclick = () => {
-	$("#patternRemarkText").value = "";
-	savePatternRemark();
-};
-$$("[data-export]").forEach(btn => (btn.onclick = () => exportData(btn.dataset.export)));
 $("#messageBody").addEventListener("click", event => {
 	const noteButton = event.target.closest("[data-message-note]");
-	if (noteButton) return openAnnotation("message", noteButton.dataset.messageNote);
+	if (noteButton) return publishAnnotationDialog("message", noteButton.dataset.messageNote);
 	const replayButton = event.target.closest("[data-message-replay]");
 	if (replayButton) {
 		const message = capture().messages.find(item => item.id === replayButton.dataset.messageReplay);
@@ -1753,9 +1691,9 @@ $("#messageBody").addEventListener("click", event => {
 		return;
 	}
 	const patternButton = event.target.closest("[data-pattern-id]");
-	if (patternButton) return openPatternRemark(patternButton.dataset.patternId);
+	if (patternButton) return publishPatternRemarkDialog(patternButton.dataset.patternId);
 	const byteButton = event.target.closest("[data-byte-note]");
-	if (byteButton) openAnnotation("byte", byteButton.dataset.byteNote);
+	if (byteButton) publishAnnotationDialog("byte", byteButton.dataset.byteNote);
 });
 $("#messageBody").addEventListener("contextmenu", openMessageContextMenu);
 $("#messageContextMenu").addEventListener("click", event => {
@@ -1792,7 +1730,7 @@ registerCaptureHeaderActions({
 	setDescription: setCaptureDescription,
 	commitDescription: commitCaptureDescription,
 	openContext: () => {
-		if (capture()) openContext(false);
+		if (capture()) publishContextDialog(false);
 	},
 	duplicate: duplicateActiveCapture,
 	clearMessages: clearActiveCaptureMessages,
@@ -1803,9 +1741,9 @@ registerArchiveActions({
 	selectCapture: selectArchiveCapture,
 	toggleFolder: toggleArchiveFolder,
 	moveCapture: moveArchiveCapture,
-	openNewCapture: () => openContext(true),
+	openNewCapture: () => publishContextDialog(true),
 	openImport: () => $("#fileInput").click(),
-	openExport: () => $("#exportDialog").showModal(),
+	openExport: () => publishDialogCommand({ type: "export" }),
 	saveFolder,
 	deleteFolder,
 	importFile
@@ -1813,7 +1751,17 @@ registerArchiveActions({
 
 registerFramingToolbarActions({
 	updateSettings: updateFramingSettings,
-	openSections: openSectionsEditor
+	openSections: publishSectionsDialog
+});
+
+registerDialogActions({
+	saveContext: commitContextDraft,
+	saveSections: commitSectionsDraft,
+	saveAnnotation: commitAnnotationDraft,
+	deleteAnnotation: removeAnnotationDraft,
+	savePatternRemark: commitPatternRemarkDraft,
+	exportData,
+	notify: showToast
 });
 
 registerSendActions({
