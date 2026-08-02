@@ -286,9 +286,10 @@ function normalizeCapture(c) {
 	// Older exports stored byte visibility on framed messages rather than raw
 	// byte records. Copy it across before the preview is rebuilt.
 	c.messages.forEach(message => {
-		if (!Number.isInteger(message._byteStart)) return;
+		if (!Number.isInteger(message._byteStart) && !Array.isArray(message._rawPositions)) return;
 		message.hiddenBytes.forEach((hidden, index) => {
-			if (hidden && c.byteStream[message._byteStart + index]) c.byteStream[message._byteStart + index].hidden = true;
+			const rawPosition = message._rawPositions?.[index] ?? message._byteStart + index;
+			if (hidden && c.byteStream[rawPosition]) c.byteStream[rawPosition].hidden = true;
 		});
 	});
 	normalizeCaptureSummaryData(c);
@@ -330,7 +331,12 @@ function markerAt(stream, index, marker) {
 function rebuildPreview(c = capture()) {
 	if (!c) return;
 	normalizeCapture(c);
-	const stream = c.byteStream;
+	// A hidden byte is omitted before framing, rather than merely omitted while
+	// rendering. This makes every framing mode behave exactly as though the byte
+	// was never captured, while byteStream remains available for export/history.
+	const stream = c.byteStream
+		.map((record, rawPosition) => ({ ...record, rawPosition }))
+		.filter(record => !record.hidden);
 	const ranges = [];
 	if (c.previewMode === "marker") {
 		const marker = markerBytes(c.frameMarker);
@@ -371,9 +377,15 @@ function rebuildPreview(c = capture()) {
 	} else if (c.previewMode === "sections") {
 		normalizeSections(c);
 		c.frameSections.forEach((section, sectionIndex) => {
-			const sectionEnd = c.frameSections[sectionIndex + 1]?.start ?? stream.length;
-			for (let start = section.start; start < sectionEnd; start += section.frameSize) {
-				ranges.push([start, Math.min(start + section.frameSize, sectionEnd), section.id]);
+			// Section starts are persisted as raw positions. Translate them to the
+			// compact stream so deleting bytes before a section shifts it naturally.
+			const start = stream.findIndex(record => record.rawPosition >= section.start);
+			const nextRawStart = c.frameSections[sectionIndex + 1]?.start;
+			const nextStart = nextRawStart === undefined ? -1 : stream.findIndex(record => record.rawPosition >= nextRawStart);
+			const sectionEnd = nextStart < 0 ? stream.length : nextStart;
+			if (start < 0) return;
+			for (let offset = start; offset < sectionEnd; offset += section.frameSize) {
+				ranges.push([offset, Math.min(offset + section.frameSize, sectionEnd), section.id]);
 			}
 		});
 	} else {
@@ -382,16 +394,19 @@ function rebuildPreview(c = capture()) {
 		}
 	}
 	const oldMessagesByRange = new Map(
-		c.messages.map(message => [
-			`${message._byteStart ?? ""}:${message._byteEnd ?? ""}`,
-			{ id: message.id, hidden: Boolean(message.hidden) }
-		])
+		c.messages.map(message => {
+			const rawPositions =
+				message._rawPositions ||
+				(Number.isInteger(message._byteStart) ? message.bytes.map((_, index) => message._byteStart + index) : []);
+			return [rawPositions.join(","), { id: message.id, hidden: Boolean(message.hidden) }];
+		})
 	);
 	c.messages = ranges
 		.filter(([start, end]) => end > start)
 		.map(([start, end, sectionId], index) => {
 			const records = stream.slice(start, end);
-			const previous = oldMessagesByRange.get(`${start}:${end}`);
+			const rawPositions = records.map(record => record.rawPosition);
+			const previous = oldMessagesByRange.get(rawPositions.join(","));
 			return {
 				id: previous?.id || crypto.randomUUID(),
 				timestamp: records[0].timestamp,
@@ -399,11 +414,12 @@ function rebuildPreview(c = capture()) {
 				bytes: records.map(record => record.value),
 				directions: records.map(record => record.direction || "rx"),
 				hidden: Boolean(previous?.hidden),
-				hiddenBytes: records.map(record => Boolean(record.hidden)),
+				hiddenBytes: records.map(() => false),
 				sourceIndex: index,
 				sectionId,
 				_byteStart: start,
-				_byteEnd: end
+				_byteEnd: end,
+				_rawPositions: rawPositions
 			};
 		});
 }
@@ -569,8 +585,9 @@ function handleMessageContextAction(action) {
 		} else if (target.position >= 0 && target.position < message.bytes.length) {
 			message.hiddenBytes ||= [];
 			message.hiddenBytes[target.position] = true;
-			const rawIndex = Number.isInteger(message._byteStart) ? message._byteStart + target.position : -1;
+			const rawIndex = message._rawPositions?.[target.position] ?? -1;
 			if (rawIndex >= 0 && c.byteStream?.[rawIndex]) c.byteStream[rawIndex].hidden = true;
+			rebuildPreview(c);
 			saveState({ immediate: true });
 			render();
 			showToast("Byte hidden; captured data was kept");
@@ -1745,7 +1762,8 @@ function startSectionAtByte(messageId, position) {
 	const c = capture();
 	const message = c?.messages.find(item => item.id === messageId);
 	if (!message) return;
-	const start = message._byteStart + position;
+	const start = message._rawPositions?.[position];
+	if (!Number.isInteger(start)) return;
 	c.previewMode = "sections";
 	normalizeSections(c);
 	if (c.frameSections.some(section => section.start === start)) {
