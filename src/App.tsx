@@ -665,6 +665,39 @@ function FolderDialog() {
 	);
 }
 
+function MessageContextMenu() {
+	return (
+		<div
+			id="messageContextMenu"
+			className="message-context-menu hidden"
+			role="menu"
+			aria-label="Message actions"
+			aria-hidden="true"
+		>
+			<button type="button" role="menuitem" data-context-action="note">
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M4.5 4.5h10.25L19.5 9.25V19.5H4.5Z" />
+					<path d="M14.75 4.5v4.75h4.75M8 14.5h4.5M8 17.5h6.5" />
+				</svg>
+				<span>Add note</span>
+			</button>
+			<button type="button" role="menuitem" data-context-action="replay">
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M19 8.5A7.5 7.5 0 1 0 19.15 15" />
+					<path d="M19 4.5v4h-4" />
+				</svg>
+				<span>Replay</span>
+			</button>
+			<button type="button" role="menuitem" className="byte-context-action" data-context-action="section">
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M5 4.5v15M19 4.5v15M5 8.5h5M14 8.5h5M5 15.5h5M14 15.5h5" />
+				</svg>
+				<span>Begin new section here</span>
+			</button>
+		</div>
+	);
+}
+
 function App() {
 	useEffect(() => {
 		void import("./controller");
@@ -692,6 +725,7 @@ function App() {
 			<PatternRemarkDialog />
 			<ExportDialog />
 			<FolderDialog />
+			<MessageContextMenu />
 			<div id="toast" className="toast" role="status" />
 		</>
 	);

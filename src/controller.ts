@@ -145,6 +145,8 @@ let recording = false;
 let recordingSessionId = null;
 let readAbort = false;
 let annotationTarget = null;
+let messageContextTarget = null;
+let messageContextOrigin = null;
 let toastTimer = null;
 let pendingLiveBytes = [];
 let liveRefreshTimer = null;
@@ -453,6 +455,66 @@ function showToast(message) {
 	$("#toast").textContent = message;
 	$("#toast").classList.add("show");
 	toastTimer = setTimeout(() => $("#toast").classList.remove("show"), 2600);
+}
+
+function closeMessageContextMenu({ restoreFocus = false } = {}) {
+	const menu = $("#messageContextMenu");
+	if (!menu) return;
+	menu.classList.add("hidden");
+	menu.setAttribute("aria-hidden", "true");
+	const origin = messageContextOrigin;
+	messageContextTarget = null;
+	messageContextOrigin = null;
+	if (restoreFocus && origin?.isConnected && typeof origin.focus === "function") origin.focus();
+}
+
+function openMessageContextMenu(event) {
+	const targetElement = event.target instanceof Element ? event.target : null;
+	const row = targetElement?.closest("tr[data-message-id]");
+	if (!row) return;
+	const byteButton = targetElement.closest("[data-byte-note]");
+	const byteKey = byteButton?.dataset.byteNote;
+	const bytePosition = byteKey ? Number(byteKey.split(":")[1]) : null;
+	const messageId = row.dataset.messageId;
+	const message = capture()?.messages.find(item => item.id === messageId);
+	if (!message || (byteButton && !Number.isInteger(bytePosition))) return;
+
+	event.preventDefault();
+	messageContextTarget = { messageId, position: byteButton ? bytePosition : null };
+	messageContextOrigin = targetElement.closest("button") || row;
+	const menu = $("#messageContextMenu");
+	const sectionAction = menu.querySelector('[data-context-action="section"]');
+	sectionAction.classList.toggle("hidden", !byteButton);
+	menu.classList.remove("hidden");
+	menu.setAttribute("aria-hidden", "false");
+
+	const edge = 10;
+	const bounds = menu.getBoundingClientRect();
+	const left = Math.min(event.clientX, window.innerWidth - bounds.width - edge);
+	const top = Math.min(event.clientY, window.innerHeight - bounds.height - edge);
+	menu.style.left = `${Math.max(edge, left)}px`;
+	menu.style.top = `${Math.max(edge, top)}px`;
+	requestAnimationFrame(() => {
+		if (!menu.classList.contains("hidden")) menu.querySelector('[role="menuitem"]:not(.hidden)')?.focus();
+	});
+}
+
+function handleMessageContextAction(action) {
+	const target = messageContextTarget;
+	if (!target) return;
+	closeMessageContextMenu();
+	const c = capture();
+	const message = c?.messages.find(item => item.id === target.messageId);
+	if (!message) return;
+	if (action === "note") {
+		const type = target.position === null ? "message" : "byte";
+		const key = target.position === null ? target.messageId : `${target.messageId}:${target.position}`;
+		openAnnotation(type, key);
+	} else if (action === "replay") {
+		void transmitBytes(Uint8Array.from(message.bytes), "replay");
+	} else if (action === "section" && target.position !== null) {
+		startSectionAtByte(target.messageId, target.position);
+	}
 }
 
 function render() {
@@ -1384,7 +1446,7 @@ function renderVirtualRows() {
 					: "";
 				const receivedAt = new Date(m.byteTimestamps?.[pos] ?? m.timestamp).toISOString();
 				const directionLabel = sent ? "sent to RS-485" : "received from serial";
-				return `<button class="${classes}" style="${styles}" data-byte-note="${m.id}:${pos}" title="Byte ${pos + 1} · ${directionLabel} ${receivedAt} · ${count} occurrence(s)${transitionTitle} · click to annotate · right-click to begin a section"><span class="byte-value">${content}</span></button>`;
+				return `<button class="${classes}" style="${styles}" data-byte-note="${m.id}:${pos}" title="Byte ${pos + 1} · ${directionLabel} ${receivedAt} · ${count} occurrence(s)${transitionTitle} · click to annotate · right-click for actions"><span class="byte-value">${content}</span></button>`;
 			})
 			.join("")}</div></td>
       <td>${m._repeats > 1 ? renderRepeatPill(m) : "—"}</td>
@@ -2494,12 +2556,10 @@ $("#messageBody").addEventListener("click", event => {
 	const byteButton = event.target.closest("[data-byte-note]");
 	if (byteButton) openAnnotation("byte", byteButton.dataset.byteNote);
 });
-$("#messageBody").addEventListener("contextmenu", event => {
-	const byteButton = event.target.closest("[data-byte-note]");
-	if (!byteButton) return;
-	event.preventDefault();
-	const [messageId, position] = byteButton.dataset.byteNote.split(":");
-	startSectionAtByte(messageId, +position);
+$("#messageBody").addEventListener("contextmenu", openMessageContextMenu);
+$("#messageContextMenu").addEventListener("click", event => {
+	const actionButton = event.target.closest("[data-context-action]");
+	if (actionButton) handleMessageContextAction(actionButton.dataset.contextAction);
 });
 $("#messageBody").addEventListener("change", event => {
 	const lengthInput = event.target.closest("[data-section-length]");
@@ -2509,7 +2569,16 @@ $("#messageBody").addEventListener("change", event => {
 });
 document.addEventListener("click", e => {
 	if (!e.target.closest(".header-actions")) $("#moreMenu").classList.add("hidden");
+	if (!e.target.closest("#messageContextMenu")) closeMessageContextMenu();
 });
+document.addEventListener("contextmenu", event => {
+	if (!event.target.closest("#messageBody")) closeMessageContextMenu();
+});
+document.addEventListener("keydown", event => {
+	if (event.key === "Escape") closeMessageContextMenu({ restoreFocus: true });
+});
+window.addEventListener("resize", () => closeMessageContextMenu());
+$(".table-wrap").addEventListener("scroll", () => closeMessageContextMenu(), { passive: true });
 window.addEventListener("beforeunload", () => {
 	disposeMessageVirtualizer?.();
 	flushLiveBytes();
