@@ -1487,15 +1487,6 @@ tr:hover .row-action,
 .byte.noted {
 	box-shadow: inset 0 -2px var(--blue);
 }
-.byte-hidden {
-	display: inline-block;
-	min-width: 30px;
-	padding: 3px 5px;
-	border: 1px dashed var(--line);
-	color: var(--faint);
-	text-align: center;
-	letter-spacing: 0.08em;
-}
 .byte.sent {
 	color: #d4faff;
 	background: color-mix(in srgb, var(--blue) 20%, transparent);

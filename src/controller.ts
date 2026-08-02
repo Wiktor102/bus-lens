@@ -1467,9 +1467,7 @@ function renderVirtualRows() {
       ${sequenceControl}
       <td><div class="byte-row">${m.bytes
 			.map((byte, pos) => {
-				if (m.hiddenBytes?.[pos]) {
-					return `<span class="byte-hidden" title="Byte ${pos + 1} is hidden" aria-label="Hidden byte ${pos + 1}">•••</span>`;
-				}
+				if (m.hiddenBytes?.[pos]) return "";
 				const count = countsByPosition[pos]?.get(byte) || 0;
 				const frame = frames[rowIndex][pos] || {};
 				const incoming = frame.incoming;
