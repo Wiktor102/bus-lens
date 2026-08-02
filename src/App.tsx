@@ -16,8 +16,9 @@ function TopBar() {
 				</div>
 			</div>
 			<div className="transport">
-				<span id="connectionBadge" className="status-badge">
-					<i /> Disconnected
+				<span id="connectionBadge" className="status-badge" aria-live="polite" title="No serial port connected">
+					<i />
+					<span id="connectionLabel">Disconnected</span>
 				</span>
 				<button id="connectBtn" className="btn btn-secondary">
 					Connect port

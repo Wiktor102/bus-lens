@@ -59,6 +59,10 @@ is the sum of every recording session from its first received byte through its l
 **Captured** counts received raw bytes only and excludes transmitted (TX) bytes. Use JSON export for a
 complete, re-importable backup. CSV and monitor-text exports are available for the active capture.
 
+The connection badge shows an OS serial port label such as `COM4` when the host runtime provides one.
+Standard browser Web Serial does not expose OS-assigned COM numbers, so Chromium displays the connected
+USB device's `VID:PID` identity instead.
+
 ## Sending messages
 
 The **Send** tab is available whenever a serial port is connected; a capture does

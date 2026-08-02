@@ -16,6 +16,7 @@ import {
 	recordReceivedByte,
 	sumRecordingSessionDurations
 } from "./capture-summary";
+import { describeSerialPort } from "./serial-port-info";
 
 const STORAGE_KEY = "bus-lens-state-v1";
 const $ = selector => document.querySelector(selector);
@@ -453,6 +454,26 @@ function showToast(message) {
 	$("#toast").textContent = message;
 	$("#toast").classList.add("show");
 	toastTimer = setTimeout(() => $("#toast").classList.remove("show"), 2600);
+}
+
+function renderConnectionBadge() {
+	const badge = $("#connectionBadge");
+	if (!port) {
+		badge.innerHTML = "<i></i><span>Disconnected</span>";
+		badge.title = "No serial port connected";
+		badge.setAttribute("aria-label", "Disconnected");
+		badge.classList.remove("connected");
+		return;
+	}
+
+	const display = describeSerialPort(port);
+	badge.innerHTML = `<i></i><span>${escapeHtml(display.label)}</span>`;
+	badge.title =
+		display.source === "os"
+			? `Connected to ${display.label}`
+			: "Web Serial does not expose the OS-assigned COM number; showing the connected device identity";
+	badge.setAttribute("aria-label", `Connected to ${display.label}`);
+	badge.classList.add("connected");
 }
 
 function render() {
@@ -1764,8 +1785,7 @@ async function connectSerial() {
 		await port.open({ baudRate });
 		state.sendSettings.baudRate = baudRate;
 		saveState();
-		$("#connectionBadge").innerHTML = "<i></i> Port connected";
-		$("#connectionBadge").classList.add("connected");
+		renderConnectionBadge();
 		$("#connectBtn").textContent = "Disconnect";
 		$("#recordBtn").disabled = !capture();
 		readAbort = false;
@@ -1792,8 +1812,7 @@ async function disconnectSerial() {
 	} catch {}
 	reader = null;
 	port = null;
-	$("#connectionBadge").innerHTML = "<i></i> Disconnected";
-	$("#connectionBadge").classList.remove("connected");
+	renderConnectionBadge();
 	$("#connectBtn").textContent = "Connect port";
 	$("#recordBtn").disabled = true;
 	$("#recordBtn").classList.remove("recording");
