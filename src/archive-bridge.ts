@@ -1,4 +1,5 @@
 import type { ArchiveCapture, ArchiveFolder } from "./archive-list";
+import { createExternalStore } from "./external-store.ts";
 
 export type ArchiveSnapshot = {
 	captures: ArchiveCapture[];
@@ -38,28 +39,10 @@ const noopActions: ArchiveActions = {
 	importFile: () => {}
 };
 
-let archiveSnapshot = emptyArchiveSnapshot;
-let archiveActions = noopActions;
-const listeners = new Set<() => void>();
+const archiveStore = createExternalStore<ArchiveSnapshot, ArchiveActions>(emptyArchiveSnapshot, noopActions);
 
-export function getArchiveSnapshot() {
-	return archiveSnapshot;
-}
-
-export function subscribeToArchive(listener: () => void) {
-	listeners.add(listener);
-	return () => listeners.delete(listener);
-}
-
-export function publishArchiveSnapshot(snapshot: ArchiveSnapshot) {
-	archiveSnapshot = snapshot;
-	listeners.forEach(listener => listener());
-}
-
-export function registerArchiveActions(actions: ArchiveActions) {
-	archiveActions = actions;
-}
-
-export function getArchiveActions() {
-	return archiveActions;
-}
+export const getArchiveSnapshot = archiveStore.getSnapshot;
+export const subscribeToArchive = archiveStore.subscribe;
+export const publishArchiveSnapshot = archiveStore.publish;
+export const registerArchiveActions = archiveStore.registerActions;
+export const getArchiveActions = archiveStore.getActions;

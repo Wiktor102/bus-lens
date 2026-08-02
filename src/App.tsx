@@ -1,5 +1,11 @@
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ArchiveSidebar } from "./archive-sidebar";
+import {
+	getCaptureHeaderActions,
+	getCaptureHeaderSnapshot,
+	subscribeToCaptureHeader
+} from "./capture-header-bridge";
+import { normalizeCaptureDescription, normalizeCaptureTitle } from "./capture-header";
 import "./styles.css";
 
 function TopBar() {
@@ -32,70 +38,166 @@ function TopBar() {
 }
 
 function CaptureHeader() {
+	const snapshot = useSyncExternalStore(
+		subscribeToCaptureHeader,
+		getCaptureHeaderSnapshot,
+		getCaptureHeaderSnapshot
+	);
+	const actions = getCaptureHeaderActions();
+	const [titleDraft, setTitleDraft] = useState(snapshot.title);
+	const [descriptionDraft, setDescriptionDraft] = useState(snapshot.description);
+	const titleRef = useRef<HTMLInputElement>(null);
+	const descriptionRef = useRef<HTMLTextAreaElement>(null);
+	const actionsRef = useRef<HTMLDivElement>(null);
+	const [menuOpen, setMenuOpen] = useState(false);
+
+	useLayoutEffect(() => {
+		if (document.activeElement !== titleRef.current) setTitleDraft(snapshot.title);
+		if (document.activeElement !== descriptionRef.current) setDescriptionDraft(snapshot.description);
+	}, [snapshot.captureId, snapshot.title, snapshot.description]);
+
+	useLayoutEffect(() => {
+		const input = descriptionRef.current;
+		if (!input) return;
+		input.style.height = "auto";
+		input.style.height = `${Math.min(input.scrollHeight, 84)}px`;
+	}, [descriptionDraft, snapshot.captureId]);
+
+	useEffect(() => {
+		if (!menuOpen) return;
+		const closeOnOutsideClick = (event: MouseEvent) => {
+			if (!actionsRef.current?.contains(event.target as Node)) setMenuOpen(false);
+		};
+		document.addEventListener("click", closeOnOutsideClick);
+		return () => document.removeEventListener("click", closeOnOutsideClick);
+	}, [menuOpen]);
+
 	return (
-		<>
-			<div className="capture-header">
+		<div className="capture-header">
 				<div className="capture-identity">
 					<div className="eyebrow-row">
 						<span className="eyebrow">Active capture</span>
-						<span id="captureState" className="capture-state">
-							SAVED
+						<span id="captureState" className={`capture-state ${snapshot.live ? "live" : ""}`.trim()}>
+							{snapshot.stateText}
 						</span>
 					</div>
 					<div className="capture-title-row">
 						<input
 							id="captureTitle"
 							className="title-input"
-							defaultValue="Overview · Speed 1"
+							ref={titleRef}
+							value={titleDraft}
+							disabled={!snapshot.hasCapture}
 							aria-label="Capture title"
+							onChange={event => {
+								setTitleDraft(event.currentTarget.value);
+								actions.setTitle(event.currentTarget.value);
+							}}
+							onBlur={event => {
+								const title = normalizeCaptureTitle(event.currentTarget.value);
+								setTitleDraft(title);
+								actions.commitTitle(title);
+							}}
 						/>
 						<textarea
 							id="captureDescription"
 							className="capture-description"
+							ref={descriptionRef}
+							value={descriptionDraft}
+							disabled={!snapshot.hasCapture}
 							rows={1}
 							placeholder="Add a description…"
 							aria-label="Capture description"
+							onChange={event => {
+								setDescriptionDraft(event.currentTarget.value);
+								actions.setDescription(event.currentTarget.value);
+							}}
+							onBlur={event => {
+								const description = normalizeCaptureDescription(event.currentTarget.value);
+								setDescriptionDraft(description);
+								actions.commitDescription(description);
+							}}
 						/>
 					</div>
-					<div id="captureMeta" className="capture-meta" />
-				</div>
-				<div id="captureSummary" className="capture-summary" aria-label="Capture summary">
-					<span>Messages <strong id="statMessages">0</strong></span>
-					<span>Unique <strong id="statUnique">0</strong></span>
-					<span title="The sum of each recording session from its first received byte to its last received byte" aria-label="Capture length: sum of each recording session from its first received byte to its last received byte">Capture length <strong id="statCaptureLength">0 s</strong></span>
-					<span title="Received raw bytes only; transmitted bytes are excluded" aria-label="Captured: received raw bytes only; transmitted bytes are excluded">Captured <strong id="statCapturedBytes">0 B</strong></span>
-				</div>
-				<div className="header-actions">
-					<button id="editContextBtn" className="btn btn-secondary">
-						Edit context
-					</button>
-					<button id="moreBtn" className="icon-btn" aria-label="Capture menu">
-						•••
-					</button>
-					<div id="moreMenu" className="popover capture-menu hidden">
-						<button id="duplicateCaptureBtn">
-							<svg viewBox="0 0 24 24" aria-hidden="true">
-								<rect x="8" y="8" width="11.5" height="11.5" rx="1" />
-								<path d="M16 8V5.5a1.5 1.5 0 0 0-1.5-1.5h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8" />
-							</svg>
-							<span>Duplicate capture</span>
-						</button>
-						<button id="clearMessagesBtn">
-							<svg viewBox="0 0 24 24" aria-hidden="true">
-								<path d="M4.5 7.5h15M9 7.5V5h6v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5M14 11v5" />
-							</svg>
-							<span>Clear messages</span>
-						</button>
-						<button id="deleteCaptureBtn" className="danger">
-							<svg viewBox="0 0 24 24" aria-hidden="true">
-								<path d="M5 7.5h14M9 7.5V5h6v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5M14 11v5" />
-							</svg>
-							<span>Delete capture</span>
-						</button>
+					<div id="captureMeta" className="capture-meta">
+						{snapshot.metadata.map((item, index) =>
+							item.kind === "message" ? (
+								<span key={`message:${item.value}`} className="meta-chip">
+									{item.value}
+								</span>
+							) : (
+								<span key={`${item.label}:${item.value}:${index}`} className="meta-chip">
+									<b>{item.label}</b> {item.value}
+								</span>
+							)
+						)}
 					</div>
 				</div>
-			</div>
-		</>
+				<div id="captureSummary" className="capture-summary" aria-label="Capture summary">
+					<span>Messages <strong id="statMessages">{snapshot.summary.messages}</strong></span>
+					<span>Unique <strong id="statUnique">{snapshot.summary.unique}</strong></span>
+					<span title="The sum of each recording session from its first received byte to its last received byte" aria-label="Capture length: sum of each recording session from its first received byte to its last received byte">Capture length <strong id="statCaptureLength">{snapshot.summary.captureLength}</strong></span>
+					<span title="Received raw bytes only; transmitted bytes are excluded" aria-label="Captured: received raw bytes only; transmitted bytes are excluded">Captured <strong id="statCapturedBytes">{snapshot.summary.capturedBytes}</strong></span>
+				</div>
+				<div ref={actionsRef} className="header-actions">
+					<button id="editContextBtn" className="btn btn-secondary" type="button" disabled={!snapshot.hasCapture} onClick={actions.openContext}>
+						Edit context
+					</button>
+					<button
+						id="moreBtn"
+						className="icon-btn"
+						type="button"
+						disabled={!snapshot.hasCapture}
+						aria-label="Capture menu"
+						onClick={() => setMenuOpen(open => !open)}
+					>
+						•••
+					</button>
+				<div id="moreMenu" className={`popover capture-menu ${menuOpen ? "" : "hidden"}`.trim()}>
+					<button
+						id="duplicateCaptureBtn"
+						type="button"
+						onClick={() => {
+							actions.duplicate();
+							setMenuOpen(false);
+						}}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<rect x="8" y="8" width="11.5" height="11.5" rx="1" />
+							<path d="M16 8V5.5a1.5 1.5 0 0 0-1.5-1.5h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8" />
+						</svg>
+						<span>Duplicate capture</span>
+					</button>
+					<button
+						id="clearMessagesBtn"
+						type="button"
+						onClick={() => {
+							actions.clearMessages();
+							setMenuOpen(false);
+						}}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M4.5 7.5h15M9 7.5V5h6v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5M14 11v5" />
+						</svg>
+						<span>Clear messages</span>
+					</button>
+					<button
+						id="deleteCaptureBtn"
+						className="danger"
+						type="button"
+						onClick={() => {
+							actions.deleteCapture();
+							setMenuOpen(false);
+						}}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M5 7.5h14M9 7.5V5h6v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5M14 11v5" />
+						</svg>
+						<span>Delete capture</span>
+					</button>
+				</div>
+				</div>
+		</div>
 	);
 }
 

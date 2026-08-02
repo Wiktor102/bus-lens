@@ -9,13 +9,11 @@ import {
 } from "@tanstack/virtual-core";
 import { publishArchiveSnapshot, registerArchiveActions } from "./archive-bridge";
 import { MAX_SEND_HISTORY, STORAGE_KEY, loadState, normalizeSendState } from "./app-state";
+import { deriveCaptureHeaderSnapshot } from "./capture-header";
+import { publishCaptureHeaderSnapshot, registerCaptureHeaderActions } from "./capture-header-bridge";
 import { collapseAdjacentRuns, countVisibleRowsByPatternOccurrence } from "./collapse-runs";
 import {
-	countDistinctMessageSignatures,
-	countReceivedRawBytes,
-	normalizeDescription,
-	recordReceivedByte,
-	sumRecordingSessionDurations
+	recordReceivedByte
 } from "./capture-summary";
 import {
 	frameWidth,
@@ -277,35 +275,21 @@ function handleMessageContextAction(action) {
 
 function render() {
 	publishArchiveState();
+	publishCaptureHeaderState();
+	syncTransportControls();
+	syncFramingToolbar();
+	updateMessageFilterControl();
 	renderSendWorkbench();
 	if (!capture()) {
 		renderEmptyWorkspace();
 		return;
 	}
-	renderHeader();
 	renderMessages();
 	renderAnalysis();
 	renderNotes();
 }
 
 function renderEmptyWorkspace() {
-	$("#captureTitle").value = "No captures yet";
-	$("#captureTitle").disabled = true;
-	$("#captureDescription").value = "";
-	sizeCaptureDescription();
-	$("#captureDescription").disabled = true;
-	$("#captureState").textContent = "EMPTY";
-	$("#captureState").classList.remove("live");
-	$("#captureMeta").innerHTML = `<span class="meta-chip">Use ＋ to create a capture, or import an existing dump.</span>`;
-	$("#editContextBtn").disabled = true;
-	$("#moreBtn").disabled = true;
-	$("#connectBtn").disabled = false;
-	$("#recordBtn").disabled = true;
-	$("#statMessages").textContent = "0";
-	$("#statUnique").textContent = "0";
-	$("#statCaptureLength").textContent = "0 s";
-	$("#statCapturedBytes").textContent = "0 B";
-	$("#frameSizeLabel").textContent = "—";
 	$("#messageBody").innerHTML = "";
 	$(".message-table").classList.add("hidden");
 	$("#emptyState").classList.remove("hidden");
@@ -319,10 +303,6 @@ function renderEmptyWorkspace() {
 	$("#transitionList").innerHTML = `<span class="muted">No capture selected.</span>`;
 	$("#notesList").innerHTML = `<p class="muted">No capture selected.</p>`;
 	$("#notesCount").textContent = "0";
-	$("#collapseControl").classList.remove("hidden");
-	["framingMode", "previewFrameSize", "frameMarker", "markerPosition", "frameTimeGap", "editSectionsBtn"].forEach(
-		id => ($(`#${id}`).disabled = true)
-	);
 	updateMessageFilterControl();
 }
 
@@ -512,67 +492,24 @@ function deleteFolder(folderId) {
 	showToast(captureCount ? "Folder deleted; captures moved to Unfiled" : "Folder deleted");
 }
 
-function renderHeader() {
-	const c = capture();
-	if (!c) return;
-	["framingMode", "previewFrameSize", "frameMarker", "markerPosition", "frameTimeGap", "editSectionsBtn"].forEach(
-		id => ($(`#${id}`).disabled = false)
-	);
-	syncPreviewControls(c);
-	const titleInput = $("#captureTitle");
-	const descriptionInput = $("#captureDescription");
-	if (document.activeElement !== titleInput) titleInput.value = c.name;
-	if (document.activeElement !== descriptionInput) descriptionInput.value = c.description;
-	sizeCaptureDescription();
-	titleInput.disabled = false;
-	descriptionInput.disabled = false;
-	$("#editContextBtn").disabled = false;
-	$("#moreBtn").disabled = false;
+function publishCaptureHeaderState() {
+	publishCaptureHeaderSnapshot(deriveCaptureHeaderSnapshot(capture(), recording));
+}
+
+function syncTransportControls() {
 	$("#connectBtn").disabled = false;
-	$("#recordBtn").disabled = !port;
-	$("#captureMeta").innerHTML = [
-		c.view && `<span class="meta-chip"><b>VIEW</b> ${escapeHtml(c.view)}</span>`,
-		...c.params.map(
-			p => `<span class="meta-chip"><b>${escapeHtml(p.key.toUpperCase())}</b> ${escapeHtml(p.value)}</span>`
-		)
-	]
-		.filter(Boolean)
-		.join("");
-	const width = frameWidth(c);
-	$("#frameSizeLabel").textContent =
-		c.previewMode === "length"
-			? `${c.frameSize} BYTE${c.frameSize === 1 ? "" : "S"}`
-			: c.previewMode === "sections"
-				? `${c.frameSections.length} SECTION${c.frameSections.length === 1 ? "" : "S"} · UP TO ${width} BYTES`
-				: c.previewMode === "marker" && !c.frameMarker
-					? "MARKER PENDING"
-					: `VARIABLE · UP TO ${width} BYTE${width === 1 ? "" : "S"}`;
-	$("#captureState").textContent = recording ? "● LIVE" : "SAVED";
-	$("#captureState").classList.toggle("live", recording);
-	const messages = visibleMessages(c);
-	$("#statMessages").textContent = messages.length.toLocaleString();
-	$("#statUnique").textContent = countDistinctMessageSignatures(messages).toLocaleString();
-	$("#statCaptureLength").textContent = formatCaptureDuration(sumRecordingSessionDurations(c.captureSessions));
-	$("#statCapturedBytes").textContent = `${countReceivedRawBytes(c.byteStream).toLocaleString()} B`;
-	updateMessageFilterControl();
+	$("#recordBtn").disabled = !port || !capture();
 }
 
-function sizeCaptureDescription() {
-	const input = $("#captureDescription");
-	input.style.height = "auto";
-	input.style.height = `${Math.min(input.scrollHeight, 84)}px`;
-}
-
-function formatCaptureDuration(milliseconds) {
-	if (!milliseconds) return "0 s";
-	if (milliseconds >= 3_600_000) return `${Math.floor(milliseconds / 3_600_000)} h ${Math.floor((milliseconds % 3_600_000) / 60_000)} min`;
-	if (milliseconds >= 60_000) return `${Math.floor(milliseconds / 60_000)} min ${Math.floor((milliseconds % 60_000) / 1_000)} s`;
-	if (milliseconds >= 1_000) return `${(milliseconds / 1_000).toFixed(milliseconds >= 10_000 ? 0 : 1)} s`;
-	return `${Math.round(milliseconds)} ms`;
-}
-
-function syncPreviewControls(c = capture()) {
-	if (!c) return;
+function syncFramingToolbar(c = capture()) {
+	["framingMode", "previewFrameSize", "frameMarker", "markerPosition", "frameTimeGap", "editSectionsBtn"].forEach(
+		id => ($(`#${id}`).disabled = !c)
+	);
+	if (!c) {
+		$("#frameSizeLabel").textContent = "—";
+		$("#collapseControl").classList.remove("hidden");
+		return;
+	}
 	const markerInput = $("#frameMarker");
 	const editingMarker = document.activeElement === markerInput;
 	$("#framingMode").value = c.previewMode;
@@ -585,6 +522,15 @@ function syncPreviewControls(c = capture()) {
 	$("#markerControls").classList.toggle("hidden", c.previewMode !== "marker");
 	$("#timeControls").classList.toggle("hidden", c.previewMode !== "time");
 	$("#collapseControl").classList.toggle("hidden", c.previewMode === "sections");
+	const width = frameWidth(c);
+	$("#frameSizeLabel").textContent =
+		c.previewMode === "length"
+			? `${c.frameSize} BYTE${c.frameSize === 1 ? "" : "S"}`
+			: c.previewMode === "sections"
+				? `${c.frameSections.length} SECTION${c.frameSections.length === 1 ? "" : "S"} · UP TO ${width} BYTES`
+				: c.previewMode === "marker" && !c.frameMarker
+					? "MARKER PENDING"
+					: `VARIABLE · UP TO ${width} BYTE${width === 1 ? "" : "S"}`;
 }
 
 function getCounts(messages) {
@@ -1236,6 +1182,81 @@ function renderNotes() {
 			.join("") || `<p class="muted">No observations recorded for this capture.</p>`;
 }
 
+function setCaptureTitle(value) {
+	const c = capture();
+	if (!c) return;
+	c.name = value;
+	saveState();
+	publishCaptureHeaderState();
+}
+
+function commitCaptureTitle(value) {
+	const c = capture();
+	if (!c) return;
+	c.name = value;
+	saveState();
+	publishArchiveState();
+	publishCaptureHeaderState();
+}
+
+function setCaptureDescription(value) {
+	const c = capture();
+	if (!c) return;
+	c.description = value;
+	saveState();
+	publishCaptureHeaderState();
+}
+
+function commitCaptureDescription(value) {
+	const c = capture();
+	if (!c) return;
+	c.description = value;
+	saveState();
+	publishCaptureHeaderState();
+}
+
+function duplicateActiveCapture() {
+	const source = capture();
+	if (!source) return;
+	const copy = structuredClone(source);
+	copy.id = crypto.randomUUID();
+	copy.name += " · copy";
+	copy.createdAt = new Date().toISOString();
+	copy.messages.forEach(m => (m.id = crypto.randomUUID()));
+	copy.annotations = {};
+	state.captures.unshift(copy);
+	activeId = copy.id;
+	saveState();
+	render();
+}
+
+function clearActiveCaptureMessages() {
+	const c = capture();
+	if (!c) return;
+	if (confirm("Clear all raw bytes, messages, and message annotations from this capture?")) {
+		c.byteStream = [];
+		c.messages = [];
+		c.annotations = {};
+		c.patternRemarks = {};
+		saveState();
+		render();
+	}
+}
+
+function deleteActiveCapture() {
+	const c = capture();
+	if (!c || !confirm(`Delete “${c.name}”?`)) return;
+	if (recording) {
+		flushLiveBytes();
+		recording = false;
+		recordingSessionId = null;
+	}
+	state.captures = state.captures.filter(item => item.id !== activeId);
+	activeId = state.captures[0]?.id || null;
+	saveState();
+	render();
+}
+
 function openContext(isNew = false) {
 	const c = isNew ? { name: "Untitled capture", view: "", params: [], baudRate: 115200, folderId: null } : capture();
 	$("#contextDialog").dataset.mode = isNew ? "new" : "edit";
@@ -1534,7 +1555,9 @@ async function disconnectSerial() {
 	$("#recordBtn").disabled = true;
 	$("#recordBtn").classList.remove("recording");
 	$("#recordBtn").innerHTML = "<span></span> Start capture";
-	renderHeader();
+	publishCaptureHeaderState();
+	syncFramingToolbar();
+	updateMessageFilterControl();
 	renderSendWorkbench();
 }
 
@@ -1597,7 +1620,9 @@ function flushLiveBytes() {
 	const trimmed = trimCapture(c);
 	rebuildPreview(c);
 	saveState();
-	renderHeader();
+	publishCaptureHeaderState();
+	syncFramingToolbar();
+	updateMessageFilterControl();
 	renderMessages();
 	if ($("#patternsPanel").classList.contains("active")) renderAnalysis();
 	if (trimmed) showToast(`Capture limit reached; keeping the newest ${MAX_CAPTURE_BYTES.toLocaleString()} bytes`);
@@ -1737,7 +1762,8 @@ function toggleRecording() {
 	}
 	$("#recordBtn").classList.toggle("recording", recording);
 	$("#recordBtn").innerHTML = recording ? "<span></span> Stop capture" : "<span></span> Start capture";
-	renderHeader();
+	publishCaptureHeaderState();
+	updateMessageFilterControl();
 	renderSendWorkbench();
 	showToast(recording ? "Capture started" : "Capture saved locally");
 }
@@ -1996,7 +2022,6 @@ $("#transmitHex").onkeydown = event => {
 		else void sendBytes();
 	}
 };
-$("#editContextBtn").onclick = () => openContext(false);
 $("#addParameterBtn").onclick = () => addParameterRow();
 $("#contextForm").addEventListener("submit", e => {
 	if (e.submitter?.value === "cancel") return;
@@ -2004,31 +2029,6 @@ $("#contextForm").addEventListener("submit", e => {
 	saveContext();
 	$("#contextDialog").close();
 });
-$("#captureTitle").oninput = e => {
-	if (!capture()) return;
-	capture().name = e.target.value;
-	saveState();
-};
-$("#captureTitle").onblur = e => {
-	if (!capture()) return;
-	capture().name = normalizeDescription(e.target.value) || "Untitled capture";
-	e.target.value = capture().name;
-	saveState();
-	publishArchiveState();
-};
-$("#captureDescription").oninput = e => {
-	if (!capture()) return;
-	capture().description = e.target.value;
-	sizeCaptureDescription();
-	saveState();
-};
-$("#captureDescription").onblur = e => {
-	if (!capture()) return;
-	capture().description = normalizeDescription(e.target.value);
-	e.target.value = capture().description;
-	sizeCaptureDescription();
-	saveState();
-};
 $("#messageFilter").oninput = () => {
 	$(".table-wrap").scrollTop = 0;
 	updateMessageFilterControl();
@@ -2073,45 +2073,6 @@ $("#sectionsForm").addEventListener("submit", event => {
 	saveSections();
 	$("#sectionsDialog").close();
 });
-$("#moreBtn").onclick = () => $("#moreMenu").classList.toggle("hidden");
-$("#duplicateCaptureBtn").onclick = () => {
-	const copy = structuredClone(capture());
-	copy.id = crypto.randomUUID();
-	copy.name += " · copy";
-	copy.createdAt = new Date().toISOString();
-	copy.messages.forEach(m => (m.id = crypto.randomUUID()));
-	copy.annotations = {};
-	state.captures.unshift(copy);
-	activeId = copy.id;
-	saveState();
-	render();
-	$("#moreMenu").classList.add("hidden");
-};
-$("#clearMessagesBtn").onclick = () => {
-	if (confirm("Clear all raw bytes, messages, and message annotations from this capture?")) {
-		capture().byteStream = [];
-		capture().messages = [];
-		capture().annotations = {};
-		capture().patternRemarks = {};
-		saveState();
-		render();
-	}
-	$("#moreMenu").classList.add("hidden");
-};
-$("#deleteCaptureBtn").onclick = async () => {
-	if (confirm(`Delete “${capture().name}”?`)) {
-		if (recording) {
-			flushLiveBytes();
-			recording = false;
-			recordingSessionId = null;
-		}
-		state.captures = state.captures.filter(c => c.id !== activeId);
-		activeId = state.captures[0]?.id || null;
-		saveState();
-		render();
-	}
-	$("#moreMenu").classList.add("hidden");
-};
 $$(".tab").forEach(
 	tab =>
 		(tab.onclick = () => {
@@ -2231,7 +2192,6 @@ $("#messageBody").addEventListener("change", event => {
 	if (collapseInput) setSectionCollapse(collapseInput.dataset.sectionCollapse, collapseInput.checked);
 });
 document.addEventListener("click", e => {
-	if (!e.target.closest(".header-actions")) $("#moreMenu").classList.add("hidden");
 	if (!e.target.closest("#messageContextMenu")) closeMessageContextMenu();
 });
 document.addEventListener("contextmenu", event => {
@@ -2247,6 +2207,19 @@ window.addEventListener("beforeunload", () => {
 	flushLiveBytes();
 	persistState();
 	if (port) disconnectSerial();
+});
+
+registerCaptureHeaderActions({
+	setTitle: setCaptureTitle,
+	commitTitle: commitCaptureTitle,
+	setDescription: setCaptureDescription,
+	commitDescription: commitCaptureDescription,
+	openContext: () => {
+		if (capture()) openContext(false);
+	},
+	duplicate: duplicateActiveCapture,
+	clearMessages: clearActiveCaptureMessages,
+	deleteCapture: deleteActiveCapture
 });
 
 registerArchiveActions({
