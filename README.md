@@ -75,6 +75,7 @@ messages can also be replayed directly from the message table.
 
 - Click any byte to attach a byte-level note.
 - Use **Add note** on a row for a message-level annotation.
+- Right-click a message or byte and choose **Delete** to hide it while keeping the captured data.
 - Add a lightweight capture description directly beneath its title.
 - In **Notes**, enter a row range to attach an observation to a specific message
   sequence.
