@@ -3,6 +3,7 @@ export type RawByteRecord = {
 	timestamp: number;
 	direction?: string;
 	sessionId?: string;
+	hidden?: boolean;
 };
 
 export type RecordingSession = {
@@ -13,6 +14,7 @@ export type RecordingSession = {
 
 export type FramedMessage = {
 	bytes: number[];
+	hiddenBytes?: boolean[];
 };
 
 export type CaptureSummaryData = {
@@ -34,7 +36,10 @@ function receivedRecords(byteStream: RawByteRecord[] = []) {
 }
 
 export function signatureForMessage(message: FramedMessage) {
-	return message.bytes.map(byte => Number(byte).toString(16).padStart(2, "0").toUpperCase()).join(" ");
+	return message.bytes
+		.filter((_, index) => !message.hiddenBytes?.[index])
+		.map(byte => Number(byte).toString(16).padStart(2, "0").toUpperCase())
+		.join(" ");
 }
 
 export function countDistinctMessageSignatures(messages: FramedMessage[] = []) {

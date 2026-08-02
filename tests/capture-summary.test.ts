@@ -4,6 +4,7 @@ import {
 	countDistinctMessageSignatures,
 	countReceivedRawBytes,
 	normalizeCaptureSummaryData,
+	signatureForMessage,
 	sumRecordingSessionDurations
 } from "../src/capture-summary.ts";
 
@@ -36,6 +37,17 @@ test("counts distinct framed-message signatures", () => {
 			{ bytes: [0xc2, 0x00, 0x5d] }
 		]),
 		2
+	);
+});
+
+test("ignores hidden bytes when counting message signatures", () => {
+	assert.equal(signatureForMessage({ bytes: [0xc2, 0x08, 0x5d], hiddenBytes: [false, true, false] }), "C2 5D");
+	assert.equal(
+		countDistinctMessageSignatures([
+			{ bytes: [0xc2, 0x08, 0x5d], hiddenBytes: [false, true, false] },
+			{ bytes: [0xc2, 0x00, 0x5d], hiddenBytes: [false, true, false] }
+		]),
+		1
 	);
 });
 
