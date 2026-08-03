@@ -21,6 +21,12 @@ export type DataTransferFile = {
 
 export type Download = (content: string, filename: string, type: string) => void;
 
+export type DataTransferTimeDependencies = {
+	generateId?: () => string;
+	now?: () => number;
+	nowIso?: () => string;
+};
+
 export type DataTransferState = AppState & {
 	captures: Capture[];
 	folders: StoredFolder[];
@@ -29,7 +35,7 @@ export type DataTransferState = AppState & {
 	sendSettings: SendSettings;
 };
 
-export type DataTransferDependencies = {
+export type DataTransferDependencies = DataTransferTimeDependencies & {
 	state: AppState;
 	capture: () => Capture | undefined;
 	getActiveId: () => string | null | undefined;
@@ -45,7 +51,21 @@ export type DataTransferController = {
 	exportData: (format: ExportFormat) => void;
 };
 
-export function parseDump(text: string): Capture[] {
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function resolveTimeDependencies(dependencies: DataTransferTimeDependencies = {}) {
+	const now = dependencies.now || Date.now;
+	return {
+		generateId: dependencies.generateId || (() => crypto.randomUUID()),
+		now,
+		nowIso: dependencies.nowIso || (() => new Date(now()).toISOString())
+	};
+}
+
+export function parseDump(text: string, dependencies: DataTransferTimeDependencies = {}): Capture[] {
+	const { generateId, now, nowIso } = resolveTimeDependencies(dependencies);
 	const sections = text
 		.split(/\n\s*----+\s*\n/)
 		.map(section => section.trim())
@@ -75,14 +95,14 @@ export function parseDump(text: string): Capture[] {
 			const messages: CaptureMessage[] = [];
 			lines.forEach(line => {
 				const timestampMatch = line.match(/^([\d]{2}:\d{2}:\d{2}[.:]\d{3})\s*->\s*((?:[0-9A-F]{2}\s*)+)/i);
-				if (timestampMatch) messages.push(makeMessage(timestampMatch[2], parseTime(timestampMatch[1]), messages.length));
+				if (timestampMatch) messages.push(makeMessage(timestampMatch[2], parseTime(timestampMatch[1], now), messages.length, generateId));
 			});
 			return {
-				id: crypto.randomUUID(),
+				id: generateId(),
 				name: `${view} · imported ${index + 1}`,
 				view,
 				params,
-				createdAt: new Date().toISOString(),
+				createdAt: nowIso(),
 				frameSize: 3,
 				baudRate: 115200,
 				inputFormat: "text",
@@ -106,59 +126,62 @@ function formatTime(milliseconds: number): string {
 
 export function createDataTransferController(dependencies: DataTransferDependencies): DataTransferController {
 	const state = dependencies.state as DataTransferState;
+	const { generateId, now, nowIso } = resolveTimeDependencies(dependencies);
 
 	async function importFile(file: DataTransferFile): Promise<void> {
 		try {
 			const text = await file.text();
 			if (file.name.toLowerCase().endsWith(".json")) {
-				const imported: any = JSON.parse(text);
-				const captures = (Array.isArray(imported) ? imported : imported.captures) as Capture[];
+				const imported: unknown = JSON.parse(text);
+				const importedArchive = isRecord(imported) ? imported : undefined;
+				const captures = (Array.isArray(imported) ? imported : importedArchive?.captures) as Capture[] | undefined;
 				if (!Array.isArray(captures)) throw new Error("No captures found");
-				const importedFolders = Array.isArray(imported?.folders) ? imported.folders : [];
-				const folderIdMap = new Map<string, string>();
+				const importedFolders = Array.isArray(importedArchive?.folders) ? importedArchive.folders : [];
+				const folderIdMap = new Map<unknown, string>();
 				const existingFolderNames = new Map(state.folders.map(folder => [folder.name.toLowerCase(), folder.id]));
 				const existingCaptureIds = new Set(state.captures.map(capture => capture.id));
-				importedFolders.forEach((sourceFolder: any) => {
-					const name = String(sourceFolder?.name || "Imported folder").trim() || "Imported folder";
+				importedFolders.forEach(sourceFolder => {
+					const folder = isRecord(sourceFolder) ? sourceFolder : {};
+					const name = String(folder.name || "Imported folder").trim() || "Imported folder";
 					let id = existingFolderNames.get(name.toLowerCase());
 					if (!id) {
-						id = crypto.randomUUID();
+						id = generateId();
 						state.folders.push({
 							id,
 							name,
-							collapsed: Boolean(sourceFolder?.collapsed),
-							createdAt: sourceFolder?.createdAt || new Date().toISOString()
+							collapsed: Boolean(folder.collapsed),
+							createdAt: (folder.createdAt as string | undefined) || nowIso()
 						});
 						existingFolderNames.set(name.toLowerCase(), id);
 					}
-					if (sourceFolder?.id) folderIdMap.set(sourceFolder.id, id);
+					if (folder.id) folderIdMap.set(folder.id, id);
 				});
 				captures.forEach(capture => {
-					if (!capture.id || existingCaptureIds.has(capture.id)) capture.id = crypto.randomUUID();
+					if (!capture.id || existingCaptureIds.has(capture.id)) capture.id = generateId();
 					existingCaptureIds.add(capture.id);
-					capture.folderId = folderIdMap.get(capture.folderId as string) || null;
-					normalizeCapture(capture);
-					rebuildPreview(capture);
-					capture.messages!.forEach(message => (message.id ||= crypto.randomUUID()));
+					capture.folderId = folderIdMap.get(capture.folderId) || null;
+					normalizeCapture(capture, generateId);
+					rebuildPreview(capture, generateId);
+					capture.messages!.forEach(message => (message.id ||= generateId()));
 				});
 				state.captures.unshift(...captures);
-				if (!Array.isArray(imported) && Array.isArray(imported.sendHistory)) {
-					state.sendHistory = [...imported.sendHistory, ...state.sendHistory];
+				if (importedArchive && Array.isArray(importedArchive.sendHistory)) {
+					state.sendHistory = [...(importedArchive.sendHistory as SendHistoryEntry[]), ...state.sendHistory];
 				}
-				if (!Array.isArray(imported) && Array.isArray(imported.sendQueue)) {
-					state.sendQueue = [...imported.sendQueue, ...state.sendQueue];
+				if (importedArchive && Array.isArray(importedArchive.sendQueue)) {
+					state.sendQueue = [...(importedArchive.sendQueue as SendQueueEntry[]), ...state.sendQueue];
 				}
-				if (!Array.isArray(imported) && imported.sendSettings) {
-					state.sendSettings = { ...state.sendSettings, ...imported.sendSettings, draft: state.sendSettings.draft };
+				if (importedArchive && isRecord(importedArchive.sendSettings)) {
+					state.sendSettings = { ...state.sendSettings, ...importedArchive.sendSettings, draft: state.sendSettings.draft };
 				}
-				normalizeSendState(state);
+				normalizeSendState(state, { generateId, now });
 				dependencies.setActiveId(captures[0]?.id || dependencies.getActiveId());
 			} else {
-				const captures = parseDump(text);
+				const captures = parseDump(text, { generateId, now, nowIso });
 				if (!captures.length) throw new Error("No timestamped hex messages found");
 				captures.forEach(capture => {
-					normalizeCapture(capture);
-					rebuildPreview(capture);
+					normalizeCapture(capture, generateId);
+					rebuildPreview(capture, generateId);
 				});
 				state.captures.unshift(...captures);
 				dependencies.setActiveId(captures[0].id);
@@ -166,8 +189,9 @@ export function createDataTransferController(dependencies: DataTransferDependenc
 			dependencies.saveState();
 			dependencies.render();
 			dependencies.showToast(`Imported ${file.name}`);
-		} catch (error: any) {
-			dependencies.showToast(`Import failed: ${error.message}`);
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			dependencies.showToast(`Import failed: ${message}`);
 		}
 	}
 
@@ -180,7 +204,7 @@ export function createDataTransferController(dependencies: DataTransferDependenc
 					{
 						app: "Bus Lens",
 						version: 3,
-						exportedAt: new Date().toISOString(),
+						exportedAt: nowIso(),
 						folders: state.folders,
 						captures: state.captures,
 						sendHistory: state.sendHistory,
@@ -247,7 +271,10 @@ export function createDataTransferController(dependencies: DataTransferDependenc
 			const context = [
 				`----`,
 				`View: ${capture.view}`,
-				...capture.params!.map(parameter => `${(parameter as any).key}: ${(parameter as any).value}`),
+				...capture.params!.map(parameter => {
+					const contextParameter = parameter as { key?: unknown; value?: unknown };
+					return `${contextParameter.key}: ${contextParameter.value}`;
+				}),
 				...noteLines,
 				...patternLines,
 				"",

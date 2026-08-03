@@ -1050,7 +1050,23 @@ function App() {
 	const handleSendPopupChange = (open: boolean) => setSendPopupOpen(open);
 
 	useEffect(() => {
-		void import("./controller");
+		let disposed = false;
+		let removeBeforeUnload: (() => void) | undefined;
+
+		void import("./controller")
+			.then(({ initializeController }) => {
+				if (disposed) return;
+				const lifecycle = initializeController();
+				const handleBeforeUnload = () => lifecycle.beforeUnload();
+				window.addEventListener("beforeunload", handleBeforeUnload);
+				removeBeforeUnload = () => window.removeEventListener("beforeunload", handleBeforeUnload);
+			})
+			.catch(error => console.error("Could not initialize Bus Lens", error));
+
+		return () => {
+			disposed = true;
+			removeBeforeUnload?.();
+		};
 	}, []);
 
 	useEffect(() => publishViewStateSnapshot(viewState), [viewState]);
