@@ -15,6 +15,8 @@ import {
 	registerFramingToolbarActions
 } from "./framing-toolbar-bridge";
 import { publishSendSnapshot, registerSendActions } from "./send-bridge";
+import { registerTransportActions } from "./transport-bridge";
+import { createSerialController, type SerialController } from "./serial-controller";
 import { registerNotesActions, publishNotesSnapshot, type SequenceNoteInput } from "./notes-bridge";
 import { deriveNotesSnapshot } from "./notes";
 import { publishToastSnapshot } from "./toast-bridge";
@@ -39,9 +41,6 @@ import {
 	selectFramingToolbarSnapshot
 } from "./framing-toolbar";
 import {
-	recordReceivedByte
-} from "./capture-summary";
-import {
 	hexByte,
 	frameWidth,
 	makeMessage,
@@ -56,20 +55,11 @@ import {
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
-// A capture remains useful at this size while still fitting comfortably in browser storage.
-const MAX_CAPTURE_BYTES = 50_000;
-const LIVE_REFRESH_MS = 120;
 let state = loadState();
 let activeId = state.activeId || state.captures[0]?.id;
-let port = null;
-let reader = null;
-let recording = false;
-let recordingSessionId = null;
-let readAbort = false;
 let toastTimer = null;
-let pendingLiveBytes = [];
-let liveRefreshTimer = null;
 let stateSaveTimer = null;
+let transport: SerialController;
 let sendInFlight = false;
 let queueRunning = false;
 let stopQueueRequested = false;
@@ -130,8 +120,8 @@ function publishArchiveState() {
 function publishSendState() {
 	normalizeSendState(state);
 	publishSendSnapshot({
-		connected: Boolean(port?.writable),
-		recording,
+		connected: Boolean(transport.getPort()?.writable),
+		recording: transport.isRecording(),
 		sendInFlight,
 		queueRunning,
 		stopQueueRequested,
@@ -173,9 +163,8 @@ function showToast(message) {
 function render() {
 	publishArchiveState();
 	publishCaptureHeaderState();
-	syncTransportControls();
+	transport.publishState();
 	publishFramingToolbarState();
-	publishSendState();
 	publishAnalysisState();
 	publishNotesState();
 	if (!capture()) {
@@ -256,12 +245,7 @@ function deleteFolder(folderId) {
 }
 
 function publishCaptureHeaderState() {
-	publishCaptureHeaderSnapshot(deriveCaptureHeaderSnapshot(capture(), recording));
-}
-
-function syncTransportControls() {
-	$("#connectBtn").disabled = false;
-	$("#recordBtn").disabled = !port || !capture();
+	publishCaptureHeaderSnapshot(deriveCaptureHeaderSnapshot(capture(), transport.isRecording()));
 }
 
 function publishFramingToolbarState(c = capture()) {
@@ -371,11 +355,7 @@ function clearActiveCaptureMessages() {
 function deleteActiveCapture() {
 	const c = capture();
 	if (!c || !confirm(`Delete “${c.name}”?`)) return;
-	if (recording) {
-		flushLiveBytes();
-		recording = false;
-		recordingSessionId = null;
-	}
+	if (transport.isRecording()) transport.stopRecording();
 	state.captures = state.captures.filter(item => item.id !== activeId);
 	activeId = state.captures[0]?.id || null;
 	saveState();
@@ -610,130 +590,6 @@ function commitPatternRemarkDraft(input) {
 	return true;
 }
 
-async function connectSerial() {
-	if (!("serial" in navigator)) {
-		showToast("Web Serial requires Chrome or Edge on localhost");
-		return;
-	}
-	if (port) {
-		await disconnectSerial();
-		return;
-	}
-	try {
-		port = await navigator.serial.requestPort();
-		const baudRate = capture()?.baudRate || state.sendSettings.baudRate || 115200;
-		await port.open({ baudRate });
-		state.sendSettings.baudRate = baudRate;
-		saveState();
-		$("#connectionBadge").innerHTML = "<i></i> Port connected";
-		$("#connectionBadge").classList.add("connected");
-		$("#connectBtn").textContent = "Disconnect";
-		$("#recordBtn").disabled = !capture();
-		readAbort = false;
-		readSerialLoop();
-		publishSendState();
-	} catch (error) {
-		port = null;
-		showToast(error.name === "NotFoundError" ? "No serial port selected" : `Serial error: ${error.message}`);
-	}
-}
-
-async function disconnectSerial() {
-	flushLiveBytes();
-	recording = false;
-	recordingSessionId = null;
-	saveState({ immediate: true });
-	readAbort = true;
-	stopQueueRequested = true;
-	queueDelayResolve?.();
-	try {
-		await reader?.cancel();
-		reader?.releaseLock();
-		await port?.close();
-	} catch {}
-	reader = null;
-	port = null;
-	$("#connectionBadge").innerHTML = "<i></i> Disconnected";
-	$("#connectionBadge").classList.remove("connected");
-	$("#connectBtn").textContent = "Connect port";
-	$("#recordBtn").disabled = true;
-	$("#recordBtn").classList.remove("recording");
-	$("#recordBtn").innerHTML = "<span></span> Start capture";
-	publishCaptureHeaderState();
-	publishSendState();
-}
-
-async function readSerialLoop() {
-	while (port?.readable && !readAbort) {
-		reader = port.readable.getReader();
-		try {
-			while (true) {
-				const { value, done } = await reader.read();
-				if (done) break;
-				if (recording && value) ingestChunk(value);
-			}
-		} catch (error) {
-			if (!readAbort) showToast(`Read error: ${error.message}`);
-		} finally {
-			try {
-				reader.releaseLock();
-			} catch {}
-			reader = null;
-		}
-	}
-}
-
-function queueLiveBytes(bytes, direction) {
-	const timestamp = performance.timeOrigin + performance.now();
-	for (const value of bytes) pendingLiveBytes.push({ value, timestamp, direction, sessionId: recordingSessionId || undefined });
-	if (!liveRefreshTimer) liveRefreshTimer = setTimeout(flushLiveBytes, LIVE_REFRESH_MS);
-}
-
-function trimCapture(c) {
-	const excess = c.byteStream.length - MAX_CAPTURE_BYTES;
-	if (excess <= 0) return false;
-	const firstRollover = !c.rollingBuffer;
-	c.rollingBuffer = true;
-	c.byteStream.splice(0, excess);
-	c.frameSections = (c.frameSections || [])
-		.filter(section => section.start >= excess)
-		.map(section => ({ ...section, start: section.start - excess }));
-	// Message IDs are derived from stream positions, so old message-specific notes
-	// cannot safely be attached after the oldest portion rolls off.
-	c.annotations = {};
-	c.notes = (c.notes || []).filter(note => note.type !== "sequence");
-	return firstRollover;
-}
-
-function flushLiveBytes() {
-	liveRefreshTimer = null;
-	if (!pendingLiveBytes.length) return;
-	const c = capture();
-	if (!c) {
-		pendingLiveBytes = [];
-		return;
-	}
-	const sessionsById = new Map((c.captureSessions || []).map(session => [session.id, session]));
-	for (const record of pendingLiveBytes) {
-		c.byteStream.push(record);
-		if (record.direction !== "tx") recordReceivedByte(sessionsById.get(record.sessionId), record.timestamp);
-	}
-	pendingLiveBytes = [];
-	const trimmed = trimCapture(c);
-	rebuildPreview(c);
-	saveState();
-	publishCaptureHeaderState();
-	publishFramingToolbarState(c);
-	renderMessages();
-	if (getViewStateSnapshot().activePanel === "patterns") publishAnalysisState(c);
-	if (trimmed) publishNotesState(c);
-	if (trimmed) showToast(`Capture limit reached; keeping the newest ${MAX_CAPTURE_BYTES.toLocaleString()} bytes`);
-}
-
-function ingestChunk(bytes) {
-	queueLiveBytes(bytes, "rx");
-}
-
 function recordSend(bytes, { origin, ok, error = "" }) {
 	const entry = {
 		id: crypto.randomUUID(),
@@ -742,7 +598,7 @@ function recordSend(bytes, { origin, ok, error = "" }) {
 		origin,
 		ok,
 		error,
-		captureId: ok && recording ? capture()?.id || null : null
+		captureId: ok && transport.isRecording() ? capture()?.id || null : null
 	};
 	state.sendHistory.unshift(entry);
 	state.sendHistory = state.sendHistory.slice(0, MAX_SEND_HISTORY);
@@ -751,6 +607,7 @@ function recordSend(bytes, { origin, ok, error = "" }) {
 
 async function transmitBytes(bytes, origin = "manual") {
 	if (!bytes?.length) return false;
+	const port = transport.getPort();
 	if (!port?.writable) {
 		showToast("Connect a writable serial port first");
 		return false;
@@ -768,7 +625,7 @@ async function transmitBytes(bytes, origin = "manual") {
 		} finally {
 			writer.releaseLock();
 		}
-		if (recording && capture()) queueLiveBytes(bytes, "tx");
+		if (transport.isRecording() && capture()) transport.queueLiveBytes(bytes, "tx");
 		recordSend(bytes, { origin, ok: true });
 		showToast(`${bytes.length} byte${bytes.length === 1 ? "" : "s"} sent to RS-485`);
 		return true;
@@ -880,7 +737,7 @@ function waitForQueueDelay(ms) {
 }
 
 async function runSendQueue() {
-	if (queueRunning || sendInFlight || !port?.writable || !state.sendQueue.length) return;
+	if (queueRunning || sendInFlight || !transport.getPort()?.writable || !state.sendQueue.length) return;
 	queueRunning = true;
 	stopQueueRequested = false;
 	publishSendState();
@@ -888,7 +745,7 @@ async function runSendQueue() {
 	let completed = 0;
 	try {
 		for (let index = 0; index < queued.length; index++) {
-			if (stopQueueRequested || !port?.writable) break;
+			if (stopQueueRequested || !transport.getPort()?.writable) break;
 			const sent = await transmitBytes(Uint8Array.from(queued[index].bytes), "queue");
 			if (!sent) break;
 			completed++;
@@ -903,29 +760,6 @@ async function runSendQueue() {
 		publishSendState();
 		if (completed) showToast(`Queue sent ${completed} message${completed === 1 ? "" : "s"}`);
 	}
-}
-
-function toggleRecording() {
-	const c = capture();
-	if (!c) return showToast("Create a capture before starting capture");
-	if (recording) {
-		flushLiveBytes();
-		recording = false;
-		recordingSessionId = null;
-		saveState({ immediate: true });
-	} else {
-		const session = { id: crypto.randomUUID() };
-		c.captureSessions ||= [];
-		c.captureSessions.push(session);
-		recordingSessionId = session.id;
-		recording = true;
-		saveState();
-	}
-	$("#recordBtn").classList.toggle("recording", recording);
-	$("#recordBtn").innerHTML = recording ? "<span></span> Stop capture" : "<span></span> Start capture";
-	publishCaptureHeaderState();
-	publishSendState();
-	showToast(recording ? "Capture started" : "Capture saved locally");
 }
 
 function parseDump(text) {
@@ -1137,8 +971,28 @@ function exportData(format) {
 	showToast(`${format.toUpperCase()} export created`);
 }
 
-$("#connectBtn").onclick = connectSerial;
-$("#recordBtn").onclick = toggleRecording;
+transport = createSerialController({
+	capture,
+	state,
+	saveState,
+	showToast,
+	publishCaptureHeaderState,
+	publishFramingToolbarState,
+	publishAnalysisState,
+	publishNotesState,
+	renderMessages,
+	isPatternsPanelActive: () => getViewStateSnapshot().activePanel === "patterns",
+	stopSendQueue,
+	publishSendState
+});
+
+registerTransportActions({
+	connect: transport.connect,
+	disconnect: transport.disconnect,
+	toggleConnection: transport.toggleConnection,
+	toggleRecording: transport.toggleRecording
+});
+
 let previousViewState = getViewStateSnapshot();
 subscribeToViewState(() => {
 	const nextViewState = getViewStateSnapshot();
@@ -1155,9 +1009,9 @@ subscribeToViewState(() => {
 });
 
 window.addEventListener("beforeunload", () => {
-	flushLiveBytes();
+	transport.flushLiveBytes();
 	persistState();
-	if (port) disconnectSerial();
+	if (transport.getPort()) void transport.disconnect();
 });
 
 registerCaptureHeaderActions({

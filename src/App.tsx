@@ -25,6 +25,7 @@ import {
 import type { FramingMode, MarkerPosition } from "./framing-toolbar";
 import { getSendActions, getSendSnapshot, subscribeToSend } from "./send-bridge";
 import { deriveSendViewModel, formatSendTime, parseTransmitHex } from "./send";
+import { getTransportActions, getTransportSnapshot, subscribeToTransport } from "./transport-bridge";
 import { getNotesActions, getNotesSnapshot, subscribeToNotes } from "./notes-bridge";
 import { getToastSnapshot, subscribeToToast } from "./toast-bridge";
 import {
@@ -47,6 +48,13 @@ import {
 import "./styles.css";
 
 function TopBar() {
+	const snapshot = useSyncExternalStore(
+		subscribeToTransport,
+		getTransportSnapshot,
+		getTransportSnapshot
+	);
+	const actions = getTransportActions();
+
 	return (
 		<header className="topbar">
 			<div className="brand">
@@ -61,14 +69,19 @@ function TopBar() {
 				</div>
 			</div>
 			<div className="transport">
-				<span id="connectionBadge" className="status-badge">
-					<i /> Disconnected
+				<span id="connectionBadge" className={`status-badge ${snapshot.connected ? "connected" : ""}`.trim()}>
+					<i /> {snapshot.connectionLabel}
 				</span>
-				<button id="connectBtn" className="btn btn-secondary">
-					Connect port
+				<button id="connectBtn" className="btn btn-secondary" onClick={() => void actions.toggleConnection()}>
+					{snapshot.connectLabel}
 				</button>
-				<button id="recordBtn" className="btn btn-record" disabled>
-					<span /> Start capture
+				<button
+					id="recordBtn"
+					className={`btn btn-record ${snapshot.recording ? "recording" : ""}`.trim()}
+					disabled={snapshot.recordDisabled}
+					onClick={actions.toggleRecording}
+				>
+					<span /> {snapshot.recordLabel}
 				</button>
 			</div>
 		</header>
