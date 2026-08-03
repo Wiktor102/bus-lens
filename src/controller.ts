@@ -2,7 +2,7 @@
 // behavior can stay byte-for-byte compatible with the original implementation.
 // @ts-nocheck
 import { publishArchiveSnapshot, registerArchiveActions } from "./archive-bridge";
-import { MAX_SEND_HISTORY, STORAGE_KEY, loadState, normalizeSendState } from "./app-state";
+import { STORAGE_KEY, loadState, normalizeSendState } from "./app-state";
 import {
 	deriveAnalysisSnapshot,
 	recognizeMessagePatterns
@@ -15,6 +15,7 @@ import {
 	registerFramingToolbarActions
 } from "./framing-toolbar-bridge";
 import { publishSendSnapshot, registerSendActions } from "./send-bridge";
+import { createSendController, type SendController } from "./send-controller";
 import { registerTransportActions } from "./transport-bridge";
 import { createSerialController, type SerialController } from "./serial-controller";
 import { registerNotesActions, publishNotesSnapshot, type SequenceNoteInput } from "./notes-bridge";
@@ -60,11 +61,7 @@ let activeId = state.activeId || state.captures[0]?.id;
 let toastTimer = null;
 let stateSaveTimer = null;
 let transport: SerialController;
-let sendInFlight = false;
-let queueRunning = false;
-let stopQueueRequested = false;
-let queueDelayTimer = null;
-let queueDelayResolve = null;
+let sendController: SendController;
 
 function persistState() {
 	state.activeId = activeId;
@@ -119,12 +116,13 @@ function publishArchiveState() {
 
 function publishSendState() {
 	normalizeSendState(state);
+	const sendStatus = sendController.getStatus();
 	publishSendSnapshot({
 		connected: Boolean(transport.getPort()?.writable),
 		recording: transport.isRecording(),
-		sendInFlight,
-		queueRunning,
-		stopQueueRequested,
+		sendInFlight: sendStatus.sendInFlight,
+		queueRunning: sendStatus.queueRunning,
+		stopQueueRequested: sendStatus.stopQueueRequested,
 		draft: state.sendSettings.draft,
 		delayMs: state.sendSettings.delayMs,
 		queue: state.sendQueue.map(item => ({
@@ -590,178 +588,6 @@ function commitPatternRemarkDraft(input) {
 	return true;
 }
 
-function recordSend(bytes, { origin, ok, error = "" }) {
-	const entry = {
-		id: crypto.randomUUID(),
-		timestamp: Date.now(),
-		bytes: [...bytes],
-		origin,
-		ok,
-		error,
-		captureId: ok && transport.isRecording() ? capture()?.id || null : null
-	};
-	state.sendHistory.unshift(entry);
-	state.sendHistory = state.sendHistory.slice(0, MAX_SEND_HISTORY);
-	saveState({ immediate: true });
-}
-
-async function transmitBytes(bytes, origin = "manual") {
-	if (!bytes?.length) return false;
-	const port = transport.getPort();
-	if (!port?.writable) {
-		showToast("Connect a writable serial port first");
-		return false;
-	}
-	if (sendInFlight) {
-		showToast("A message is already being sent");
-		return false;
-	}
-	sendInFlight = true;
-	publishSendState();
-	try {
-		const writer = port.writable.getWriter();
-		try {
-			await writer.write(bytes);
-		} finally {
-			writer.releaseLock();
-		}
-		if (transport.isRecording() && capture()) transport.queueLiveBytes(bytes, "tx");
-		recordSend(bytes, { origin, ok: true });
-		showToast(`${bytes.length} byte${bytes.length === 1 ? "" : "s"} sent to RS-485`);
-		return true;
-	} catch (error) {
-		recordSend(bytes, { origin, ok: false, error: error.message });
-		showToast(`Send failed: ${error.message}`);
-		return false;
-	} finally {
-		sendInFlight = false;
-		publishSendState();
-	}
-}
-
-async function sendBytes(bytes) {
-	if (!bytes?.length) return false;
-	const sent = await transmitBytes(Uint8Array.from(bytes), "manual");
-	if (!sent) return false;
-	state.sendSettings.draft = "";
-	saveState();
-	publishSendState();
-	return true;
-}
-
-function addDraftToQueue(bytes) {
-	if (!bytes?.length) return false;
-	state.sendQueue.push({
-		id: crypto.randomUUID(),
-		bytes: [...bytes],
-		createdAt: Date.now()
-	});
-	state.sendSettings.draft = "";
-	saveState();
-	publishSendState();
-	showToast("Message added to transmit queue");
-	return true;
-}
-
-function setSendDraft(value) {
-	state.sendSettings.draft = String(value);
-	saveState();
-	publishSendState();
-}
-
-function setQueueDelay(value) {
-	state.sendSettings.delayMs = Math.max(0, Math.min(600_000, Number(value) || 0));
-	saveState({ immediate: true });
-	publishSendState();
-}
-
-function sendQueueItem(id) {
-	const item = state.sendQueue.find(entry => entry.id === id);
-	if (item) void transmitBytes(Uint8Array.from(item.bytes), "manual");
-}
-
-function removeQueueItem(id) {
-	state.sendQueue = state.sendQueue.filter(item => item.id !== id);
-	saveState();
-	publishSendState();
-}
-
-function loadHistoryItem(id) {
-	const item = state.sendHistory.find(entry => entry.id === id);
-	if (!item) return null;
-	const draft = item.bytes.map(hexByte).join(" ");
-	state.sendSettings.draft = draft;
-	saveState();
-	publishSendState();
-	return draft;
-}
-
-function replayHistoryItem(id) {
-	const item = state.sendHistory.find(entry => entry.id === id);
-	if (item) void transmitBytes(Uint8Array.from(item.bytes), "replay");
-}
-
-function stopSendQueue() {
-	stopQueueRequested = true;
-	queueDelayResolve?.();
-	publishSendState();
-}
-
-function clearSendQueue() {
-	if (!state.sendQueue.length || queueRunning) return;
-	if (!confirm("Clear every message from the transmit queue?")) return;
-	state.sendQueue = [];
-	saveState({ immediate: true });
-	publishSendState();
-}
-
-function clearSendHistory() {
-	if (!state.sendHistory.length) return;
-	if (!confirm("Clear the separate local send history? Captured TX bytes will remain in captures.")) return;
-	state.sendHistory = [];
-	saveState({ immediate: true });
-	publishSendState();
-}
-
-function waitForQueueDelay(ms) {
-	return new Promise(resolve => {
-		const finish = () => {
-			if (queueDelayTimer) clearTimeout(queueDelayTimer);
-			queueDelayTimer = null;
-			queueDelayResolve = null;
-			resolve();
-		};
-		queueDelayResolve = finish;
-		queueDelayTimer = setTimeout(finish, ms);
-	});
-}
-
-async function runSendQueue() {
-	if (queueRunning || sendInFlight || !transport.getPort()?.writable || !state.sendQueue.length) return;
-	queueRunning = true;
-	stopQueueRequested = false;
-	publishSendState();
-	const queued = [...state.sendQueue];
-	let completed = 0;
-	try {
-		for (let index = 0; index < queued.length; index++) {
-			if (stopQueueRequested || !transport.getPort()?.writable) break;
-			const sent = await transmitBytes(Uint8Array.from(queued[index].bytes), "queue");
-			if (!sent) break;
-			completed++;
-			state.sendQueue = state.sendQueue.filter(item => item.id !== queued[index].id);
-			saveState({ immediate: true });
-			publishSendState();
-			if (index < queued.length - 1 && !stopQueueRequested) await waitForQueueDelay(state.sendSettings.delayMs);
-		}
-	} finally {
-		queueRunning = false;
-		stopQueueRequested = false;
-		publishSendState();
-		if (completed) showToast(`Queue sent ${completed} message${completed === 1 ? "" : "s"}`);
-	}
-}
-
 function parseDump(text) {
 	const sections = text
 		.split(/\n\s*----+\s*\n/)
@@ -982,7 +808,19 @@ transport = createSerialController({
 	publishNotesState,
 	renderMessages,
 	isPatternsPanelActive: () => getViewStateSnapshot().activePanel === "patterns",
-	stopSendQueue,
+	stopSendQueue: () => {
+		sendController?.stopSendQueue();
+	},
+	publishSendState
+});
+
+sendController = createSendController({
+	state,
+	capture,
+	transport,
+	saveState,
+	showToast,
+	confirm: message => confirm(message),
 	publishSendState
 });
 
@@ -1055,18 +893,18 @@ registerDialogActions({
 });
 
 registerSendActions({
-	setDraft: setSendDraft,
-	setDelay: setQueueDelay,
-	send: sendBytes,
-	addToQueue: addDraftToQueue,
-	sendQueueItem,
-	removeQueueItem,
-	loadHistory: loadHistoryItem,
-	replayHistory: replayHistoryItem,
-	runQueue: runSendQueue,
-	stopQueue: stopSendQueue,
-	clearQueue: clearSendQueue,
-	clearHistory: clearSendHistory
+	setDraft: sendController.setSendDraft,
+	setDelay: sendController.setQueueDelay,
+	send: sendController.sendBytes,
+	addToQueue: sendController.addDraftToQueue,
+	sendQueueItem: sendController.sendQueueItem,
+	removeQueueItem: sendController.removeQueueItem,
+	loadHistory: sendController.loadHistoryItem,
+	replayHistory: sendController.replayHistoryItem,
+	runQueue: sendController.runSendQueue,
+	stopQueue: sendController.stopSendQueue,
+	clearQueue: sendController.clearSendQueue,
+	clearHistory: sendController.clearSendHistory
 });
 
 registerMessageStreamActions({
@@ -1074,7 +912,12 @@ registerMessageStreamActions({
 	openByteNote: (messageId, position) => publishAnnotationDialog("byte", `${messageId}:${position}`),
 	replayMessage: messageId => {
 		const message = capture()?.messages.find(item => item.id === messageId);
-		if (message) void transmitBytes(Uint8Array.from(visibleByteEntries(message).map(({ value }) => value)), "replay");
+		if (message) {
+			void sendController.transmitBytes(
+				Uint8Array.from(visibleByteEntries(message).map(({ value }) => value)),
+				"replay"
+			);
+		}
 	},
 	openPatternRemark: publishPatternRemarkDialog,
 	hideMessage: messageId => {
