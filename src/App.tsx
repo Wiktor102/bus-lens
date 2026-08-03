@@ -34,6 +34,8 @@ import {
 	PatternRemarkDialog,
 	SectionsDialog
 } from "./dialogs";
+import { getMessageStreamSnapshot, subscribeToMessageStream } from "./message-stream-bridge";
+import { MessageStream } from "./message-stream-view";
 import { publishViewStateSnapshot } from "./view-state-bridge";
 import {
 	EMPTY_VIEW_STATE_SNAPSHOT,
@@ -435,6 +437,11 @@ function StreamPanel({ viewState, dispatchViewState, messageFilterRef, messageFi
 		getFramingToolbarSnapshot,
 		getFramingToolbarSnapshot
 	);
+	const messageStream = useSyncExternalStore(
+		subscribeToMessageStream,
+		getMessageStreamSnapshot,
+		getMessageStreamSnapshot
+	);
 
 	return (
 		<div
@@ -465,36 +472,12 @@ function StreamPanel({ viewState, dispatchViewState, messageFilterRef, messageFi
 						className="stream-legend"
 						title="Repeated message sequences are grouped in the Sequence column, where shared notes are shown."
 					>
-						<i className="pattern-swatch" /> repeated sequences <span id="patternCount">0 groups</span>
+						<i className="pattern-swatch" /> repeated sequences <span id="patternCount">{messageStream.patternCount}</span>
 					</span>
-					<span id="visibleCount">0 rows</span>
+					<span id="visibleCount">{messageStream.visibleCount}</span>
 				</div>
 			</div>
-			<div className="table-wrap">
-				<table className="message-table">
-					<thead>
-						<tr>
-							<th>#</th>
-							<th>TIME</th>
-							<th>Δ</th>
-							<th className="sequence-heading">SEQUENCE</th>
-							<th>
-								MESSAGE · <span id="frameSizeLabel">{framing.frameSizeLabel}</span>
-							</th>
-							<th>REPEATS</th>
-							<th>ANNOTATION</th>
-						</tr>
-					</thead>
-					<tbody id="messageBody" />
-				</table>
-				<div id="emptyState" className="empty-state hidden">
-					<div className="empty-glyph">
-						01<span>10</span>
-					</div>
-					<h2>No messages in this capture</h2>
-					<p>Connect a serial port and start capture, or import a monitor dump.</p>
-				</div>
-			</div>
+			<MessageStream frameSizeLabel={framing.frameSizeLabel} />
 		</div>
 	);
 }
@@ -1033,45 +1016,6 @@ function NotesPanelContent() {
 	);
 }
 
-function MessageContextMenu() {
-	return (
-		<div
-			id="messageContextMenu"
-			className="message-context-menu hidden"
-			role="menu"
-			aria-label="Message actions"
-			aria-hidden="true"
-		>
-			<button type="button" role="menuitem" data-context-action="note">
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M4.5 4.5h10.25L19.5 9.25V19.5H4.5Z" />
-					<path d="M14.75 4.5v4.75h4.75M8 14.5h4.5M8 17.5h6.5" />
-				</svg>
-				<span>Add note</span>
-			</button>
-			<button type="button" role="menuitem" data-context-action="replay">
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M19 8.5A7.5 7.5 0 1 0 19.15 15" />
-					<path d="M19 4.5v4h-4" />
-				</svg>
-				<span>Replay</span>
-			</button>
-			<button type="button" role="menuitem" className="context-delete" data-context-action="delete">
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M5.5 7.5h13M9.5 7.5V5h5v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5.5M14 11v5.5" />
-				</svg>
-				<span data-context-delete-label>Delete message</span>
-			</button>
-			<button type="button" role="menuitem" className="byte-context-action" data-context-action="section">
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M5 4.5v15M19 4.5v15M5 8.5h5M14 8.5h5M5 15.5h5M14 15.5h5" />
-				</svg>
-				<span>Begin new section here</span>
-			</button>
-		</div>
-	);
-}
-
 function Toast({ sendPopupOpen }: { sendPopupOpen: boolean }) {
 	const snapshot = useSyncExternalStore(subscribeToToast, getToastSnapshot, getToastSnapshot);
 	return (
@@ -1129,7 +1073,6 @@ function App() {
 			<AnnotationDialog />
 			<PatternRemarkDialog />
 			<ExportDialog />
-			<MessageContextMenu />
 			<Toast sendPopupOpen={sendPopupOpen} />
 		</>
 	);

@@ -1,22 +1,11 @@
 // The controller remains framework-agnostic so the protocol and Web Serial
 // behavior can stay byte-for-byte compatible with the original implementation.
 // @ts-nocheck
-import {
-	Virtualizer,
-	elementScroll,
-	observeElementOffset,
-	observeElementRect
-} from "@tanstack/virtual-core";
 import { publishArchiveSnapshot, registerArchiveActions } from "./archive-bridge";
 import { MAX_SEND_HISTORY, STORAGE_KEY, loadState, normalizeSendState } from "./app-state";
 import {
-	colorForByte,
 	deriveAnalysisSnapshot,
-	getCounts,
-	recognizeMessagePatterns,
-	rowsWithDelta,
-	summarizeRunCadence,
-	transitionFrames
+	recognizeMessagePatterns
 } from "./analysis";
 import { publishAnalysisSnapshot } from "./analysis-bridge";
 import { deriveCaptureHeaderSnapshot } from "./capture-header";
@@ -53,22 +42,16 @@ import {
 	recordReceivedByte
 } from "./capture-summary";
 import {
-	collapseAdjacentRuns,
-	countVisibleRowsByPatternOccurrence
-} from "./collapse-runs";
-import {
-	frameWidth,
 	hexByte,
+	frameWidth,
 	makeMessage,
-	markerBytes,
 	normalizeCapture,
 	normalizeSections,
 	parseTime,
 	rebuildPreview,
 	signature,
 	visibleByteEntries,
-	visibleMessages,
-	visiblePositionForRawByte
+	visibleMessages
 } from "./capture-framing";
 
 const $ = selector => document.querySelector(selector);
@@ -76,9 +59,6 @@ const $$ = selector => [...document.querySelectorAll(selector)];
 // A capture remains useful at this size while still fitting comfortably in browser storage.
 const MAX_CAPTURE_BYTES = 50_000;
 const LIVE_REFRESH_MS = 120;
-const VIRTUAL_ROW_HEIGHT = 41;
-const VIRTUAL_SECTION_HEIGHT = 48;
-const VIRTUAL_OVERSCAN = 8;
 let state = loadState();
 let activeId = state.activeId || state.captures[0]?.id;
 let port = null;
@@ -86,18 +66,10 @@ let reader = null;
 let recording = false;
 let recordingSessionId = null;
 let readAbort = false;
-let messageContextTarget = null;
-let messageContextOrigin = null;
 let toastTimer = null;
 let pendingLiveBytes = [];
 let liveRefreshTimer = null;
 let stateSaveTimer = null;
-let virtualMessageView = null;
-let messageVirtualizer = null;
-let disposeMessageVirtualizer = null;
-let virtualRenderPending = false;
-let virtualViewVersion = 0;
-let renderedVirtualRangeKey = "";
 let sendInFlight = false;
 let queueRunning = false;
 let stopQueueRequested = false;
@@ -192,102 +164,10 @@ function formatTime(ms) {
 	});
 }
 
-function formatDelta(ms) {
-	if (ms === null) return "—";
-	if (ms >= 60000) return `${(ms / 60000).toFixed(1)} min`;
-	if (ms >= 1000) return `${(ms / 1000).toFixed(2)} s`;
-	return `${ms.toFixed(1)} ms`;
-}
-
-function escapeHtml(value = "") {
-	return String(value).replace(
-		/[&<>"']/g,
-		ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[ch]
-	);
-}
-
 function showToast(message) {
 	clearTimeout(toastTimer);
 	publishToastSnapshot({ message, visible: true });
 	toastTimer = setTimeout(() => publishToastSnapshot({ message: "", visible: false }), 2600);
-}
-
-function closeMessageContextMenu({ restoreFocus = false } = {}) {
-	const menu = $("#messageContextMenu");
-	if (!menu) return;
-	menu.classList.add("hidden");
-	menu.setAttribute("aria-hidden", "true");
-	const origin = messageContextOrigin;
-	messageContextTarget = null;
-	messageContextOrigin = null;
-	if (restoreFocus && origin?.isConnected && typeof origin.focus === "function") origin.focus();
-}
-
-function openMessageContextMenu(event) {
-	const targetElement = event.target instanceof Element ? event.target : null;
-	const row = targetElement?.closest("tr[data-message-id]");
-	if (!row) return;
-	const byteButton = targetElement.closest("[data-byte-note]");
-	const byteKey = byteButton?.dataset.byteNote;
-	const bytePosition = byteKey ? Number(byteKey.split(":")[1]) : null;
-	const messageId = row.dataset.messageId;
-	const message = capture()?.messages.find(item => item.id === messageId);
-	if (!message || (byteButton && !Number.isInteger(bytePosition))) return;
-
-	event.preventDefault();
-	messageContextTarget = { messageId, position: byteButton ? bytePosition : null };
-	messageContextOrigin = targetElement.closest("button") || row;
-	const menu = $("#messageContextMenu");
-	const sectionAction = menu.querySelector('[data-context-action="section"]');
-	const deleteLabel = menu.querySelector("[data-context-delete-label]");
-	const deleteAction = menu.querySelector('[data-context-action="delete"]');
-	const targetLabel = byteButton ? "byte" : "message";
-	if (deleteLabel) deleteLabel.textContent = `Delete ${targetLabel}`;
-	if (deleteAction) deleteAction.setAttribute("aria-label", `Delete ${targetLabel} (keep data hidden)`);
-	sectionAction.classList.toggle("hidden", !byteButton);
-	menu.classList.remove("hidden");
-	menu.setAttribute("aria-hidden", "false");
-
-	const edge = 10;
-	const bounds = menu.getBoundingClientRect();
-	const left = Math.min(event.clientX, window.innerWidth - bounds.width - edge);
-	const top = Math.min(event.clientY, window.innerHeight - bounds.height - edge);
-	menu.style.left = `${Math.max(edge, left)}px`;
-	menu.style.top = `${Math.max(edge, top)}px`;
-}
-
-function handleMessageContextAction(action) {
-	const target = messageContextTarget;
-	if (!target) return;
-	closeMessageContextMenu();
-	const c = capture();
-	const message = c?.messages.find(item => item.id === target.messageId);
-	if (!message) return;
-	if (action === "note") {
-		const type = target.position === null ? "message" : "byte";
-		const key = target.position === null ? target.messageId : `${target.messageId}:${target.position}`;
-		publishAnnotationDialog(type, key);
-	} else if (action === "replay") {
-		void transmitBytes(Uint8Array.from(visibleByteEntries(message).map(({ value }) => value)), "replay");
-	} else if (action === "delete") {
-		if (target.position === null) {
-			message.hidden = true;
-			saveState({ immediate: true });
-			render();
-			showToast("Message hidden; captured data was kept");
-		} else if (target.position >= 0 && target.position < message.bytes.length) {
-			message.hiddenBytes ||= [];
-			message.hiddenBytes[target.position] = true;
-			const rawIndex = message._rawPositions?.[target.position] ?? -1;
-			if (rawIndex >= 0 && c.byteStream?.[rawIndex]) c.byteStream[rawIndex].hidden = true;
-			rebuildPreview(c);
-			saveState({ immediate: true });
-			render();
-			showToast("Byte hidden; captured data was kept");
-		}
-	} else if (action === "section" && target.position !== null) {
-		startSectionAtByte(target.messageId, target.position);
-	}
 }
 
 function render() {
@@ -307,13 +187,6 @@ function render() {
 
 function renderEmptyWorkspace() {
 	publishMessageStreamSnapshot(deriveMessageStreamSnapshot(null, getViewStateSnapshot()));
-	$("#messageBody").innerHTML = "";
-	$(".message-table").classList.add("hidden");
-	$("#emptyState").classList.remove("hidden");
-	$("#emptyState h2").textContent = "No captures in the archive";
-	$("#emptyState p").textContent = "Create a capture or import a monitor dump to begin.";
-	$("#visibleCount").textContent = "0 rows";
-	$("#patternCount").textContent = "0 groups";
 }
 
 function selectArchiveCapture(captureId) {
@@ -427,386 +300,11 @@ function addSequenceNote({ start: rawStart, end: rawEnd, text: rawText }: Sequen
 	return true;
 }
 
-function filteredMessages() {
-	const c = capture();
-	const patternMembership = recognizeMessagePatterns(c).membership;
-	const sequenceNoteRows = new Set();
-	const maxMessageIndex = (c?.messages?.length || 0) - 1;
-	for (const note of c?.notes || []) {
-		if (note.type !== "sequence") continue;
-		const start = Math.max(0, Math.trunc(Number(note.start)) - 1);
-		const end = Math.min(maxMessageIndex, Math.trunc(Number(note.end)) - 1);
-		if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) continue;
-		for (let index = start; index <= end; index++) sequenceNoteRows.add(index);
-	}
-	let rows = (c?.messages || [])
-		.map((message, originalIndex) => {
-			const patternMember = patternMembership.get(originalIndex);
-			return {
-				...message,
-				_originalStart: originalIndex,
-				_originalEnd: originalIndex,
-				_hasSequenceNote: sequenceNoteRows.has(originalIndex),
-				_patternOccurrence: patternMember ? `${patternMember.group.id}:${patternMember.occurrenceIndex}` : null,
-				_runStart: message.timestamp,
-				_runEnd: message.timestamp,
-				_runMessages: [message],
-				_repeats: 1
-			};
-		})
-		.filter(message => !message.hidden);
-	const viewState = getViewStateSnapshot();
-	const query = viewState.filterQuery.trim().toUpperCase();
-	if (query) {
-		const pattern = query
-			.split(/\s+/)
-			.map(x => (x === "??" || x === "**" ? "[0-9A-F]{2}" : x.replace(/[^0-9A-F?]/g, "").replaceAll("?", "[0-9A-F]")))
-			.join("\\s+");
-		try {
-			const re = new RegExp(pattern);
-			rows = rows.filter(m => re.test(signature(m)));
-		} catch {}
-	}
-	const sectionsById = new Map((c?.frameSections || []).map(section => [section.id, section]));
-	if (viewState.collapseRuns || c?.previewMode === "sections") {
-		rows = collapseAdjacentRuns(
-			rows,
-			m =>
-				c.previewMode === "sections"
-					? Boolean(sectionsById.get(m.sectionId)?.collapseRuns)
-					: viewState.collapseRuns,
-			signature
-		);
-	}
-	return rowsWithDelta(rows.map(summarizeRunCadence));
-}
-
 function renderMessages() {
 	const c = capture();
 	if (!c) return;
 	const viewState = getViewStateSnapshot();
 	publishMessageStreamSnapshot(deriveMessageStreamSnapshot(c, viewState));
-	const matchingRows = filteredMessages();
-	const messages = visibleMessages(c);
-	const signatureCounts = getCounts(messages);
-	const countsByPosition = Array.from({ length: frameWidth(c) }, (_, pos) => {
-		const map = new Map();
-		messages.forEach(m => {
-			const byte = visibleByteEntries(m)[pos]?.value;
-			if (byte !== undefined) map.set(byte, (map.get(byte) || 0) + 1);
-		});
-		return map;
-	});
-	const patterns = recognizeMessagePatterns(c);
-	const highlight = viewState.showFrameChanges;
-	const frames = highlight
-		? transitionFrames(matchingRows)
-		: matchingRows.map(row => visibleByteEntries(row).map(() => ({ incoming: null, outgoing: null })));
-	const patternNumbers = new Map(patterns.groups.map((group, index) => [group.id, index + 1]));
-	const visiblePatternRowCounts = countVisibleRowsByPatternOccurrence(matchingRows);
-	const sectionNumbers = new Map((c.frameSections || []).map((section, index) => [section.id, index + 1]));
-	const sectionsById = new Map((c.frameSections || []).map(section => [section.id, section]));
-	const entries = [];
-	let previousSectionId = null;
-	matchingRows.forEach((row, rowIndex) => {
-		if (c.previewMode === "sections" && row.sectionId !== previousSectionId) {
-			const section = sectionsById.get(row.sectionId);
-			if (section) {
-				entries.push({
-					type: "section",
-					key: `section:${section.id}:${row._originalStart}`,
-					section,
-					sectionNumber: sectionNumbers.get(section.id)
-				});
-			}
-		}
-		entries.push({ type: "message", key: `message:${row.id}`, row, rowIndex });
-		previousSectionId = row.sectionId;
-	});
-	const telegramCount = matchingRows.reduce((sum, row) => sum + row._repeats, 0);
-	const visibleSummary = matchingRows.length
-		? `${matchingRows.length.toLocaleString()} row${matchingRows.length === 1 ? "" : "s"}`
-		: "0 rows";
-	$("#visibleCount").textContent =
-		telegramCount === matchingRows.length
-			? visibleSummary
-			: `${visibleSummary} · ${telegramCount.toLocaleString()} telegrams`;
-	virtualMessageView = {
-		c,
-		matchingRows,
-		signatureCounts,
-		countsByPosition,
-		patterns,
-		patternNumbers,
-		visiblePatternRowCounts,
-		entries,
-		frames,
-		mode: viewState.displayMode,
-		highlight
-	};
-	virtualViewVersion++;
-	renderedVirtualRangeKey = "";
-	$("#patternCount").textContent = `${patterns.groups.length} group${patterns.groups.length === 1 ? "" : "s"}`;
-	updateMessageVirtualizer();
-	renderVirtualRows();
-}
-
-function getVirtualEntryKey(index) {
-	return virtualMessageView?.entries[index]?.key ?? index;
-}
-
-function estimateVirtualEntrySize(index) {
-	return virtualMessageView?.entries[index]?.type === "section" ? VIRTUAL_SECTION_HEIGHT : VIRTUAL_ROW_HEIGHT;
-}
-
-function scheduleVirtualRows() {
-	if (!virtualMessageView || virtualRenderPending) return;
-	virtualRenderPending = true;
-	requestAnimationFrame(() => {
-		virtualRenderPending = false;
-		renderVirtualRows();
-	});
-}
-
-function virtualizerOptions() {
-	return {
-		count: virtualMessageView?.entries.length || 0,
-		getScrollElement: () => $(".table-wrap"),
-		estimateSize: estimateVirtualEntrySize,
-		getItemKey: getVirtualEntryKey,
-		overscan: VIRTUAL_OVERSCAN,
-		scrollToFn: elementScroll,
-		observeElementRect,
-		observeElementOffset,
-		measureElement: element => element.getBoundingClientRect().height,
-		onChange: scheduleVirtualRows
-	};
-}
-
-function updateMessageVirtualizer() {
-	if (!messageVirtualizer) {
-		messageVirtualizer = new Virtualizer(virtualizerOptions());
-		disposeMessageVirtualizer = messageVirtualizer._didMount();
-	} else {
-		messageVirtualizer.setOptions(virtualizerOptions());
-	}
-	messageVirtualizer._willUpdate();
-}
-
-function renderVirtualRows() {
-	const view = virtualMessageView;
-	if (!view || !messageVirtualizer) return;
-	const {
-		c,
-		matchingRows,
-		signatureCounts,
-		countsByPosition,
-		patterns,
-		patternNumbers,
-		visiblePatternRowCounts,
-		entries,
-		frames,
-		mode,
-		highlight
-	} = view;
-	const virtualItems = messageVirtualizer.getVirtualItems();
-	const renderKey = `${virtualViewVersion}|${messageVirtualizer.getTotalSize()}|${virtualItems
-		.map(item => `${item.index}:${item.start}:${item.size}`)
-		.join(",")}`;
-	if (renderKey === renderedVirtualRangeKey) return;
-	renderedVirtualRangeKey = renderKey;
-	const rowsHtml = virtualItems
-		.map(virtualItem => {
-			const entry = entries[virtualItem.index];
-			if (!entry) return "";
-			const virtualStyle = `transform:translateY(${virtualItem.start}px)`;
-			if (entry.type === "section") {
-				const { section, sectionNumber } = entry;
-				return `<tr class="section-divider" data-index="${virtualItem.index}" style="${virtualStyle}">
-          <td class="section-number">${String(sectionNumber).padStart(2, "0")}</td>
-          <td colspan="6"><div class="section-header-content">
-            <span>Section · raw byte ${section.start + 1}</span>
-            <div class="section-header-controls">
-              <label>Message length <input data-section-length="${section.id}" type="number" min="1" max="1024" value="${section.frameSize}" /> bytes</label>
-              <label class="switch-label section-collapse">Collapse runs <input data-section-collapse="${section.id}" type="checkbox" ${section.collapseRuns ? "checked" : ""} /><span class="switch"></span></label>
-            </div>
-          </div></td>
-        </tr>`;
-			}
-			const { row: m, rowIndex } = entry;
-			const messageNote = c.annotations[m.id];
-			const patternMember = patterns.membership.get(m._originalStart);
-			const pattern = patternMember?.group;
-			const isPatternStart = patternMember?.offset === 0;
-			const patternEndMember = patterns.membership.get(m._originalEnd);
-			const isPatternEnd =
-				pattern &&
-				patternEndMember?.group.id === pattern.id &&
-				patternEndMember.occurrenceIndex === patternMember.occurrenceIndex &&
-				patternEndMember.offset === pattern.length - 1;
-			const visiblePatternRowCount = visiblePatternRowCounts.get(m._patternOccurrence) || pattern?.length;
-			const originalRow = m._originalStart + 1;
-			const sequenceNote = (c.notes || []).find(
-				n => n.type === "sequence" && originalRow >= n.start && originalRow <= n.end
-			);
-			const isUnique = signatureCounts.get(signature(m)) === 1;
-			const rowLabel = m._originalStart === m._originalEnd ? originalRow : `${originalRow}–${m._originalEnd + 1}`;
-			const visibleBytes = visibleByteEntries(m);
-			const sentByteCount = visibleBytes.filter(({ rawPosition }) => m.directions?.[rawPosition] === "tx").length;
-			const hasSentBytes = sentByteCount > 0;
-			const directionTag = hasSentBytes ? (sentByteCount === visibleBytes.length ? "TX" : "MIXED") : "";
-			const rowClasses = [
-				sequenceNote ? "sequence-noted" : "",
-				isUnique ? "unique-message" : "",
-				hasSentBytes ? "sent-message" : "",
-				pattern ? "pattern-member" : "",
-				isPatternStart ? "pattern-start" : "",
-				isPatternEnd ? "pattern-end" : ""
-			]
-				.filter(Boolean)
-				.join(" ");
-			const rowTitles = [
-				isUnique ? "Unique telegram · this signature occurs once in the capture" : "",
-				sequenceNote ? `Sequence rows ${sequenceNote.start}–${sequenceNote.end}: ${sequenceNote.text}` : "",
-				pattern
-					? `Repeated sequence · occurrence ${patternMember.occurrenceIndex + 1} of ${pattern.starts.length}${pattern.remark ? ` · ${pattern.remark}` : ""}`
-					: ""
-			]
-				.filter(Boolean)
-				.join(" · ");
-			const patternStyle = pattern
-				? `;--pattern-color:${pattern.color};--sequence-row-count:${visiblePatternRowCount};--sequence-row-height:${virtualItem.size}px`
-				: "";
-			const sequenceControl = pattern
-				? `<td class="sequence-cell" style="--pattern-color:${pattern.color}">
-				  <button class="sequence-group ${isPatternStart ? "sequence-group-start" : ""} ${
-						isPatternEnd ? "sequence-group-end" : ""
-					}" data-pattern-id="${pattern.id}" title="${escapeHtml(
-						`Sequence ${String(patternNumbers.get(pattern.id)).padStart(2, "0")} · occurrence ${patternMember.occurrenceIndex + 1} of ${pattern.starts.length} · ${pattern.length} messages${pattern.remark ? ` · shared note: ${pattern.remark}` : " · add a shared note"}`
-					)}" aria-label="${pattern.remark ? "Edit shared sequence note" : "Add shared sequence note"}">
-            <span class="sequence-rail" aria-hidden="true"><span class="sequence-rail-endcap"></span></span>
-            ${
-						isPatternStart
-							? `<span class="sequence-summary">
-                <span class="sequence-label">SEQ ${String(patternNumbers.get(pattern.id)).padStart(2, "0")} <b>${pattern.length} rows</b></span>
-                <span class="sequence-occurrence">${patternMember.occurrenceIndex + 1} / ${pattern.starts.length}</span>
-                <span class="sequence-note ${pattern.remark ? "" : "empty"}">${escapeHtml(pattern.remark || "+ Add shared note")}</span>
-              </span>`
-							: `<span class="sequence-continuation" aria-hidden="true"></span>`
-					}
-          </button>
-        </td>`
-				: `<td class="sequence-cell"><span class="sequence-empty">—</span></td>`;
-			const noteControl = messageNote || sequenceNote
-				? `<button class="note-link" data-message-note="${m.id}">${escapeHtml(messageNote?.text || `↳ ${sequenceNote.text}`)}</button>`
-				: `<button class="row-action add-note" data-message-note="${m.id}">＋ Add note</button>`;
-			const annotationControl = `<div class="row-actions">
-          ${noteControl}
-          <button class="row-action replay-link" data-message-replay="${m.id}" title="Replay this message on the connected serial port">↻ Replay</button>
-        </div>`;
-			return `<tr data-index="${virtualItem.index}" data-message-id="${m.id}" class="${rowClasses}" style="${virtualStyle}${patternStyle}" title="${escapeHtml(rowTitles)}">
-      <td>${rowLabel}</td>
-      <td>${formatTime(m.timestamp)}${directionTag ? `<span class="direction-tag">${directionTag}</span>` : ""}</td>
-      <td>${formatDelta(m._delta)}</td>
-      ${sequenceControl}
-      <td><div class="byte-row">${visibleBytes
-			.map(({ value: byte, rawPosition }, pos) => {
-				const count = countsByPosition[pos]?.get(byte) || 0;
-				const frame = frames[rowIndex][pos] || {};
-				const incoming = frame.incoming;
-				const outgoing = frame.outgoing;
-				const previousRow = matchingRows[rowIndex - 1];
-				const previousIsAdjacent =
-					previousRow &&
-					m._originalStart === previousRow._originalEnd + 1 &&
-					m.sectionId === previousRow.sectionId;
-				const previousByte = previousIsAdjacent ? visibleByteEntries(previousRow)[pos]?.value : undefined;
-				const changedFromPrevious = previousIsAdjacent && previousByte !== byte;
-				const changed = highlight && (changedFromPrevious || incoming || outgoing);
-				const noted = c.annotations[`${m.id}:${rawPosition}`];
-				const sent = m.directions?.[rawPosition] === "tx";
-				const binary = byte.toString(2).padStart(8, "0");
-				const content = mode === "binary" ? `${binary.slice(0, 4)}<i>·</i>${binary.slice(4)}` : hexByte(byte);
-				const classes = [
-					"byte",
-					mode === "binary" ? "binary" : "",
-					changed ? "changed" : "",
-					count === 1 ? "rare" : "",
-					noted ? "noted" : "",
-					sent ? "sent" : "",
-					incoming ? "has-incoming" : "",
-					incoming?.start ? "in-start" : "",
-					incoming?.end ? "in-end" : "",
-					outgoing ? "has-outgoing" : "",
-					outgoing?.start ? "out-start" : "",
-					outgoing?.end ? "out-end" : ""
-				]
-					.filter(Boolean)
-					.join(" ");
-				const styles = [
-					`--byte-color:${colorForByte(byte)}`,
-					incoming && `--in-color:${incoming.color}`,
-					incoming && `--in-offset:${-3 - incoming.lane * 3}px`,
-					outgoing && `--out-color:${outgoing.color}`,
-					outgoing && `--out-offset:${-3 - outgoing.lane * 3}px`
-				]
-					.filter(Boolean)
-					.join(";");
-				const transitions = [incoming?.label, outgoing?.label].filter(Boolean);
-				const transitionTitle = transitions.length
-					? ` · framed transition${transitions.length > 1 ? "s" : ""}: ${transitions.join(" / ")}`
-					: "";
-				const receivedAt = new Date(m.byteTimestamps?.[rawPosition] ?? m.timestamp).toISOString();
-				const directionLabel = sent ? "sent to RS-485" : "received from serial";
-				return `<button class="${classes}" style="${styles}" data-byte-note="${m.id}:${rawPosition}" title="Byte ${pos + 1} · ${directionLabel} ${receivedAt} · ${count} occurrence(s)${transitionTitle} · click to annotate · right-click for actions"><span class="byte-value">${content}</span></button>`;
-			})
-			.join("")}</div></td>
-      <td>${m._repeats > 1 ? renderRepeatPill(m) : "—"}</td>
-	      <td>${annotationControl}</td>
-	    </tr>`;
-		})
-		.join("");
-	const messageBody = $("#messageBody");
-	messageBody.style.height = `${messageVirtualizer.getTotalSize()}px`;
-	messageBody.innerHTML = rowsHtml;
-	messageBody.querySelectorAll("[data-index]").forEach(row => messageVirtualizer.measureElement(row));
-	const marker = c.previewMode === "marker" ? markerBytes(c.frameMarker) : [];
-	const hasVisibleMessages = visibleMessages(c).length > 0;
-	const hasMatchingRows = matchingRows.length > 0;
-	$("#emptyState").classList.toggle("hidden", hasMatchingRows);
-	$("#emptyState h2").textContent =
-		c.previewMode === "marker"
-			? marker.length
-				? "No marker matches in this capture"
-				: "Enter a marker to preview messages"
-			: hasVisibleMessages
-				? "No messages match this filter"
-				: c.messages.length
-					? "No visible messages in this capture"
-					: "No messages in this capture";
-	$("#emptyState p").textContent =
-		c.previewMode === "marker"
-			? marker.length
-				? "The raw byte stream is still preserved; adjust the marker or capture more data."
-				: "Type a hex byte sequence such as AA 55 in the Marker field."
-			: hasVisibleMessages
-				? "Try a different byte pattern."
-				: c.messages.length
-					? "Hidden messages and bytes remain in the capture and JSON export."
-					: "Connect a serial port and start capture, or import a monitor dump.";
-	$(".message-table").classList.toggle("hidden", !hasMatchingRows);
-}
-
-function renderRepeatPill(message) {
-	const min = Math.min(...message._intervals);
-	const max = Math.max(...message._intervals);
-	const range = message._intervals.length ? `${formatDelta(min)}${min === max ? "" : `–${formatDelta(max)}`}` : "—";
-	const cadence =
-		message._cadenceStable && message._cadence !== null
-			? `<small>≈ ${formatDelta(Math.round(message._cadence))}</small>`
-			: `<small>varied</small>`;
-	const title = `${message._repeats} consecutive identical telegrams · interval ${range}`;
-	return `<span class="repeat-pill ${message._cadenceStable ? "steady" : ""}" title="${title}"><strong>×${message._repeats}</strong>${cadence}</span>`;
 }
 
 function setCaptureTitle(value) {
@@ -1083,7 +581,7 @@ function removeAnnotationDraft(input) {
 
 function publishPatternRemarkDialog(id) {
 	const c = capture();
-	const patterns = virtualMessageView?.patterns || recognizeMessagePatterns(c);
+	const patterns = recognizeMessagePatterns(c);
 	const group = patterns.groups.find(item => item.id === id);
 	if (!group || !c) return showToast("This sequence is no longer present in the current framing");
 	const text = String(c.patternRemarks?.[group.key]?.text || "");
@@ -1649,7 +1147,6 @@ subscribeToViewState(() => {
 		nextViewState.displayMode !== previousViewState.displayMode ||
 		nextViewState.showFrameChanges !== previousViewState.showFrameChanges ||
 		nextViewState.collapseRuns !== previousViewState.collapseRuns;
-	if (nextViewState.filterQuery !== previousViewState.filterQuery) $(".table-wrap").scrollTop = 0;
 	if (renderChanged && capture()) renderMessages();
 	if (nextViewState.activePanel === "patterns" && previousViewState.activePanel !== "patterns") {
 		publishAnalysisState();
@@ -1657,44 +1154,7 @@ subscribeToViewState(() => {
 	previousViewState = nextViewState;
 });
 
-$("#messageBody").addEventListener("click", event => {
-	const noteButton = event.target.closest("[data-message-note]");
-	if (noteButton) return publishAnnotationDialog("message", noteButton.dataset.messageNote);
-	const replayButton = event.target.closest("[data-message-replay]");
-	if (replayButton) {
-		const message = capture().messages.find(item => item.id === replayButton.dataset.messageReplay);
-		if (message) void transmitBytes(Uint8Array.from(visibleByteEntries(message).map(({ value }) => value)), "replay");
-		return;
-	}
-	const patternButton = event.target.closest("[data-pattern-id]");
-	if (patternButton) return publishPatternRemarkDialog(patternButton.dataset.patternId);
-	const byteButton = event.target.closest("[data-byte-note]");
-	if (byteButton) publishAnnotationDialog("byte", byteButton.dataset.byteNote);
-});
-$("#messageBody").addEventListener("contextmenu", openMessageContextMenu);
-$("#messageContextMenu").addEventListener("click", event => {
-	const actionButton = event.target.closest("[data-context-action]");
-	if (actionButton) handleMessageContextAction(actionButton.dataset.contextAction);
-});
-$("#messageBody").addEventListener("change", event => {
-	const lengthInput = event.target.closest("[data-section-length]");
-	if (lengthInput) return setSectionFrameSize(lengthInput.dataset.sectionLength, lengthInput.value);
-	const collapseInput = event.target.closest("[data-section-collapse]");
-	if (collapseInput) setSectionCollapse(collapseInput.dataset.sectionCollapse, collapseInput.checked);
-});
-document.addEventListener("click", e => {
-	if (!e.target.closest("#messageContextMenu")) closeMessageContextMenu();
-});
-document.addEventListener("contextmenu", event => {
-	if (!event.target.closest("#messageBody")) closeMessageContextMenu();
-});
-document.addEventListener("keydown", event => {
-	if (event.key === "Escape") closeMessageContextMenu({ restoreFocus: true });
-});
-window.addEventListener("resize", () => closeMessageContextMenu());
-$(".table-wrap").addEventListener("scroll", () => closeMessageContextMenu(), { passive: true });
 window.addEventListener("beforeunload", () => {
-	disposeMessageVirtualizer?.();
 	flushLiveBytes();
 	persistState();
 	if (port) disconnectSerial();
@@ -1753,6 +1213,41 @@ registerSendActions({
 	stopQueue: stopSendQueue,
 	clearQueue: clearSendQueue,
 	clearHistory: clearSendHistory
+});
+
+registerMessageStreamActions({
+	openMessageNote: messageId => publishAnnotationDialog("message", messageId),
+	openByteNote: (messageId, position) => publishAnnotationDialog("byte", `${messageId}:${position}`),
+	replayMessage: messageId => {
+		const message = capture()?.messages.find(item => item.id === messageId);
+		if (message) void transmitBytes(Uint8Array.from(visibleByteEntries(message).map(({ value }) => value)), "replay");
+	},
+	openPatternRemark: publishPatternRemarkDialog,
+	hideMessage: messageId => {
+		const c = capture();
+		const message = c?.messages.find(item => item.id === messageId);
+		if (!message) return;
+		message.hidden = true;
+		saveState({ immediate: true });
+		render();
+		showToast("Message hidden; captured data was kept");
+	},
+	hideByte: (messageId, position) => {
+		const c = capture();
+		const message = c?.messages.find(item => item.id === messageId);
+		if (!c || !message || position < 0 || position >= message.bytes.length) return;
+		message.hiddenBytes ||= [];
+		message.hiddenBytes[position] = true;
+		const rawIndex = message._rawPositions?.[position] ?? -1;
+		if (rawIndex >= 0 && c.byteStream?.[rawIndex]) c.byteStream[rawIndex].hidden = true;
+		rebuildPreview(c);
+		saveState({ immediate: true });
+		render();
+		showToast("Byte hidden; captured data was kept");
+	},
+	beginSection: startSectionAtByte,
+	setSectionFrameSize,
+	setSectionCollapse
 });
 
 registerNotesActions({ addSequenceNote });
