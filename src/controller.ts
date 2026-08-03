@@ -16,9 +16,10 @@ import {
 } from "./framing-toolbar-bridge";
 import { publishSendSnapshot, registerSendActions } from "./send-bridge";
 import { createSendController, type SendController } from "./send-controller";
+import { createCaptureController, type CaptureController } from "./capture-controller";
 import { registerTransportActions } from "./transport-bridge";
 import { createSerialController, type SerialController } from "./serial-controller";
-import { registerNotesActions, publishNotesSnapshot, type SequenceNoteInput } from "./notes-bridge";
+import { registerNotesActions, publishNotesSnapshot } from "./notes-bridge";
 import { deriveNotesSnapshot } from "./notes";
 import { publishToastSnapshot } from "./toast-bridge";
 import { publishDialogCommand, registerDialogActions } from "./dialog-bridge";
@@ -28,25 +29,12 @@ import {
 	registerMessageStreamActions
 } from "./message-stream-bridge";
 import { deriveMessageStreamSnapshot } from "./message-stream";
-import {
-	annotationTargetLabel,
-	annotationTextIsValid,
-	contextDraftToValues,
-	normalizeAnnotationText,
-	normalizePatternRemarkText,
-	sectionRowFromModel,
-	serializeSectionDrafts
-} from "./dialog-model";
-import {
-	applyFramingSettings,
-	selectFramingToolbarSnapshot
-} from "./framing-toolbar";
+import { selectFramingToolbarSnapshot } from "./framing-toolbar";
 import {
 	hexByte,
 	frameWidth,
 	makeMessage,
 	normalizeCapture,
-	normalizeSections,
 	parseTime,
 	rebuildPreview,
 	signature,
@@ -62,6 +50,7 @@ let toastTimer = null;
 let stateSaveTimer = null;
 let transport: SerialController;
 let sendController: SendController;
+let captureController: CaptureController;
 
 function persistState() {
 	state.activeId = activeId;
@@ -176,72 +165,6 @@ function renderEmptyWorkspace() {
 	publishMessageStreamSnapshot(deriveMessageStreamSnapshot(null, getViewStateSnapshot()));
 }
 
-function selectArchiveCapture(captureId) {
-	activeId = captureId;
-	saveState();
-	render();
-}
-
-function toggleArchiveFolder(folderId) {
-	if (folderId) {
-		const folder = state.folders.find(item => item.id === folderId);
-		if (folder) folder.collapsed = !folder.collapsed;
-	} else state.unfiledCollapsed = !state.unfiledCollapsed;
-	saveState();
-	publishArchiveState();
-}
-
-function moveArchiveCapture(captureId, folderId) {
-	const item = state.captures.find(capture => capture.id === captureId);
-	if (!item) return;
-	const folderNameById = new Map(state.folders.map(folder => [folder.id, folder.name]));
-	item.folderId = folderId || null;
-	saveState();
-	publishArchiveState();
-	showToast(item.folderId ? `Moved to ${folderNameById.get(item.folderId)}` : "Moved to Unfiled");
-}
-
-function saveFolder(name, editingId) {
-	const trimmedName = String(name).trim();
-	const duplicate = state.folders.some(
-		folder => folder.id !== editingId && folder.name.toLowerCase() === trimmedName.toLowerCase()
-	);
-	if (!trimmedName || duplicate) return false;
-	const folder = state.folders.find(item => item.id === editingId);
-	if (folder) {
-		folder.name = trimmedName;
-		showToast("Folder renamed");
-	} else {
-		state.folders.push({
-			id: crypto.randomUUID(),
-			name: trimmedName,
-			collapsed: false,
-			createdAt: new Date().toISOString()
-		});
-		showToast("Folder created");
-	}
-	saveState();
-	publishArchiveState();
-	return true;
-}
-
-function deleteFolder(folderId) {
-	const folder = state.folders.find(item => item.id === folderId);
-	if (!folder) return;
-	const captureCount = state.captures.filter(item => item.folderId === folderId).length;
-	const detail = captureCount
-		? ` Its ${captureCount} capture${captureCount === 1 ? "" : "s"} will be moved to Unfiled.`
-		: "";
-	if (!confirm(`Delete folder “${folder.name}”?${detail}`)) return;
-	state.captures.forEach(item => {
-		if (item.folderId === folderId) item.folderId = null;
-	});
-	state.folders = state.folders.filter(item => item.id !== folderId);
-	saveState();
-	publishArchiveState();
-	showToast(captureCount ? "Folder deleted; captures moved to Unfiled" : "Folder deleted");
-}
-
 function publishCaptureHeaderState() {
 	publishCaptureHeaderSnapshot(deriveCaptureHeaderSnapshot(capture(), transport.isRecording()));
 }
@@ -258,334 +181,11 @@ function publishNotesState(c = capture()) {
 	publishNotesSnapshot(deriveNotesSnapshot(c));
 }
 
-function addSequenceNote({ start: rawStart, end: rawEnd, text: rawText }: SequenceNoteInput): boolean {
-	const c = capture();
-	const noteText = String(rawText || "").trim();
-	if (!c || !noteText) return false;
-	const max = Math.max(1, c.messages.length);
-	const start = Math.max(1, Math.min(max, Number(rawStart) || 1));
-	const end = Math.max(start, Math.min(max, Number(rawEnd) || start));
-	c.notes ||= [];
-	c.notes.push({
-		id: crypto.randomUUID(),
-		type: "sequence",
-		text: noteText,
-		createdAt: Date.now(),
-		start,
-		end,
-		targetLabel: `rows ${start}–${end}`
-	});
-	saveState();
-	publishNotesState(c);
-	renderMessages();
-	showToast("Sequence observation added");
-	return true;
-}
-
 function renderMessages() {
 	const c = capture();
 	if (!c) return;
 	const viewState = getViewStateSnapshot();
 	publishMessageStreamSnapshot(deriveMessageStreamSnapshot(c, viewState));
-}
-
-function setCaptureTitle(value) {
-	const c = capture();
-	if (!c) return;
-	c.name = value;
-	saveState();
-	publishCaptureHeaderState();
-}
-
-function commitCaptureTitle(value) {
-	const c = capture();
-	if (!c) return;
-	c.name = value;
-	saveState();
-	publishArchiveState();
-	publishCaptureHeaderState();
-}
-
-function setCaptureDescription(value) {
-	const c = capture();
-	if (!c) return;
-	c.description = value;
-	saveState();
-	publishCaptureHeaderState();
-}
-
-function commitCaptureDescription(value) {
-	const c = capture();
-	if (!c) return;
-	c.description = value;
-	saveState();
-	publishCaptureHeaderState();
-}
-
-function duplicateActiveCapture() {
-	const source = capture();
-	if (!source) return;
-	const copy = structuredClone(source);
-	copy.id = crypto.randomUUID();
-	copy.name += " · copy";
-	copy.createdAt = new Date().toISOString();
-	copy.messages.forEach(m => (m.id = crypto.randomUUID()));
-	copy.annotations = {};
-	state.captures.unshift(copy);
-	activeId = copy.id;
-	saveState();
-	render();
-}
-
-function clearActiveCaptureMessages() {
-	const c = capture();
-	if (!c) return;
-	if (confirm("Clear all raw bytes, messages, and message annotations from this capture?")) {
-		c.byteStream = [];
-		c.messages = [];
-		c.annotations = {};
-		c.patternRemarks = {};
-		saveState();
-		render();
-	}
-}
-
-function deleteActiveCapture() {
-	const c = capture();
-	if (!c || !confirm(`Delete “${c.name}”?`)) return;
-	if (transport.isRecording()) transport.stopRecording();
-	state.captures = state.captures.filter(item => item.id !== activeId);
-	activeId = state.captures[0]?.id || null;
-	saveState();
-	render();
-}
-
-function publishContextDialog(isNew = false) {
-	const c = isNew
-		? { name: "Untitled capture", view: "", params: [], baudRate: 115200, folderId: null, id: null }
-		: capture();
-	if (!c) return;
-	publishDialogCommand({
-		type: "context",
-		mode: isNew ? "new" : "edit",
-		captureId: isNew ? null : String(c.id),
-		name: String(c.name ?? "Untitled capture"),
-		view: String(c.view ?? ""),
-		folderId: c.folderId ? String(c.folderId) : null,
-		baudRate: Number(c.baudRate || 115200),
-		params: (Array.isArray(c.params) ? c.params : []).map(parameter => ({
-			key: String(parameter.key ?? ""),
-			value: String(parameter.value ?? "")
-		})),
-		folders: state.folders.map(folder => ({ id: String(folder.id), name: String(folder.name || "") }))
-	});
-}
-
-function publishSectionsDialog() {
-	const c = capture();
-	if (!c) return;
-	normalizeSections(c);
-	publishDialogCommand({
-		type: "sections",
-		captureId: String(c.id),
-		streamLength: c.byteStream.length,
-		frameSize: c.frameSize,
-		sections: c.frameSections.map(sectionRowFromModel)
-	});
-}
-
-function updateFramingSettings(update) {
-	const c = capture();
-	if (!c) return;
-	applyFramingSettings(c, update);
-	normalizeSections(c);
-	rebuildPreview(c);
-	saveState();
-	render();
-}
-
-function commitSectionsDraft(input) {
-	const c = state.captures.find(item => String(item.id) === String(input.captureId));
-	if (!c) return false;
-	const result = serializeSectionDrafts(input.rows, Math.max(0, c.byteStream.length - 1), c.frameSize);
-	if (!result.ok) {
-		showToast(result.error);
-		return false;
-	}
-	c.frameSections = result.sections;
-	normalizeSections(c);
-	rebuildPreview(c);
-	saveState();
-	render();
-	showToast("Section framing updated");
-	return true;
-}
-
-function startSectionAtByte(messageId, position) {
-	const c = capture();
-	const message = c?.messages.find(item => item.id === messageId);
-	if (!message) return;
-	const start = message._rawPositions?.[position];
-	if (!Number.isInteger(start)) return;
-	c.previewMode = "sections";
-	normalizeSections(c);
-	if (c.frameSections.some(section => section.start === start)) {
-		render();
-		showToast(
-			start === 0 ? "The first raw byte already begins section 01" : `Raw byte ${start + 1} already begins a section`
-		);
-		return;
-	}
-	const preceding = [...c.frameSections].reverse().find(section => section.start < start);
-	c.frameSections.push({
-		id: crypto.randomUUID(),
-		start,
-		frameSize: preceding?.frameSize || c.frameSize,
-		collapseRuns: preceding?.collapseRuns || false
-	});
-	normalizeSections(c);
-	rebuildPreview(c);
-	saveState();
-	render();
-	showToast(`Section begins at raw byte ${start + 1}`);
-}
-
-function setSectionFrameSize(sectionId, value) {
-	const c = capture();
-	const section = c?.frameSections.find(item => item.id === sectionId);
-	if (!section) return;
-	section.frameSize = Math.max(1, Math.min(1024, Math.floor(+value || section.frameSize)));
-	rebuildPreview(c);
-	saveState();
-	render();
-	showToast(`Section message length set to ${section.frameSize} bytes`);
-}
-
-function setSectionCollapse(sectionId, collapseRuns) {
-	const c = capture();
-	const section = c?.frameSections.find(item => item.id === sectionId);
-	if (!section) return;
-	section.collapseRuns = collapseRuns;
-	saveState();
-	renderMessages();
-	showToast(collapseRuns ? "Runs collapse in this section" : "Runs expand in this section");
-}
-
-function commitContextDraft(input) {
-	const values = contextDraftToValues(input.draft);
-	if (input.mode === "new") {
-		const c = normalizeCapture({
-			id: crypto.randomUUID(),
-			...values,
-			createdAt: new Date().toISOString(),
-			messages: [],
-			byteStream: [],
-			notes: [],
-			annotations: {}
-		});
-		state.captures.unshift(c);
-		activeId = c.id;
-	} else {
-		const c = state.captures.find(item => String(item.id) === String(input.captureId)) || capture();
-		if (!c) return false;
-		Object.assign(c, values);
-	}
-	saveState();
-	render();
-	showToast("Capture context saved");
-	return true;
-}
-
-function publishAnnotationDialog(type, key) {
-	const c = capture();
-	if (!c) return;
-	const details = annotationTargetLabel(c, type, key);
-	if (!details) return;
-	const [messageId, positionText] = key.split(":");
-	const message = c.messages.find(item => item.id === messageId);
-	if (!message) return;
-	const position = positionText === undefined ? null : +positionText;
-	const existing = c.annotations[details.targetKey];
-	const target =
-		type === "byte"
-			? `${formatTime(message.byteTimestamps?.[position] ?? message.timestamp)}  ·  ${signature(message)}  ·  BYTE ${details.displayPosition + 1} = ${hexByte(message.bytes[position])}`
-			: `${formatTime(message.timestamp)}  ·  ${signature(message)}`;
-	publishDialogCommand({
-		type: "annotation",
-		captureId: String(c.id),
-		annotationType: type,
-		key,
-		title: details.title,
-		target,
-		text: String(existing?.text || ""),
-		hasExisting: Boolean(existing)
-	});
-}
-
-function commitAnnotationDraft(input) {
-	if (!annotationTextIsValid(input.text)) return false;
-	const c = state.captures.find(item => String(item.id) === String(input.captureId));
-	if (!c) return false;
-	const details = annotationTargetLabel(c, input.annotationType, input.key);
-	if (!details) return false;
-	const [messageId] = input.key.split(":");
-	const message = c.messages.find(item => item.id === messageId);
-	if (!message) return false;
-	c.annotations[details.targetKey] = {
-		text: normalizeAnnotationText(input.text),
-		createdAt: Date.now(),
-		type: input.annotationType,
-		targetLabel:
-			input.annotationType === "byte"
-				? `${signature(message)} · byte ${details.displayPosition + 1}`
-				: signature(message)
-	};
-	saveState();
-	render();
-	showToast("Annotation saved");
-	return true;
-}
-
-function removeAnnotationDraft(input) {
-	const c = state.captures.find(item => String(item.id) === String(input.captureId));
-	if (!c) return;
-	const details = annotationTargetLabel(c, input.annotationType, input.key);
-	if (!details) return;
-	delete c.annotations[details.targetKey];
-	saveState();
-	render();
-	showToast("Annotation removed");
-}
-
-function publishPatternRemarkDialog(id) {
-	const c = capture();
-	const patterns = recognizeMessagePatterns(c);
-	const group = patterns.groups.find(item => item.id === id);
-	if (!group || !c) return showToast("This sequence is no longer present in the current framing");
-	const text = String(c.patternRemarks?.[group.key]?.text || "");
-	publishDialogCommand({
-		type: "pattern-remark",
-		captureId: String(c.id),
-		patternKey: group.key,
-		title: `${group.length}-message sequence · ${group.starts.length} occurrences`,
-		signatures: group.signatures,
-		color: group.color,
-		text,
-		hasExisting: Boolean(text)
-	});
-}
-
-function commitPatternRemarkDraft(input) {
-	const c = state.captures.find(item => String(item.id) === String(input.captureId));
-	if (!c) return false;
-	const text = normalizePatternRemarkText(input.text);
-	c.patternRemarks ||= {};
-	if (text) c.patternRemarks[input.patternKey] = { text, updatedAt: Date.now() };
-	else delete c.patternRemarks[input.patternKey];
-	saveState();
-	renderMessages();
-	showToast(text ? "Sequence note saved" : "Sequence note removed");
-	return true;
 }
 
 function parseDump(text) {
@@ -824,6 +424,25 @@ sendController = createSendController({
 	publishSendState
 });
 
+captureController = createCaptureController({
+	state,
+	capture,
+	getActiveId: () => activeId,
+	setActiveId: captureId => {
+		activeId = captureId;
+	},
+	saveState,
+	render,
+	renderMessages,
+	showToast,
+	confirm: message => confirm(message),
+	transport,
+	publishArchiveState,
+	publishCaptureHeaderState,
+	publishNotesState,
+	publishDialogCommand
+});
+
 registerTransportActions({
 	connect: transport.connect,
 	disconnect: transport.disconnect,
@@ -853,41 +472,39 @@ window.addEventListener("beforeunload", () => {
 });
 
 registerCaptureHeaderActions({
-	setTitle: setCaptureTitle,
-	commitTitle: commitCaptureTitle,
-	setDescription: setCaptureDescription,
-	commitDescription: commitCaptureDescription,
-	openContext: () => {
-		if (capture()) publishContextDialog(false);
-	},
-	duplicate: duplicateActiveCapture,
-	clearMessages: clearActiveCaptureMessages,
-	deleteCapture: deleteActiveCapture
+	setTitle: captureController.setCaptureTitle,
+	commitTitle: captureController.commitCaptureTitle,
+	setDescription: captureController.setCaptureDescription,
+	commitDescription: captureController.commitCaptureDescription,
+	openContext: captureController.publishContextDialog,
+	duplicate: captureController.duplicateActiveCapture,
+	clearMessages: captureController.clearActiveCaptureMessages,
+	deleteCapture: captureController.deleteActiveCapture
 });
 
 registerArchiveActions({
-	selectCapture: selectArchiveCapture,
-	toggleFolder: toggleArchiveFolder,
-	moveCapture: moveArchiveCapture,
-	openNewCapture: () => publishContextDialog(true),
+	selectCapture: captureController.selectArchiveCapture,
+	toggleFolder: captureController.toggleArchiveFolder,
+	moveCapture: captureController.moveArchiveCapture,
+	openNewCapture: () => captureController.publishContextDialog(true),
 	openImport: () => $("#fileInput").click(),
 	openExport: () => publishDialogCommand({ type: "export" }),
-	saveFolder,
-	deleteFolder,
+	saveFolder: captureController.saveFolder,
+	deleteFolder: captureController.deleteFolder,
 	importFile
 });
 
 registerFramingToolbarActions({
-	updateSettings: updateFramingSettings,
-	openSections: publishSectionsDialog
+	updateSettings: captureController.updateFramingSettings,
+	openSections: captureController.publishSectionsDialog
 });
 
 registerDialogActions({
-	saveContext: commitContextDraft,
-	saveSections: commitSectionsDraft,
-	saveAnnotation: commitAnnotationDraft,
-	deleteAnnotation: removeAnnotationDraft,
-	savePatternRemark: commitPatternRemarkDraft,
+	saveContext: captureController.commitContextDraft,
+	saveSections: captureController.commitSectionsDraft,
+	saveAnnotation: captureController.commitAnnotationDraft,
+	deleteAnnotation: captureController.removeAnnotationDraft,
+	savePatternRemark: captureController.commitPatternRemarkDraft,
 	exportData,
 	notify: showToast
 });
@@ -908,8 +525,8 @@ registerSendActions({
 });
 
 registerMessageStreamActions({
-	openMessageNote: messageId => publishAnnotationDialog("message", messageId),
-	openByteNote: (messageId, position) => publishAnnotationDialog("byte", `${messageId}:${position}`),
+	openMessageNote: messageId => captureController.publishAnnotationDialog("message", messageId),
+	openByteNote: (messageId, position) => captureController.publishAnnotationDialog("byte", `${messageId}:${position}`),
 	replayMessage: messageId => {
 		const message = capture()?.messages.find(item => item.id === messageId);
 		if (message) {
@@ -919,7 +536,7 @@ registerMessageStreamActions({
 			);
 		}
 	},
-	openPatternRemark: publishPatternRemarkDialog,
+	openPatternRemark: captureController.publishPatternRemarkDialog,
 	hideMessage: messageId => {
 		const c = capture();
 		const message = c?.messages.find(item => item.id === messageId);
@@ -942,12 +559,12 @@ registerMessageStreamActions({
 		render();
 		showToast("Byte hidden; captured data was kept");
 	},
-	beginSection: startSectionAtByte,
-	setSectionFrameSize,
-	setSectionCollapse
+	beginSection: captureController.startSectionAtByte,
+	setSectionFrameSize: captureController.setSectionFrameSize,
+	setSectionCollapse: captureController.setSectionCollapse
 });
 
-registerNotesActions({ addSequenceNote });
+registerNotesActions({ addSequenceNote: captureController.addSequenceNote });
 
 render();
 
