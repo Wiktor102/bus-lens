@@ -21,7 +21,6 @@ import {
 import { publishAnalysisSnapshot } from "./analysis-bridge";
 import { deriveCaptureHeaderSnapshot } from "./capture-header";
 import { publishCaptureHeaderSnapshot, registerCaptureHeaderActions } from "./capture-header-bridge";
-import { collapseAdjacentRuns, countVisibleRowsByPatternOccurrence } from "./collapse-runs";
 import {
 	publishFramingToolbarSnapshot,
 	registerFramingToolbarActions
@@ -32,6 +31,11 @@ import { deriveNotesSnapshot } from "./notes";
 import { publishToastSnapshot } from "./toast-bridge";
 import { publishDialogCommand, registerDialogActions } from "./dialog-bridge";
 import { getViewStateSnapshot, subscribeToViewState } from "./view-state-bridge";
+import {
+	publishMessageStreamSnapshot,
+	registerMessageStreamActions
+} from "./message-stream-bridge";
+import { deriveMessageStreamSnapshot } from "./message-stream";
 import {
 	annotationTargetLabel,
 	annotationTextIsValid,
@@ -48,6 +52,10 @@ import {
 import {
 	recordReceivedByte
 } from "./capture-summary";
+import {
+	collapseAdjacentRuns,
+	countVisibleRowsByPatternOccurrence
+} from "./collapse-runs";
 import {
 	frameWidth,
 	hexByte,
@@ -298,6 +306,7 @@ function render() {
 }
 
 function renderEmptyWorkspace() {
+	publishMessageStreamSnapshot(deriveMessageStreamSnapshot(null, getViewStateSnapshot()));
 	$("#messageBody").innerHTML = "";
 	$(".message-table").classList.add("hidden");
 	$("#emptyState").classList.remove("hidden");
@@ -475,6 +484,8 @@ function filteredMessages() {
 function renderMessages() {
 	const c = capture();
 	if (!c) return;
+	const viewState = getViewStateSnapshot();
+	publishMessageStreamSnapshot(deriveMessageStreamSnapshot(c, viewState));
 	const matchingRows = filteredMessages();
 	const messages = visibleMessages(c);
 	const signatureCounts = getCounts(messages);
@@ -487,7 +498,6 @@ function renderMessages() {
 		return map;
 	});
 	const patterns = recognizeMessagePatterns(c);
-	const viewState = getViewStateSnapshot();
 	const highlight = viewState.showFrameChanges;
 	const frames = highlight
 		? transitionFrames(matchingRows)
