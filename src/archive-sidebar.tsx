@@ -145,6 +145,7 @@ function CaptureItem({
 export function ArchiveSidebar() {
 	const snapshot = useSyncExternalStore(subscribeToArchive, getArchiveSnapshot, getArchiveSnapshot);
 	const actions = getArchiveActions();
+	const fileInputRef = useRef<HTMLInputElement>(null);
 	const [query, setQuery] = useState("");
 	const [folderDialogId, setFolderDialogId] = useState<string | null | undefined>(undefined);
 	const archive = useMemo(
@@ -218,7 +219,7 @@ export function ArchiveSidebar() {
 				)}
 			</div>
 			<div className="sidebar-actions">
-				<button id="importBtn" className="text-btn" onClick={actions.openImport}>
+				<button id="importBtn" className="text-btn" onClick={() => fileInputRef.current?.click()}>
 					↥ Import
 				</button>
 				<button
@@ -231,6 +232,7 @@ export function ArchiveSidebar() {
 				</button>
 				<input
 					id="fileInput"
+					ref={fileInputRef}
 					type="file"
 					accept=".txt,.json,.csv"
 					hidden

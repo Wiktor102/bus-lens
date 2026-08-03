@@ -3,10 +3,7 @@
 // @ts-nocheck
 import { publishArchiveSnapshot, registerArchiveActions } from "./archive-bridge";
 import { STORAGE_KEY, loadState, normalizeSendState } from "./app-state";
-import {
-	deriveAnalysisSnapshot,
-	recognizeMessagePatterns
-} from "./analysis";
+import { deriveAnalysisSnapshot } from "./analysis";
 import { publishAnalysisSnapshot } from "./analysis-bridge";
 import { deriveCaptureHeaderSnapshot } from "./capture-header";
 import { publishCaptureHeaderSnapshot, registerCaptureHeaderActions } from "./capture-header-bridge";
@@ -30,20 +27,9 @@ import {
 } from "./message-stream-bridge";
 import { deriveMessageStreamSnapshot } from "./message-stream";
 import { selectFramingToolbarSnapshot } from "./framing-toolbar";
-import {
-	hexByte,
-	frameWidth,
-	makeMessage,
-	normalizeCapture,
-	parseTime,
-	rebuildPreview,
-	signature,
-	visibleByteEntries,
-	visibleMessages
-} from "./capture-framing";
-
-const $ = selector => document.querySelector(selector);
-const $$ = selector => [...document.querySelectorAll(selector)];
+import { rebuildPreview, visibleByteEntries, visibleMessages } from "./capture-framing";
+import { download } from "./browser-download";
+import { createDataTransferController, type DataTransferController } from "./data-transfer";
 let state = loadState();
 let activeId = state.activeId || state.captures[0]?.id;
 let toastTimer = null;
@@ -51,6 +37,7 @@ let stateSaveTimer = null;
 let transport: SerialController;
 let sendController: SendController;
 let captureController: CaptureController;
+let dataTransferController: DataTransferController;
 
 function persistState() {
 	state.activeId = activeId;
@@ -188,215 +175,6 @@ function renderMessages() {
 	publishMessageStreamSnapshot(deriveMessageStreamSnapshot(c, viewState));
 }
 
-function parseDump(text) {
-	const sections = text
-		.split(/\n\s*----+\s*\n/)
-		.map(s => s.trim())
-		.filter(s => /View\s*:/i.test(s));
-	return sections
-		.map((section, index) => {
-			const lines = section.split(/\r?\n/);
-			const view =
-				lines
-					.find(l => /^View\s*:/i.test(l))
-					?.split(":")
-					.slice(1)
-					.join(":")
-					.trim() || "Imported";
-			const params = [];
-			for (const line of lines) {
-				if (/^\d{2}:\d{2}:\d{2}/.test(line) || /^View\s*:/i.test(line) || /^\(/.test(line) || /^\.{3}/.test(line))
-					continue;
-				const m = line.match(/^([^:]+):\s*(.+)$/);
-				if (m) params.push({ key: m[1].trim(), value: m[2].trim() });
-			}
-			const messages = [];
-			lines.forEach(line => {
-				const tm = line.match(/^(\d{2}:\d{2}:\d{2}[.:]\d{3})\s*->\s*((?:[0-9A-F]{2}\s*)+)/i);
-				if (tm) messages.push(makeMessage(tm[2], parseTime(tm[1]), messages.length));
-			});
-			return {
-				id: crypto.randomUUID(),
-				name: `${view} · imported ${index + 1}`,
-				view,
-				params,
-				createdAt: new Date().toISOString(),
-				frameSize: 3,
-				baudRate: 115200,
-				inputFormat: "text",
-				messages,
-				notes: [],
-				annotations: {}
-			};
-		})
-		.filter(c => c.messages.length);
-}
-
-async function importFile(file) {
-	try {
-		const text = await file.text();
-		if (file.name.toLowerCase().endsWith(".json")) {
-			const imported = JSON.parse(text);
-			const captures = Array.isArray(imported) ? imported : imported.captures;
-			if (!Array.isArray(captures)) throw new Error("No captures found");
-			const importedFolders = Array.isArray(imported?.folders) ? imported.folders : [];
-			const folderIdMap = new Map();
-			const existingFolderNames = new Map(state.folders.map(folder => [folder.name.toLowerCase(), folder.id]));
-			const existingCaptureIds = new Set(state.captures.map(capture => capture.id));
-			importedFolders.forEach(sourceFolder => {
-				const name = String(sourceFolder?.name || "Imported folder").trim() || "Imported folder";
-				let id = existingFolderNames.get(name.toLowerCase());
-				if (!id) {
-					id = crypto.randomUUID();
-					state.folders.push({
-						id,
-						name,
-						collapsed: Boolean(sourceFolder?.collapsed),
-						createdAt: sourceFolder?.createdAt || new Date().toISOString()
-					});
-					existingFolderNames.set(name.toLowerCase(), id);
-				}
-				if (sourceFolder?.id) folderIdMap.set(sourceFolder.id, id);
-			});
-			captures.forEach(c => {
-				if (!c.id || existingCaptureIds.has(c.id)) c.id = crypto.randomUUID();
-				existingCaptureIds.add(c.id);
-				c.folderId = folderIdMap.get(c.folderId) || null;
-				normalizeCapture(c);
-				rebuildPreview(c);
-				c.messages.forEach(m => (m.id ||= crypto.randomUUID()));
-			});
-			state.captures.unshift(...captures);
-			if (!Array.isArray(imported) && Array.isArray(imported.sendHistory)) {
-				state.sendHistory = [...imported.sendHistory, ...state.sendHistory];
-			}
-			if (!Array.isArray(imported) && Array.isArray(imported.sendQueue)) {
-				state.sendQueue = [...state.sendQueue, ...imported.sendQueue];
-			}
-			if (!Array.isArray(imported) && imported.sendSettings) {
-				state.sendSettings = { ...state.sendSettings, ...imported.sendSettings, draft: state.sendSettings.draft };
-			}
-			normalizeSendState(state);
-			activeId = captures[0]?.id || activeId;
-		} else {
-			const captures = parseDump(text);
-			if (!captures.length) throw new Error("No timestamped hex messages found");
-			captures.forEach(c => {
-				normalizeCapture(c);
-				rebuildPreview(c);
-			});
-			state.captures.unshift(...captures);
-			activeId = captures[0].id;
-		}
-		saveState();
-		render();
-		showToast(`Imported ${file.name}`);
-	} catch (error) {
-		showToast(`Import failed: ${error.message}`);
-	}
-}
-
-function download(content, filename, type) {
-	const url = URL.createObjectURL(new Blob([content], { type }));
-	const a = document.createElement("a");
-	a.href = url;
-	a.download = filename;
-	a.click();
-	setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function exportData(format) {
-	const c = capture();
-	const safeName = c.name.replace(/[^a-z0-9_-]+/gi, "-").toLowerCase();
-	if (format === "json") {
-		download(
-			JSON.stringify(
-				{
-					app: "Bus Lens",
-					version: 3,
-					exportedAt: new Date().toISOString(),
-					folders: state.folders,
-					captures: state.captures,
-					sendHistory: state.sendHistory,
-					sendQueue: state.sendQueue,
-					sendSettings: { ...state.sendSettings, draft: "" }
-				},
-				null,
-				2
-			),
-			"bus-lens-archive.json",
-			"application/json"
-		);
-	} else if (format === "csv") {
-		const quote = value => `"${String(value ?? "").replaceAll('"', '""')}"`;
-		const width = frameWidth(c);
-		const byteHeaders = Array.from({ length: width }, (_, i) => [`byte_${i + 1}_hex`, `byte_${i + 1}_timestamp`]).flat();
-		const patterns = recognizeMessagePatterns(c);
-		const header = [
-			"index",
-			"timestamp",
-			"delta_ms",
-			...byteHeaders,
-			"message_hex",
-			"message_note",
-			"sequence_group",
-			"sequence_remark"
-		];
-		const rows = c.messages.map((m, i) => {
-			const pattern = patterns.membership.get(i)?.group;
-			const visibleBytes = visibleByteEntries(m);
-			const byteCells = Array.from({ length: width }, (_, position) =>
-				visibleBytes[position] === undefined
-					? ["", ""]
-					: [
-						hexByte(visibleBytes[position].value),
-						new Date(m.byteTimestamps?.[visibleBytes[position].rawPosition] ?? m.timestamp).toISOString()
-					  ]
-			).flat();
-			return [
-				i + 1,
-				new Date(m.timestamp).toISOString(),
-				i ? m.timestamp - c.messages[i - 1].timestamp : "",
-				...byteCells,
-				signature(m),
-				c.annotations[m.id]?.text || "",
-				pattern?.id || "",
-				pattern?.remark || ""
-			]
-				.map(quote)
-				.join(",");
-		});
-		download([header.join(","), ...rows].join("\n"), `${safeName}.csv`, "text/csv");
-	} else {
-		const patterns = recognizeMessagePatterns(c);
-		const patternLines = patterns.groups
-			.filter(group => group.remark)
-			.map(
-				group =>
-					`# Repeated sequence (${group.length} messages, ${group.starts.length} occurrences): ${group.remark}\n#   ${group.signatures.join(" -> ")}`
-			);
-		const noteLines = (c.notes || []).map(
-			n => `# ${n.type === "sequence" ? `Rows ${n.start}-${n.end}` : "Capture"}: ${n.text}`
-		);
-		const context = [
-			`----`,
-			`View: ${c.view}`,
-			...c.params.map(p => `${p.key}: ${p.value}`),
-			...noteLines,
-			...patternLines,
-			"",
-			...c.messages.map(
-				m =>
-					`${formatTime(m.timestamp)} -> ${signature(m)}${c.annotations[m.id] ? `  <-- ${c.annotations[m.id].text}` : ""}`
-			),
-			"",
-			"----"
-		].join("\n");
-		download(context, `${safeName}.txt`, "text/plain");
-	}
-	showToast(`${format.toUpperCase()} export created`);
-}
-
 transport = createSerialController({
 	capture,
 	state,
@@ -443,6 +221,19 @@ captureController = createCaptureController({
 	publishDialogCommand
 });
 
+dataTransferController = createDataTransferController({
+	state,
+	capture,
+	getActiveId: () => activeId,
+	setActiveId: captureId => {
+		activeId = captureId;
+	},
+	saveState,
+	render,
+	showToast,
+	download
+});
+
 registerTransportActions({
 	connect: transport.connect,
 	disconnect: transport.disconnect,
@@ -487,11 +278,10 @@ registerArchiveActions({
 	toggleFolder: captureController.toggleArchiveFolder,
 	moveCapture: captureController.moveArchiveCapture,
 	openNewCapture: () => captureController.publishContextDialog(true),
-	openImport: () => $("#fileInput").click(),
 	openExport: () => publishDialogCommand({ type: "export" }),
 	saveFolder: captureController.saveFolder,
 	deleteFolder: captureController.deleteFolder,
-	importFile
+	importFile: dataTransferController.importFile
 });
 
 registerFramingToolbarActions({
@@ -505,7 +295,7 @@ registerDialogActions({
 	saveAnnotation: captureController.commitAnnotationDraft,
 	deleteAnnotation: captureController.removeAnnotationDraft,
 	savePatternRemark: captureController.commitPatternRemarkDraft,
-	exportData,
+	exportData: dataTransferController.exportData,
 	notify: showToast
 });
 
