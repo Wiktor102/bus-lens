@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deriveSendViewModel, parseTransmitHex, type SendSnapshot } from "../src/send.ts";
+import { deriveSendViewModel, parseTransmitHex, type SendSnapshot } from "../src/features/send/send.ts";
 
 test("parses separated, compact, empty, and incomplete transmit hex", () => {
 	assert.deepEqual(Array.from(parseTransmitHex("c2:08-5d").bytes || []), [0xc2, 0x08, 0x5d]);

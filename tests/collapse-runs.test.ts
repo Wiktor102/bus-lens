@@ -3,7 +3,7 @@ import test from "node:test";
 import {
 	collapseAdjacentRuns,
 	countVisibleRowsByPatternOccurrence
-} from "../src/collapse-runs.ts";
+} from "../src/features/analysis/collapse-runs.ts";
 
 function row(index: number, value: string, patternOccurrence: string | null) {
 	return {

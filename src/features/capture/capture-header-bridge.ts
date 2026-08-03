@@ -1,4 +1,4 @@
-import { createExternalStore } from "./external-store.ts";
+import { createExternalStore } from "../../shared/external-store.ts";
 import { EMPTY_CAPTURE_HEADER_SNAPSHOT, type CaptureHeaderSnapshot } from "./capture-header.ts";
 
 export type CaptureHeaderActions = {

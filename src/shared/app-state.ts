@@ -1,4 +1,4 @@
-import { normalizeCapture, rebuildPreview, type Capture } from "./capture-framing.ts";
+import { normalizeCapture, rebuildPreview, type Capture } from "../features/capture/capture-framing.ts";
 import { createDemoCaptures } from "./demo-data.ts";
 
 export const STORAGE_KEY = "bus-lens-state-v1";

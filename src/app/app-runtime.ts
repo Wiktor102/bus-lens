@@ -1,6 +1,6 @@
-import { loadState, STORAGE_KEY, type AppState, type StateStorage } from "./app-state.ts";
-import { publishToastSnapshot } from "./toast-bridge.ts";
-import type { Capture } from "./capture-framing.ts";
+import { loadState, STORAGE_KEY, type AppState, type StateStorage } from "../shared/app-state.ts";
+import { publishToastSnapshot } from "../shared/toast-bridge.ts";
+import type { Capture } from "../features/capture/capture-framing.ts";
 
 export type WritableStateStorage = StateStorage & {
 	setItem: (key: string, value: string) => void;

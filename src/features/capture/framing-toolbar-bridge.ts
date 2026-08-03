@@ -1,4 +1,4 @@
-import { createExternalStore } from "./external-store.ts";
+import { createExternalStore } from "../../shared/external-store.ts";
 import {
 	EMPTY_FRAMING_TOOLBAR_SNAPSHOT,
 	type FramingSettingsUpdate,

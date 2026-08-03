@@ -15,7 +15,7 @@ import {
 	serializeSectionDrafts,
 	updateContextParameter,
 	updateSectionDraft
-} from "../src/dialog-model.ts";
+} from "../src/features/dialogs/dialog-model.ts";
 
 test("builds context drafts without mutating the open command", () => {
 	const command = {

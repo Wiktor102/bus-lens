@@ -1,4 +1,4 @@
-import { createExternalStore } from "./external-store.ts";
+import { createExternalStore } from "../../shared/external-store.ts";
 import { EMPTY_ANALYSIS_SNAPSHOT, type AnalysisSnapshot } from "./analysis.ts";
 
 const analysisStore = createExternalStore<AnalysisSnapshot, Record<string, never>>(EMPTY_ANALYSIS_SNAPSHOT, {});

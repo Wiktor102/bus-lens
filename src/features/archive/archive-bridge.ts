@@ -1,5 +1,5 @@
 import type { ArchiveCapture, ArchiveFolder } from "./archive-list";
-import { createExternalStore } from "./external-store.ts";
+import { createExternalStore } from "../../shared/external-store.ts";
 
 export type ArchiveSnapshot = {
 	captures: ArchiveCapture[];

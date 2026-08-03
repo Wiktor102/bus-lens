@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildArchiveGroups, type ArchiveCapture, type ArchiveFolder } from "../src/archive-list.ts";
+import { buildArchiveGroups, type ArchiveCapture, type ArchiveFolder } from "../src/features/archive/archive-list.ts";
 
 const folders: ArchiveFolder[] = [
 	{ id: "alpha", name: "Alpha tests", collapsed: true },

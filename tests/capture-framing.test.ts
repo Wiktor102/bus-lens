@@ -14,7 +14,7 @@ import {
 	visibleByteEntries,
 	visibleMessages,
 	visiblePositionForRawByte
-} from "../src/capture-framing.ts";
+} from "../src/features/capture/capture-framing.ts";
 
 function capture(values: number[], timestamps = values.map((_, index) => index)) {
 	return {

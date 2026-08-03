@@ -3,7 +3,7 @@ import {
 	visiblePositionForRawByte,
 	type Capture,
 	type CaptureSection
-} from "./capture-framing.ts";
+} from "../capture/capture-framing.ts";
 
 export type DialogFolderOption = {
 	id: string;

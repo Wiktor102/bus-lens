@@ -5,8 +5,8 @@ import {
 	EMPTY_FRAMING_TOOLBAR_SNAPSHOT,
 	selectFrameSizeLabel,
 	selectFramingToolbarSnapshot
-} from "../src/framing-toolbar.ts";
-import { normalizeSections, rebuildPreview, type Capture } from "../src/capture-framing.ts";
+} from "../src/features/capture/framing-toolbar.ts";
+import { normalizeSections, rebuildPreview, type Capture } from "../src/features/capture/capture-framing.ts";
 
 function capture(values: number[] = []): Capture {
 	return {

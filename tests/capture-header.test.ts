@@ -5,8 +5,8 @@ import {
 	deriveCaptureHeaderSnapshot,
 	normalizeCaptureDescription,
 	normalizeCaptureTitle
-} from "../src/capture-header.ts";
-import type { Capture } from "../src/capture-framing.ts";
+} from "../src/features/capture/capture-header.ts";
+import type { Capture } from "../src/features/capture/capture-framing.ts";
 
 test("derives a compact header snapshot without publishing capture bytes", () => {
 	const snapshot = deriveCaptureHeaderSnapshot(

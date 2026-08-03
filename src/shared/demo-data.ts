@@ -1,4 +1,4 @@
-import { makeMessage, parseTime, type Capture } from "./capture-framing.ts";
+import { makeMessage, parseTime, type Capture } from "../features/capture/capture-framing.ts";
 
 export type DemoDataDependencies = {
 	generateId?: () => string;

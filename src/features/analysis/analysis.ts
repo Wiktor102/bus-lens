@@ -6,8 +6,8 @@ import {
 	visibleMessages,
 	type Capture,
 	type CaptureMessage
-} from "./capture-framing.ts";
-import type { FramedMessage } from "./capture-summary.ts";
+} from "../capture/capture-framing.ts";
+import type { FramedMessage } from "../capture/capture-summary.ts";
 
 export const BYTE_COLORS = [
 	"#79D8E7",

@@ -1,4 +1,4 @@
-import type { Capture } from "./capture-framing.ts";
+import type { Capture } from "../capture/capture-framing.ts";
 
 export type NoteCard = {
 	id: string;

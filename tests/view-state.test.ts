@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EMPTY_VIEW_STATE_SNAPSHOT, reduceViewState } from "../src/view-state.ts";
+import { EMPTY_VIEW_STATE_SNAPSHOT, reduceViewState } from "../src/shared/view-state.ts";
 
 test("reduces React-owned view controls without changing unrelated state", () => {
 	const next = reduceViewState(

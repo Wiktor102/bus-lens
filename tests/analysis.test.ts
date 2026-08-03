@@ -7,8 +7,8 @@ import {
 	rowsWithDelta,
 	summarizeRunCadence,
 	transitionFrames
-} from "../src/analysis.ts";
-import { makeMessage, type Capture } from "../src/capture-framing.ts";
+} from "../src/features/analysis/analysis.ts";
+import { makeMessage, type Capture } from "../src/features/capture/capture-framing.ts";
 
 function capture(messages: ReturnType<typeof makeMessage>[]): Capture {
 	return {

@@ -1,4 +1,4 @@
-import { normalizeSendState, type AppState, type SendHistoryEntry, type SendQueueEntry, type SendSettings, type StoredFolder } from "./app-state.ts";
+import { normalizeSendState, type AppState, type SendHistoryEntry, type SendQueueEntry, type SendSettings, type StoredFolder } from "../../shared/app-state.ts";
 import {
 	frameWidth,
 	hexByte,
@@ -10,9 +10,9 @@ import {
 	visibleByteEntries,
 	type Capture,
 	type CaptureMessage
-} from "./capture-framing.ts";
-import { recognizeMessagePatterns } from "./analysis.ts";
-import type { ExportFormat } from "./dialog-model.ts";
+} from "../capture/capture-framing.ts";
+import { recognizeMessagePatterns } from "../analysis/analysis.ts";
+import type { ExportFormat } from "../dialogs/dialog-model.ts";
 
 export type DataTransferFile = {
 	name: string;

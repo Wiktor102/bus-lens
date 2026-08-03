@@ -7,7 +7,7 @@ import {
 	normalizeArchiveState,
 	normalizeSendState,
 	type AppState
-} from "../src/app-state.ts";
+} from "../src/shared/app-state.ts";
 
 function idFactory(prefix = "generated") {
 	let count = 0;

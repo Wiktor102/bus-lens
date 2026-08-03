@@ -33,6 +33,14 @@ workbench shell is split into focused React components. Protocol capture and
 analysis code is loaded as a separate chunk after the first render, and the
 message table keeps its virtualized rendering path for large captures.
 
+## Source layout
+
+Source is organized by responsibility: `src/app/` contains application wiring and
+the root UI, `src/features/` contains archive, capture, analysis, message-stream,
+send, transport, notes, dialogs, and data-transfer modules, and `src/shared/`
+contains cross-feature state and utilities. React components live at the UI
+feature boundary; controllers and domain modules remain DOM-free.
+
 ## Capture modes
 
 The serial input is a raw binary stream, compatible with ESP32 `Serial.write()`.

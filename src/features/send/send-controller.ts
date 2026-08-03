@@ -4,9 +4,9 @@ import {
 	type SendHistoryEntry,
 	type SendQueueEntry,
 	type SendSettings
-} from "./app-state.ts";
-import { hexByte, type Capture } from "./capture-framing.ts";
-import type { SerialController } from "./serial-controller.ts";
+} from "../../shared/app-state.ts";
+import { hexByte, type Capture } from "../capture/capture-framing.ts";
+import type { SerialController } from "../transport/serial-controller.ts";
 
 export type SendControllerStatus = {
 	sendInFlight: boolean;

@@ -1,7 +1,7 @@
-import { recognizeMessagePatterns } from "./analysis.ts";
-import type { AppState } from "./app-state.ts";
-import type { SequenceNoteInput } from "./notes-bridge.ts";
-import type { SerialController } from "./serial-controller.ts";
+import { recognizeMessagePatterns } from "../analysis/analysis.ts";
+import type { AppState } from "../../shared/app-state.ts";
+import type { SequenceNoteInput } from "../notes/notes-bridge.ts";
+import type { SerialController } from "../transport/serial-controller.ts";
 import {
 	annotationTargetLabel,
 	annotationTextIsValid,
@@ -15,7 +15,7 @@ import {
 	type ContextSaveInput,
 	type PatternRemarkSaveInput,
 	type SectionsSaveInput
-} from "./dialog-model.ts";
+} from "../dialogs/dialog-model.ts";
 import { applyFramingSettings, type FramingSettingsUpdate } from "./framing-toolbar.ts";
 import type { RawByteRecord } from "./capture-summary.ts";
 import {
@@ -28,7 +28,7 @@ import {
 	type CaptureSection,
 	type Capture
 } from "./capture-framing.ts";
-import { publishDialogCommand } from "./dialog-bridge.ts";
+import { publishDialogCommand } from "../dialogs/dialog-bridge.ts";
 
 export type CaptureControllerDependencies = {
 	state: AppState;

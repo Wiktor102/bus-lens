@@ -8,7 +8,7 @@ import {
 	type Capture,
 	type CaptureMessage,
 	type CaptureSection
-} from "./capture-framing.ts";
+} from "../capture/capture-framing.ts";
 import {
 	colorForByte,
 	getCounts,
@@ -20,9 +20,9 @@ import {
 	type PatternGroup,
 	type PatternMembership,
 	type TransitionFrame
-} from "./analysis.ts";
-import { collapseAdjacentRuns, countVisibleRowsByPatternOccurrence } from "./collapse-runs.ts";
-import type { DisplayMode, ViewStateSnapshot } from "./view-state.ts";
+} from "../analysis/analysis.ts";
+import { collapseAdjacentRuns, countVisibleRowsByPatternOccurrence } from "../analysis/collapse-runs.ts";
+import type { DisplayMode, ViewStateSnapshot } from "../../shared/view-state.ts";
 
 export const VIRTUAL_ROW_HEIGHT = 41;
 export const VIRTUAL_SECTION_HEIGHT = 48;

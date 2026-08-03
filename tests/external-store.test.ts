@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createExternalStore } from "../src/external-store.ts";
+import { createExternalStore } from "../src/shared/external-store.ts";
 
 test("external store publishes snapshots and replaces typed commands", () => {
 	const firstActions = { run: () => "first" as const };

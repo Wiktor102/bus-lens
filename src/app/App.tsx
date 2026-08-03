@@ -9,42 +9,42 @@ import {
 	type CSSProperties,
 	type RefObject
 } from "react";
-import { ArchiveSidebar } from "./archive-sidebar";
-import { getAnalysisSnapshot, subscribeToAnalysis } from "./analysis-bridge";
+import { ArchiveSidebar } from "../features/archive/archive-sidebar";
+import { getAnalysisSnapshot, subscribeToAnalysis } from "../features/analysis/analysis-bridge";
 import {
 	getCaptureHeaderActions,
 	getCaptureHeaderSnapshot,
 	subscribeToCaptureHeader
-} from "./capture-header-bridge";
-import { normalizeCaptureDescription, normalizeCaptureTitle } from "./capture-header";
+} from "../features/capture/capture-header-bridge";
+import { normalizeCaptureDescription, normalizeCaptureTitle } from "../features/capture/capture-header";
 import {
 	getFramingToolbarActions,
 	getFramingToolbarSnapshot,
 	subscribeToFramingToolbar
-} from "./framing-toolbar-bridge";
-import type { FramingMode, MarkerPosition } from "./framing-toolbar";
-import { getSendActions, getSendSnapshot, subscribeToSend } from "./send-bridge";
-import { deriveSendViewModel, formatSendTime, parseTransmitHex } from "./send";
-import { getTransportActions, getTransportSnapshot, subscribeToTransport } from "./transport-bridge";
-import { getNotesActions, getNotesSnapshot, subscribeToNotes } from "./notes-bridge";
-import { getToastSnapshot, subscribeToToast } from "./toast-bridge";
+} from "../features/capture/framing-toolbar-bridge";
+import type { FramingMode, MarkerPosition } from "../features/capture/framing-toolbar";
+import { getSendActions, getSendSnapshot, subscribeToSend } from "../features/send/send-bridge";
+import { deriveSendViewModel, formatSendTime, parseTransmitHex } from "../features/send/send";
+import { getTransportActions, getTransportSnapshot, subscribeToTransport } from "../features/transport/transport-bridge";
+import { getNotesActions, getNotesSnapshot, subscribeToNotes } from "../features/notes/notes-bridge";
+import { getToastSnapshot, subscribeToToast } from "../shared/toast-bridge";
 import {
 	AnnotationDialog,
 	ContextDialog,
 	ExportDialog,
 	PatternRemarkDialog,
 	SectionsDialog
-} from "./dialogs";
-import { getMessageStreamSnapshot, subscribeToMessageStream } from "./message-stream-bridge";
-import { MessageStream } from "./message-stream-view";
-import { publishViewStateSnapshot } from "./view-state-bridge";
+} from "../features/dialogs/dialogs";
+import { getMessageStreamSnapshot, subscribeToMessageStream } from "../features/message-stream/message-stream-bridge";
+import { MessageStream } from "../features/message-stream/message-stream-view";
+import { publishViewStateSnapshot } from "../shared/view-state-bridge";
 import {
 	EMPTY_VIEW_STATE_SNAPSHOT,
 	reduceViewState,
 	type DisplayMode,
 	type ViewStateAction,
 	type ViewStateSnapshot
-} from "./view-state";
+} from "../shared/view-state";
 import "./styles.css";
 
 function TopBar() {

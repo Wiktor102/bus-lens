@@ -4,9 +4,9 @@ import {
 	createDataTransferController,
 	parseDump,
 	type DataTransferFile
-} from "../src/data-transfer.ts";
-import type { AppState } from "../src/app-state.ts";
-import type { Capture } from "../src/capture-framing.ts";
+} from "../src/features/data-transfer/data-transfer.ts";
+import type { AppState } from "../src/shared/app-state.ts";
+import type { Capture } from "../src/features/capture/capture-framing.ts";
 
 const fixedNow = Date.UTC(2024, 0, 2, 12, 0, 0);
 

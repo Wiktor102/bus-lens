@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createBeforeUnloadHandler } from "../src/unload-lifecycle.ts";
+import { createBeforeUnloadHandler } from "../src/app/unload-lifecycle.ts";
 
 test("flushes bytes, persists state, and disconnects an open port in unload order", () => {
 	const events: string[] = [];

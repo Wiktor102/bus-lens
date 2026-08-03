@@ -1,21 +1,21 @@
-import { registerArchiveActions } from "./archive-bridge.ts";
+import { registerArchiveActions } from "../features/archive/archive-bridge.ts";
 import { createAppRuntime } from "./app-runtime.ts";
-import { download } from "./browser-download.ts";
-import { registerCaptureHeaderActions } from "./capture-header-bridge.ts";
-import { rebuildPreview, visibleByteEntries } from "./capture-framing.ts";
-import { createCaptureController } from "./capture-controller.ts";
-import { createDataTransferController } from "./data-transfer.ts";
-import { publishDialogCommand, registerDialogActions } from "./dialog-bridge.ts";
-import { registerFramingToolbarActions } from "./framing-toolbar-bridge.ts";
-import { registerMessageStreamActions } from "./message-stream-bridge.ts";
-import { registerNotesActions } from "./notes-bridge.ts";
+import { download } from "../features/data-transfer/browser-download.ts";
+import { registerCaptureHeaderActions } from "../features/capture/capture-header-bridge.ts";
+import { rebuildPreview, visibleByteEntries } from "../features/capture/capture-framing.ts";
+import { createCaptureController } from "../features/capture/capture-controller.ts";
+import { createDataTransferController } from "../features/data-transfer/data-transfer.ts";
+import { publishDialogCommand, registerDialogActions } from "../features/dialogs/dialog-bridge.ts";
+import { registerFramingToolbarActions } from "../features/capture/framing-toolbar-bridge.ts";
+import { registerMessageStreamActions } from "../features/message-stream/message-stream-bridge.ts";
+import { registerNotesActions } from "../features/notes/notes-bridge.ts";
 import { createBeforeUnloadHandler } from "./unload-lifecycle.ts";
-import { createSendController, type SendController } from "./send-controller.ts";
-import { createSerialController, type SerialController } from "./serial-controller.ts";
+import { createSendController, type SendController } from "../features/send/send-controller.ts";
+import { createSerialController, type SerialController } from "../features/transport/serial-controller.ts";
 import { createSnapshotRuntime } from "./snapshot-runtime.ts";
-import { registerSendActions } from "./send-bridge.ts";
-import { registerTransportActions } from "./transport-bridge.ts";
-import { getViewStateSnapshot } from "./view-state-bridge.ts";
+import { registerSendActions } from "../features/send/send-bridge.ts";
+import { registerTransportActions } from "../features/transport/transport-bridge.ts";
+import { getViewStateSnapshot } from "../shared/view-state-bridge.ts";
 
 export type ControllerLifecycle = {
 	beforeUnload: () => void;

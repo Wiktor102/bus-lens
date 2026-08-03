@@ -1,4 +1,4 @@
-import { createExternalStore } from "./external-store.ts";
+import { createExternalStore } from "../../shared/external-store.ts";
 import {
 	EMPTY_MESSAGE_STREAM_SNAPSHOT,
 	type MessageStreamSnapshot

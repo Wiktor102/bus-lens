@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deriveNotesSnapshot } from "../src/notes.ts";
-import type { Capture } from "../src/capture-framing.ts";
+import { deriveNotesSnapshot } from "../src/features/notes/notes.ts";
+import type { Capture } from "../src/features/capture/capture-framing.ts";
 
 test("derives sorted sequence, byte, and message note cards", () => {
 	const snapshot = deriveNotesSnapshot({

@@ -1,4 +1,4 @@
-import { createExternalStore } from "./external-store.ts";
+import { createExternalStore } from "../../shared/external-store.ts";
 import { EMPTY_NOTES_SNAPSHOT, type NotesSnapshot } from "./notes.ts";
 
 export type SequenceNoteInput = {

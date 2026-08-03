@@ -1,7 +1,7 @@
 import { publishTransportSnapshot } from "./transport-bridge.ts";
-import type { AppState } from "./app-state.ts";
-import { recordReceivedByte } from "./capture-summary.ts";
-import { rebuildPreview, type Capture } from "./capture-framing.ts";
+import type { AppState } from "../../shared/app-state.ts";
+import { recordReceivedByte } from "../capture/capture-summary.ts";
+import { rebuildPreview, type Capture } from "../capture/capture-framing.ts";
 
 // A capture remains useful at this size while still fitting comfortably in browser storage.
 export const MAX_CAPTURE_BYTES = 50_000;
