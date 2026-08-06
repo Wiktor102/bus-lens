@@ -205,5 +205,6 @@ export function initializeController(): ControllerLifecycle {
 	};
 	initializedController = lifecycle;
 	snapshots.render();
+	void runtime.ready.then(() => snapshots.render());
 	return lifecycle;
 }

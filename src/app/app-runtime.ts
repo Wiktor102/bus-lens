@@ -21,6 +21,7 @@ export type SaveStateOptions = {
 
 export type AppRuntime = {
 	state: AppState;
+	ready: Promise<void>;
 	capture: () => Capture | undefined;
 	getActiveId: () => string | null | undefined;
 	setActiveId: (captureId: string | null | undefined) => void;
@@ -115,7 +116,7 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		stateSaveTimer = null;
 	}
 
-	if (client) void (async () => {
+	const ready = client ? (async () => {
 		try {
 			await client.health();
 			const stored = await client.load();
@@ -134,10 +135,11 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 				databaseReady = true;
 			}
 		} catch (error) { reportPersistenceFailure(error); }
-	})();
+	})() : Promise.resolve();
 
 	return {
 		state,
+		ready,
 		capture,
 		getActiveId: () => activeId,
 		setActiveId: (captureId: string | null | undefined) => {
