@@ -6,7 +6,7 @@ import {
 	normalizeCaptureSummaryData,
 	signatureForMessage,
 	sumRecordingSessionDurations
-} from "../src/capture-summary.ts";
+} from "../src/features/capture/capture-summary.ts";
 
 test("sums discrete recording sessions instead of their timestamp span", () => {
 	assert.equal(

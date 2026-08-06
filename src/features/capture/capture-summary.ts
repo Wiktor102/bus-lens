@@ -24,7 +24,7 @@ export type CaptureSummaryData = {
 	notes?: Array<{ type?: string; text?: string; createdAt?: number; id?: string }>;
 };
 
-const createId = () => crypto.randomUUID();
+const createId: () => string = () => crypto.randomUUID();
 
 function timestamp(value: unknown) {
 	const result = Number(value);

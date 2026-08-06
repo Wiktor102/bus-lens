@@ -1,0 +1,294 @@
+import { normalizeSendState, type AppState, type SendHistoryEntry, type SendQueueEntry, type SendSettings, type StoredFolder } from "../../shared/app-state.ts";
+import {
+	frameWidth,
+	hexByte,
+	makeMessage,
+	normalizeCapture,
+	parseTime,
+	rebuildPreview,
+	signature,
+	visibleByteEntries,
+	type Capture,
+	type CaptureMessage
+} from "../capture/capture-framing.ts";
+import { recognizeMessagePatterns } from "../analysis/analysis.ts";
+import type { ExportFormat } from "../dialogs/dialog-model.ts";
+
+export type DataTransferFile = {
+	name: string;
+	text: () => Promise<string>;
+};
+
+export type Download = (content: string, filename: string, type: string) => void;
+
+export type DataTransferTimeDependencies = {
+	generateId?: () => string;
+	now?: () => number;
+	nowIso?: () => string;
+};
+
+export type DataTransferState = AppState & {
+	captures: Capture[];
+	folders: StoredFolder[];
+	sendHistory: SendHistoryEntry[];
+	sendQueue: SendQueueEntry[];
+	sendSettings: SendSettings;
+};
+
+export type DataTransferDependencies = DataTransferTimeDependencies & {
+	state: AppState;
+	capture: () => Capture | undefined;
+	getActiveId: () => string | null | undefined;
+	setActiveId: (captureId: string | null | undefined) => void;
+	saveState: () => void;
+	render: () => void;
+	showToast: (message: string) => void;
+	download: Download;
+};
+
+export type DataTransferController = {
+	importFile: (file: DataTransferFile) => Promise<void>;
+	exportData: (format: ExportFormat) => void;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function resolveTimeDependencies(dependencies: DataTransferTimeDependencies = {}) {
+	const now = dependencies.now || Date.now;
+	return {
+		generateId: dependencies.generateId || (() => crypto.randomUUID()),
+		now,
+		nowIso: dependencies.nowIso || (() => new Date(now()).toISOString())
+	};
+}
+
+export function parseDump(text: string, dependencies: DataTransferTimeDependencies = {}): Capture[] {
+	const { generateId, now, nowIso } = resolveTimeDependencies(dependencies);
+	const sections = text
+		.split(/\n\s*----+\s*\n/)
+		.map(section => section.trim())
+		.filter(section => /View\s*:/i.test(section));
+	return sections
+		.map((section, index) => {
+			const lines = section.split(/\r?\n/);
+			const view =
+				lines
+					.find(line => /^View\s*:/i.test(line))
+					?.split(":")
+					.slice(1)
+					.join(":")
+					.trim() || "Imported";
+			const params: Array<{ key: string; value: string }> = [];
+			for (const line of lines) {
+				if (
+					/^\d{2}:\d{2}:\d{2}/.test(line) ||
+					/^View\s*:/i.test(line) ||
+					/^\(/.test(line) ||
+					/^\.{3}/.test(line)
+				)
+					continue;
+				const match = line.match(/^([^:]+):\s*(.+)$/);
+				if (match) params.push({ key: match[1].trim(), value: match[2].trim() });
+			}
+			const messages: CaptureMessage[] = [];
+			lines.forEach(line => {
+				const timestampMatch = line.match(/^([\d]{2}:\d{2}:\d{2}[.:]\d{3})\s*->\s*((?:[0-9A-F]{2}\s*)+)/i);
+				if (timestampMatch) messages.push(makeMessage(timestampMatch[2], parseTime(timestampMatch[1], now), messages.length, generateId));
+			});
+			return {
+				id: generateId(),
+				name: `${view} · imported ${index + 1}`,
+				view,
+				params,
+				createdAt: nowIso(),
+				frameSize: 3,
+				baudRate: 115200,
+				inputFormat: "text",
+				messages,
+				notes: [],
+				annotations: {}
+			};
+		})
+		.filter(capture => capture.messages.length);
+}
+
+function formatTime(milliseconds: number): string {
+	return new Date(milliseconds).toLocaleTimeString("en-GB", {
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit",
+		hour12: false,
+		fractionalSecondDigits: 3
+	});
+}
+
+export function createDataTransferController(dependencies: DataTransferDependencies): DataTransferController {
+	const state = dependencies.state as DataTransferState;
+	const { generateId, now, nowIso } = resolveTimeDependencies(dependencies);
+
+	async function importFile(file: DataTransferFile): Promise<void> {
+		try {
+			const text = await file.text();
+			if (file.name.toLowerCase().endsWith(".json")) {
+				const imported: unknown = JSON.parse(text);
+				const importedArchive = isRecord(imported) ? imported : undefined;
+				const captures = (Array.isArray(imported) ? imported : importedArchive?.captures) as Capture[] | undefined;
+				if (!Array.isArray(captures)) throw new Error("No captures found");
+				const importedFolders = Array.isArray(importedArchive?.folders) ? importedArchive.folders : [];
+				const folderIdMap = new Map<unknown, string>();
+				const existingFolderNames = new Map(state.folders.map(folder => [folder.name.toLowerCase(), folder.id]));
+				const existingCaptureIds = new Set(state.captures.map(capture => capture.id));
+				importedFolders.forEach(sourceFolder => {
+					const folder = isRecord(sourceFolder) ? sourceFolder : {};
+					const name = String(folder.name || "Imported folder").trim() || "Imported folder";
+					let id = existingFolderNames.get(name.toLowerCase());
+					if (!id) {
+						id = generateId();
+						state.folders.push({
+							id,
+							name,
+							collapsed: Boolean(folder.collapsed),
+							createdAt: (folder.createdAt as string | undefined) || nowIso()
+						});
+						existingFolderNames.set(name.toLowerCase(), id);
+					}
+					if (folder.id) folderIdMap.set(folder.id, id);
+				});
+				captures.forEach(capture => {
+					if (!capture.id || existingCaptureIds.has(capture.id)) capture.id = generateId();
+					existingCaptureIds.add(capture.id);
+					capture.folderId = folderIdMap.get(capture.folderId) || null;
+					normalizeCapture(capture, generateId);
+					rebuildPreview(capture, generateId);
+					capture.messages!.forEach(message => (message.id ||= generateId()));
+				});
+				state.captures.unshift(...captures);
+				if (importedArchive && Array.isArray(importedArchive.sendHistory)) {
+					state.sendHistory = [...(importedArchive.sendHistory as SendHistoryEntry[]), ...state.sendHistory];
+				}
+				if (importedArchive && Array.isArray(importedArchive.sendQueue)) {
+					state.sendQueue = [...(importedArchive.sendQueue as SendQueueEntry[]), ...state.sendQueue];
+				}
+				if (importedArchive && isRecord(importedArchive.sendSettings)) {
+					state.sendSettings = { ...state.sendSettings, ...importedArchive.sendSettings, draft: state.sendSettings.draft };
+				}
+				normalizeSendState(state, { generateId, now });
+				dependencies.setActiveId(captures[0]?.id || dependencies.getActiveId());
+			} else {
+				const captures = parseDump(text, { generateId, now, nowIso });
+				if (!captures.length) throw new Error("No timestamped hex messages found");
+				captures.forEach(capture => {
+					normalizeCapture(capture, generateId);
+					rebuildPreview(capture, generateId);
+				});
+				state.captures.unshift(...captures);
+				dependencies.setActiveId(captures[0].id);
+			}
+			dependencies.saveState();
+			dependencies.render();
+			dependencies.showToast(`Imported ${file.name}`);
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			dependencies.showToast(`Import failed: ${message}`);
+		}
+	}
+
+	function exportData(format: ExportFormat): void {
+		const capture = dependencies.capture()!;
+		const safeName = capture.name!.replace(/[^a-z0-9_-]+/gi, "-").toLowerCase();
+		if (format === "json") {
+			dependencies.download(
+				JSON.stringify(
+					{
+						app: "Bus Lens",
+						version: 3,
+						exportedAt: nowIso(),
+						folders: state.folders,
+						captures: state.captures,
+						sendHistory: state.sendHistory,
+						sendQueue: state.sendQueue,
+						sendSettings: { ...state.sendSettings, draft: "" }
+					},
+					null,
+					2
+				),
+				"bus-lens-archive.json",
+				"application/json"
+			);
+		} else if (format === "csv") {
+			const quote = (value: unknown) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+			const width = frameWidth(capture);
+			const byteHeaders = Array.from({ length: width }, (_, index) => [`byte_${index + 1}_hex`, `byte_${index + 1}_timestamp`]).flat();
+			const patterns = recognizeMessagePatterns(capture);
+			const header = [
+				"index",
+				"timestamp",
+				"delta_ms",
+				...byteHeaders,
+				"message_hex",
+				"message_note",
+				"sequence_group",
+				"sequence_remark"
+			];
+			const rows = capture.messages!.map((message, index) => {
+				const pattern = patterns.membership.get(index)?.group;
+				const visibleBytes = visibleByteEntries(message);
+				const byteCells = Array.from({ length: width }, (_, position) =>
+					visibleBytes[position] === undefined
+						? ["", ""]
+						: [
+							hexByte(visibleBytes[position].value),
+							new Date(message.byteTimestamps?.[visibleBytes[position].rawPosition] ?? message.timestamp).toISOString()
+						]
+				).flat();
+				return [
+					index + 1,
+					new Date(message.timestamp).toISOString(),
+					index ? message.timestamp - capture.messages![index - 1].timestamp : "",
+					...byteCells,
+					signature(message),
+					(capture.annotations as Record<string, { text?: unknown }>)[message.id as string]?.text || "",
+					pattern?.id || "",
+					pattern?.remark || ""
+				]
+					.map(quote)
+					.join(",");
+			});
+			dependencies.download([header.join(","), ...rows].join("\n"), `${safeName}.csv`, "text/csv");
+		} else {
+			const patterns = recognizeMessagePatterns(capture);
+			const patternLines = patterns.groups
+				.filter(group => group.remark)
+				.map(
+					group =>
+						`# Repeated sequence (${group.length} messages, ${group.starts.length} occurrences): ${group.remark}\n#   ${group.signatures.join(" -> ")}`
+				);
+			const noteLines = (capture.notes || []).map(
+				note => `# ${note.type === "sequence" ? `Rows ${note.start}-${note.end}` : "Capture"}: ${note.text}`
+			);
+			const context = [
+				`----`,
+				`View: ${capture.view}`,
+				...capture.params!.map(parameter => {
+					const contextParameter = parameter as { key?: unknown; value?: unknown };
+					return `${contextParameter.key}: ${contextParameter.value}`;
+				}),
+				...noteLines,
+				...patternLines,
+				"",
+				...capture.messages!.map(
+					message =>
+						`${formatTime(message.timestamp)} -> ${signature(message)}${(capture.annotations as Record<string, { text?: unknown }>)[message.id as string] ? `  <-- ${(capture.annotations as Record<string, { text?: unknown }>)[message.id as string].text}` : ""}`
+				),
+				"",
+				"----"
+			].join("\n");
+			dependencies.download(context, `${safeName}.txt`, "text/plain");
+		}
+		dependencies.showToast(`${format.toUpperCase()} export created`);
+	}
+
+	return { importFile, exportData };
+}
