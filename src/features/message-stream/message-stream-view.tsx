@@ -435,6 +435,32 @@ const SECTION_MOVE_ACTIONS: Array<{ action: SectionMoveAction; label: string }> 
 	{ action: "message-after", label: "Move one message after" }
 ];
 
+function SectionMoveIcon({ action }: { action: SectionMoveAction }) {
+	const movesBefore = action.endsWith("before");
+	const isMessage = action.startsWith("message");
+	const arrow = isMessage
+		? movesBefore
+			? "M15 19V5m0 0-5 5m5-5 5 5"
+			: "M15 5v14m0 0-5-5m5 5 5-5"
+		: movesBefore
+			? "M19 12H5m0 0 5-5m-5 5 5 5"
+			: "M5 12h14m0 0-5-5m5 5-5 5";
+	const messageLines = "M4.5 5.5h4M4.5 12h4M4.5 18.5h4";
+
+	return (
+		<svg viewBox="0 0 24 24" aria-hidden="true">
+			{isMessage ? (
+				<>
+					<path d={messageLines} />
+					<path d={arrow} />
+				</>
+			) : (
+				<path d={arrow} />
+			)}
+		</svg>
+	);
+}
+
 function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClose: (restoreFocus?: boolean) => void }) {
 	const menuRef = useRef<HTMLDivElement>(null);
 	const positionRef = useRef({ left: 10, top: 10 });
@@ -502,9 +528,7 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 						disabled={!state.availability[action]}
 						onClick={() => handleAction(action)}
 					>
-						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<path d="M5 12h14M12 5v14" />
-						</svg>
+						<SectionMoveIcon action={action} />
 						<span>{label}</span>
 					</button>
 				))
