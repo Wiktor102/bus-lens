@@ -33,15 +33,25 @@ import {
 	type MessageStreamRow,
 	type MessageStreamSnapshot
 } from "./message-stream";
+import type { SectionMoveAction, SectionMoveAvailability } from "../capture/section-repositioning.ts";
 
 type CSSVariableStyle = CSSProperties & Record<`--${string}`, string | number | undefined>;
 
-type MenuState = {
-	target: MessageStreamTarget;
+type MenuPosition = {
 	clientX: number;
 	clientY: number;
 	origin: HTMLElement | null;
 };
+
+type MenuState = MenuPosition &
+	(
+		| { kind: "message"; target: MessageStreamTarget }
+		| {
+				kind: "section";
+				sectionId: string;
+				availability: SectionMoveAvailability;
+			}
+	);
 
 const VIRTUAL_ROW_HEIGHT = 41;
 const VIRTUAL_SECTION_HEIGHT = 48;
@@ -112,6 +122,7 @@ function SectionEntry({
 		<tr
 			ref={rowRef}
 			className="section-divider"
+			data-section-id={section.id}
 			data-index={virtualItem.index}
 			style={{ transform: `translateY(${virtualItem.start}px)` }}
 		>
@@ -397,6 +408,13 @@ function formatByte(byte: number): string {
 	return byte.toString(16).padStart(2, "0").toUpperCase();
 }
 
+const SECTION_MOVE_ACTIONS: Array<{ action: SectionMoveAction; label: string }> = [
+	{ action: "byte-before", label: "Move one byte before" },
+	{ action: "byte-after", label: "Move one byte after" },
+	{ action: "message-before", label: "Move one message before" },
+	{ action: "message-after", label: "Move one message after" }
+];
+
 function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClose: (restoreFocus?: boolean) => void }) {
 	const menuRef = useRef<HTMLDivElement>(null);
 	const positionRef = useRef({ left: 10, top: 10 });
@@ -415,10 +433,18 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 	}, [state]);
 
 	const actions = getMessageStreamActions();
-	const target = state?.target;
+	const target = state?.kind === "message" ? state.target : undefined;
 	const deleteLabel = target?.position === null ? "Delete message" : "Delete byte";
 
 	const handleAction = (action: string) => {
+		if (!state) return;
+		if (state.kind === "section") {
+			const sectionAction = SECTION_MOVE_ACTIONS.find(item => item.action === action)?.action;
+			if (!sectionAction || !state.availability[sectionAction]) return;
+			onClose();
+			actions.moveSection(state.sectionId, sectionAction);
+			return;
+		}
 		if (!target) return;
 		onClose();
 		if (action === "note") {
@@ -436,53 +462,75 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 
 	return (
 		<div
-			id="messageContextMenu"
+			id={state?.kind === "section" ? "sectionContextMenu" : "messageContextMenu"}
 			ref={menuRef}
 			className={`message-context-menu ${state ? "" : "hidden"}`.trim()}
 			style={{ left: position.left, top: position.top }}
 			role="menu"
-			aria-label="Message actions"
+			aria-label={state?.kind === "section" ? "Section actions" : "Message actions"}
 			aria-hidden={state ? "false" : "true"}
 		>
-			<button type="button" role="menuitem" data-context-action="note" onClick={() => handleAction("note")}>
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M4.5 4.5h10.25L19.5 9.25V19.5H4.5Z" />
-					<path d="M14.75 4.5v4.75h4.75M8 14.5h4.5M8 17.5h6.5" />
-				</svg>
-				<span>Add note</span>
-			</button>
-			<button type="button" role="menuitem" data-context-action="replay" onClick={() => handleAction("replay")}>
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M19 8.5A7.5 7.5 0 1 0 19.15 15" />
-					<path d="M19 4.5v4h-4" />
-				</svg>
-				<span>Replay</span>
-			</button>
-			<button
-				type="button"
-				role="menuitem"
-				className="context-delete"
-				data-context-action="delete"
-				aria-label={`${deleteLabel} (keep data hidden)`}
-				onClick={() => handleAction("delete")}
-			>
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M5.5 7.5h13M9.5 7.5V5h5v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5.5M14 11v5.5" />
-				</svg>
-				<span>{deleteLabel}</span>
-			</button>
-			<button
-				type="button"
-				role="menuitem"
-				className={`byte-context-action ${target?.position === null ? "hidden" : ""}`.trim()}
-				data-context-action="section"
-				onClick={() => handleAction("section")}
-			>
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M5 4.5v15M19 4.5v15M5 8.5h5M14 8.5h5M5 15.5h5M14 15.5h5" />
-				</svg>
-				<span>Begin new section here</span>
-			</button>
+			{state?.kind === "section" ? (
+				SECTION_MOVE_ACTIONS.map(({ action, label }) => (
+					<button
+						key={action}
+						type="button"
+						role="menuitem"
+						className="section-context-action"
+						data-context-action={action}
+						data-section-action={action}
+						disabled={!state.availability[action]}
+						onClick={() => handleAction(action)}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M5 12h14M12 5v14" />
+						</svg>
+						<span>{label}</span>
+					</button>
+				))
+			) : (
+				<>
+					<button type="button" role="menuitem" data-context-action="note" onClick={() => handleAction("note")}>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M4.5 4.5h10.25L19.5 9.25V19.5H4.5Z" />
+							<path d="M14.75 4.5v4.75h4.75M8 14.5h4.5M8 17.5h6.5" />
+						</svg>
+						<span>Add note</span>
+					</button>
+					<button type="button" role="menuitem" data-context-action="replay" onClick={() => handleAction("replay")}>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M19 8.5A7.5 7.5 0 1 0 19.15 15" />
+							<path d="M19 4.5v4h-4" />
+						</svg>
+						<span>Replay</span>
+					</button>
+					<button
+						type="button"
+						role="menuitem"
+						className="context-delete"
+						data-context-action="delete"
+						aria-label={`${deleteLabel} (keep data hidden)`}
+						onClick={() => handleAction("delete")}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M5.5 7.5h13M9.5 7.5V5h5v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5.5M14 11v5.5" />
+						</svg>
+						<span>{deleteLabel}</span>
+					</button>
+					<button
+						type="button"
+						role="menuitem"
+						className={`byte-context-action ${target?.position === null ? "hidden" : ""}`.trim()}
+						data-context-action="section"
+						onClick={() => handleAction("section")}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M5 4.5v15M19 4.5v15M5 8.5h5M14 8.5h5M5 15.5h5M14 15.5h5" />
+						</svg>
+						<span>Begin new section here</span>
+					</button>
+				</>
+			)}
 		</div>
 	);
 }
@@ -516,13 +564,14 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 	useEffect(() => {
 		if (!menuState) return;
 		const closeOnOutsideClick = (event: MouseEvent) => {
-			if (!event.target || !document.getElementById("messageContextMenu")?.contains(event.target as Node)) {
+			const menu = document.getElementById("messageContextMenu") || document.getElementById("sectionContextMenu");
+			if (!event.target || !menu?.contains(event.target as Node)) {
 				closeMenu();
 			}
 		};
 		const closeOnOutsideContextMenu = (event: MouseEvent) => {
 			const target = event.target instanceof Element ? event.target : null;
-			if (!target?.closest("#messageContextMenu, #messageBody")) {
+			if (!target?.closest("#messageContextMenu, #sectionContextMenu, #messageBody")) {
 				closeMenu();
 			}
 		};
@@ -544,6 +593,22 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 
 	const openContextMenu = (event: ReactMouseEvent<HTMLTableSectionElement>) => {
 		const targetElement = event.target instanceof Element ? event.target : null;
+		const sectionRow = targetElement?.closest<HTMLTableRowElement>("tr[data-section-id]");
+		if (sectionRow) {
+			const sectionId = sectionRow.dataset.sectionId;
+			const entry = snapshot.entries.find(item => item.type === "section" && item.section.id === sectionId);
+			if (!sectionId || !entry || entry.type !== "section") return;
+			event.preventDefault();
+			setMenuState({
+				kind: "section",
+				sectionId,
+				availability: entry.section.moveAvailability,
+				clientX: event.clientX,
+				clientY: event.clientY,
+				origin: (targetElement?.closest("button") as HTMLElement | null) || sectionRow
+			});
+			return;
+		}
 		const row = targetElement?.closest<HTMLTableRowElement>("tr[data-message-id]");
 		if (!row) return;
 		const byteButton = targetElement?.closest<HTMLElement>("[data-byte-note]");
@@ -554,6 +619,7 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 		if (!messageId || (byteButton && !Number.isInteger(position))) return;
 		event.preventDefault();
 		setMenuState({
+			kind: "message",
 			target: { messageId, position },
 			clientX: event.clientX,
 			clientY: event.clientY,

@@ -22,7 +22,7 @@ function capture(values: number[] = []): Capture {
 	} as Capture;
 }
 
-test("selects section management controls without global framing settings", () => {
+test("selects section framing summary without global framing settings", () => {
 	assert.deepEqual(selectFramingToolbarSnapshot(undefined), EMPTY_FRAMING_TOOLBAR_SNAPSHOT);
 
 	const current = capture();
@@ -34,8 +34,7 @@ test("selects section management controls without global framing settings", () =
 	assert.deepEqual(selectFramingToolbarSnapshot(current), {
 		captureId: "capture-1",
 		disabled: false,
-		frameSizeLabel: "2 SECTIONS · INDEPENDENT LENGTHS",
-		sectionsButton: true
+		frameSizeLabel: "2 SECTIONS · INDEPENDENT LENGTHS"
 	});
 });
 

@@ -6,7 +6,6 @@ import { rebuildPreview, visibleByteEntries } from "../features/capture/capture-
 import { createCaptureController } from "../features/capture/capture-controller.ts";
 import { createDataTransferController } from "../features/data-transfer/data-transfer.ts";
 import { publishDialogCommand, registerDialogActions } from "../features/dialogs/dialog-bridge.ts";
-import { registerFramingToolbarActions } from "../features/capture/framing-toolbar-bridge.ts";
 import { registerMessageStreamActions } from "../features/message-stream/message-stream-bridge.ts";
 import { registerNotesActions } from "../features/notes/notes-bridge.ts";
 import { createBeforeUnloadHandler } from "./unload-lifecycle.ts";
@@ -122,13 +121,8 @@ export function initializeController(): ControllerLifecycle {
 		importFile: dataTransferController.importFile
 	});
 
-	registerFramingToolbarActions({
-		openSections: captureController.publishSectionsDialog
-	});
-
 	registerDialogActions({
 		saveContext: captureController.commitContextDraft,
-		saveSections: captureController.commitSectionsDraft,
 		saveAnnotation: captureController.commitAnnotationDraft,
 		deleteAnnotation: captureController.removeAnnotationDraft,
 		savePatternRemark: captureController.commitPatternRemarkDraft,
@@ -187,6 +181,7 @@ export function initializeController(): ControllerLifecycle {
 			runtime.showToast("Byte hidden; captured data was kept");
 		},
 		beginSection: captureController.startSectionAtByte,
+		moveSection: captureController.moveSection,
 		setSectionFrameSize: (sectionId, value) => captureController.setSectionFrameSize(sectionId, Number(value)),
 		setSectionCollapse: captureController.setSectionCollapse
 	});

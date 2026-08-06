@@ -4,21 +4,8 @@ import {
 	type FramingToolbarSnapshot
 } from "./framing-toolbar.ts";
 
-export type FramingToolbarActions = {
-	openSections: () => void;
-};
-
-const noopActions: FramingToolbarActions = {
-	openSections: () => {}
-};
-
-const framingToolbarStore = createExternalStore<FramingToolbarSnapshot, FramingToolbarActions>(
-	EMPTY_FRAMING_TOOLBAR_SNAPSHOT,
-	noopActions
-);
+const framingToolbarStore = createExternalStore<FramingToolbarSnapshot, undefined>(EMPTY_FRAMING_TOOLBAR_SNAPSHOT, undefined);
 
 export const getFramingToolbarSnapshot = framingToolbarStore.getSnapshot;
 export const subscribeToFramingToolbar = framingToolbarStore.subscribe;
 export const publishFramingToolbarSnapshot = framingToolbarStore.publish;
-export const registerFramingToolbarActions = framingToolbarStore.registerActions;
-export const getFramingToolbarActions = framingToolbarStore.getActions;

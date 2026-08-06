@@ -4,14 +4,12 @@ export type FramingToolbarSnapshot = {
 	captureId: string | null;
 	disabled: boolean;
 	frameSizeLabel: string;
-	sectionsButton: boolean;
 };
 
 export const EMPTY_FRAMING_TOOLBAR_SNAPSHOT: FramingToolbarSnapshot = {
 	captureId: null,
 	disabled: true,
-	frameSizeLabel: "—",
-	sectionsButton: false
+	frameSizeLabel: "—"
 };
 
 export function selectFramingToolbarSnapshot(
@@ -21,8 +19,7 @@ export function selectFramingToolbarSnapshot(
 	return {
 		captureId: capture.id || null,
 		disabled: false,
-		frameSizeLabel: selectFrameSizeLabel(capture),
-		sectionsButton: true
+		frameSizeLabel: selectFrameSizeLabel(capture)
 	};
 }
 

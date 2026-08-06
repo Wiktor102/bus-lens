@@ -156,8 +156,7 @@ function migrateLegacySections(
 	if (legacyPreviewMode !== "marker" && legacyPreviewMode !== "time") return [];
 
 	// Marker and time framing could produce variable-length messages. Preserve
-	// those existing boundaries by making each legacy message its own section;
-	// users can merge the boundaries later in the section editor if desired.
+	// those existing boundaries by making each legacy message its own section.
 	let fallbackStart = 0;
 	const sections: CaptureSection[] = [];
 	for (const message of capture.messages || []) {

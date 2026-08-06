@@ -18,7 +18,6 @@ import {
 } from "../features/capture/capture-header-bridge";
 import { normalizeCaptureDescription, normalizeCaptureTitle } from "../features/capture/capture-header";
 import {
-	getFramingToolbarActions,
 	getFramingToolbarSnapshot,
 	subscribeToFramingToolbar
 } from "../features/capture/framing-toolbar-bridge";
@@ -31,8 +30,7 @@ import {
 	AnnotationDialog,
 	ContextDialog,
 	ExportDialog,
-	PatternRemarkDialog,
-	SectionsDialog
+	PatternRemarkDialog
 } from "../features/dialogs/dialogs";
 import { getMessageStreamSnapshot, subscribeToMessageStream } from "../features/message-stream/message-stream-bridge";
 import { MessageStream } from "../features/message-stream/message-stream-view";
@@ -268,7 +266,6 @@ function Toolbar({ viewState, dispatchViewState, messageFilterRef, messageFilter
 		getFramingToolbarSnapshot
 	);
 	const notes = useSyncExternalStore(subscribeToNotes, getNotesSnapshot, getNotesSnapshot);
-	const actions = getFramingToolbarActions();
 
 	return (
 		<div className="toolbar">
@@ -294,18 +291,9 @@ function Toolbar({ viewState, dispatchViewState, messageFilterRef, messageFilter
 				>
 					Notes <span id="notesCount">{notes.count}</span>
 				</button>
-		</div>
-		<div className="toolbar-controls">
-			<button
-				id="editSectionsBtn"
-				className="text-btn framing-sections-btn"
-				type="button"
-				disabled={snapshot.disabled}
-				onClick={actions.openSections}
-			>
-				Edit sections
-			</button>
-			<label className="compact-select">
+			</div>
+			<div className="toolbar-controls">
+				<label className="compact-select">
 					Display
 					<select
 						id="displayMode"
@@ -1007,7 +995,6 @@ function App() {
 			</div>
 			<SendPanel open={sendPopupOpen} onOpenChange={handleSendPopupChange} />
 			<ContextDialog />
-			<SectionsDialog />
 			<AnnotationDialog />
 			<PatternRemarkDialog />
 			<ExportDialog />

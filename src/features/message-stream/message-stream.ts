@@ -21,6 +21,10 @@ import {
 	type TransitionFrame
 } from "../analysis/analysis.ts";
 import { collapseAdjacentRuns, countVisibleRowsByPatternOccurrence } from "../analysis/collapse-runs.ts";
+import {
+	getSectionMoveAvailability,
+	type SectionMoveAvailability
+} from "../capture/section-repositioning.ts";
 import type { DisplayMode, ViewStateSnapshot } from "../../shared/view-state.ts";
 
 export const VIRTUAL_ROW_HEIGHT = 41;
@@ -61,6 +65,7 @@ export type MessageStreamSection = {
 	start: number;
 	frameSize: number;
 	collapseRuns: boolean;
+	moveAvailability: SectionMoveAvailability;
 };
 
 export type MessageStreamPatterns = {
@@ -165,12 +170,14 @@ function copyMessage(message: CaptureMessage): CaptureMessage & { id: string } {
 	};
 }
 
-function copySection(section: CaptureSection, index: number): MessageStreamSection {
+function copySection(section: CaptureSection, index: number, capture: Capture): MessageStreamSection {
+	const id = String(section.id ?? `section-${index}`);
 	return {
-		id: String(section.id ?? `section-${index}`),
+		id,
 		start: Number(section.start || 0),
 		frameSize: Number(section.frameSize || 1),
-		collapseRuns: Boolean(section.collapseRuns)
+		collapseRuns: Boolean(section.collapseRuns),
+		moveAvailability: getSectionMoveAvailability(capture, id)
 	};
 }
 
@@ -178,7 +185,7 @@ function copySections(capture: Capture): MessageStreamSection[] {
 	const sourceSections = capture.frameSections?.length
 		? capture.frameSections
 		: [{ id: "section-0", start: 0, frameSize: capture.frameSize || 3, collapseRuns: false }];
-	return sourceSections.map(copySection);
+	return sourceSections.map((section, index) => copySection(section, index, capture));
 }
 
 function sectionIdForMessage(message: CaptureMessage, sections: MessageStreamSection[]): string | undefined {

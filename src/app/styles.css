@@ -728,6 +728,15 @@ p {
 	color: var(--acid);
 	outline: 0;
 }
+.message-context-menu button:disabled,
+.message-context-menu button:disabled:hover,
+.message-context-menu button:disabled:focus-visible {
+	border-color: transparent;
+	background: transparent;
+	color: var(--muted);
+	cursor: not-allowed;
+	opacity: 0.48;
+}
 .message-context-menu .context-delete {
 	color: var(--red);
 }
@@ -846,12 +855,6 @@ p {
 }
 .preview-mode-controls {
 	display: contents;
-}
-.framing-sections-btn {
-	border-right: 1px solid var(--line);
-	padding-right: 12px;
-	color: var(--acid);
-	font: 10px var(--mono);
 }
 .switch-label {
 	color: var(--muted);
@@ -1974,44 +1977,6 @@ tr:hover .row-action,
 	font-size: 12px;
 	line-height: 1.55;
 	margin: -4px 0 18px;
-}
-.section-rows {
-	display: grid;
-	gap: 8px;
-	margin-bottom: 12px;
-}
-.section-row {
-	display: grid;
-	grid-template-columns: 58px minmax(130px, 1fr) minmax(130px, 1fr) 32px;
-	gap: 9px;
-	align-items: end;
-	border: 1px solid var(--line);
-	background: #101410;
-	padding: 10px;
-}
-.section-row strong {
-	align-self: center;
-	color: var(--acid);
-	font: 10px var(--mono);
-}
-.section-row label {
-	color: var(--muted);
-	font: 9px var(--mono);
-}
-.section-row input {
-	display: block;
-	width: 100%;
-	margin-top: 5px;
-	background: #0b0e0c;
-	color: var(--ink);
-	border: 1px solid var(--line);
-	padding: 7px;
-	outline: 0;
-	font: 10px var(--mono);
-}
-.section-row button {
-	width: 30px;
-	height: 30px;
 }
 .section-divider td {
 	padding: 8px 12px;

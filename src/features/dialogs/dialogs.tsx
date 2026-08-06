@@ -2,19 +2,14 @@ import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type
 import { getDialogActions, getDialogSnapshot, subscribeToDialogs } from "./dialog-bridge";
 import {
 	appendContextParameter,
-	appendSectionDraft,
 	annotationTextIsValid,
 	createContextDraft,
-	createSectionsDraft,
 	normalizeAnnotationText,
 	normalizePatternRemarkText,
 	removeContextParameter,
-	removeSectionDraft,
 	updateContextParameter,
-	updateSectionDraft,
 	type ContextDialogDraft,
-	type ExportFormat,
-	type SectionDialogDraft
+	type ExportFormat
 } from "./dialog-model";
 
 function isCancelSubmit(event: FormEvent<HTMLFormElement>): boolean {
@@ -217,113 +212,6 @@ export function ContextDialog() {
 					</button>
 					<button id="saveContextBtn" className="btn btn-primary" value="default">
 						Save context
-					</button>
-				</div>
-			</form>
-		</dialog>
-	);
-}
-
-export function SectionsDialog() {
-	const command = useDialogCommand();
-	const sectionsCommand = command?.type === "sections" ? command : null;
-	const actions = getDialogActions();
-	const dialogRef = useRef<HTMLDialogElement>(null);
-	const [draft, setDraft] = useState<SectionDialogDraft[] | null>(null);
-
-	useEffect(() => {
-		const dialog = dialogRef.current;
-		if (!dialog) return;
-		if (!sectionsCommand) {
-			if (dialog.open) dialog.close();
-			setDraft(null);
-			return;
-		}
-		setDraft(createSectionsDraft(sectionsCommand.sections));
-		if (!dialog.open) dialog.showModal();
-	}, [sectionsCommand]);
-
-	const updateRow = (id: string, update: Partial<Pick<SectionDialogDraft, "start" | "frameSize" | "collapseRuns">>) =>
-		setDraft(current => (current ? updateSectionDraft(current, id, update) : current));
-
-	return (
-		<dialog id="sectionsDialog" className="modal sections-modal" ref={dialogRef} onClose={() => setDraft(null)}>
-			<form
-				id="sectionsForm"
-				method="dialog"
-				onSubmit={event => {
-					if (isCancelSubmit(event)) return;
-					event.preventDefault();
-					if (!sectionsCommand || !draft) return;
-					if (actions.saveSections({ captureId: sectionsCommand.captureId, rows: draft })) dialogRef.current?.close();
-				}}
-			>
-				<DialogHeading eyebrow="Sectioned framing" title="Frame-length sections" />
-				<p className="modal-copy">
-					Each section starts at a raw-byte position and applies its own frame length until the next section
-					begins.
-				</p>
-				<div id="sectionRows" className="section-rows">
-					{draft?.map(row => (
-						<div className="section-row" data-section-id={row.id} key={row.id}>
-							<strong>Section</strong>
-							<label>
-								Starts at raw byte
-								<input
-									data-section-start
-									type="number"
-									min="1"
-									max={Math.max(1, sectionsCommand?.streamLength || 1)}
-									value={row.start}
-									onChange={event => updateRow(row.id, { start: event.currentTarget.value })}
-								/>
-							</label>
-							<label>
-								Frame length
-								<input
-									data-section-size
-									type="number"
-									min="1"
-									max="1024"
-									value={row.frameSize}
-									onChange={event => updateRow(row.id, { frameSize: event.currentTarget.value })}
-								/>
-								bytes
-							</label>
-							<button
-								className="icon-btn"
-								type="button"
-								aria-label="Remove section"
-								onClick={() => {
-									const next = draft ? removeSectionDraft(draft, row.id) : null;
-									if (next) setDraft(next);
-									else actions.notify("A section is required to frame the capture");
-								}}
-							>
-								×
-							</button>
-						</div>
-					))}
-				</div>
-				<button
-					id="addSectionBtn"
-					className="text-btn"
-					type="button"
-					onClick={() => {
-						if (!draft || !sectionsCommand) return;
-						const next = appendSectionDraft(draft, sectionsCommand.streamLength, sectionsCommand.frameSize);
-						if (next) setDraft(next);
-						else actions.notify("Capture at least two raw bytes before adding a section");
-					}}
-				>
-					＋ Add section
-				</button>
-				<div className="modal-actions">
-					<button className="btn btn-secondary" value="cancel" formMethod="dialog" formNoValidate>
-						Cancel
-					</button>
-					<button className="btn btn-primary" value="default">
-						Save sections
 					</button>
 				</div>
 			</form>

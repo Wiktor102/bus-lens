@@ -48,8 +48,9 @@ Every byte is stored with its own receive timestamp before any framing is applie
 
 Every capture is sectioned. The first section starts at raw byte 1, and each
 section header has its own message length, so one capture can frame different
-parts of the stream independently. Use **Edit sections** to add or move section
-boundaries; changing a section length rebuilds that section's messages.
+parts of the stream independently. Open a section header's context menu to move
+its boundary by one byte or one framed message; changing a section length rebuilds
+that section's messages.
 
 Legacy captures that used the previous global framing settings are migrated to
 sections when loaded, while their raw byte stream remains preserved.

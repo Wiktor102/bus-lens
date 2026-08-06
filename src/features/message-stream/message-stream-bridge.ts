@@ -3,6 +3,7 @@ import {
 	EMPTY_MESSAGE_STREAM_SNAPSHOT,
 	type MessageStreamSnapshot
 } from "./message-stream.ts";
+import type { SectionMoveAction } from "../capture/section-repositioning.ts";
 
 export type MessageStreamTarget = {
 	messageId: string;
@@ -17,6 +18,7 @@ export type MessageStreamActions = {
 	hideMessage: (messageId: string) => void;
 	hideByte: (messageId: string, position: number) => void;
 	beginSection: (messageId: string, position: number) => void;
+	moveSection: (sectionId: string, action: SectionMoveAction) => void;
 	setSectionFrameSize: (sectionId: string, value: string) => void;
 	setSectionCollapse: (sectionId: string, collapseRuns: boolean) => void;
 };
@@ -29,6 +31,7 @@ const noopActions: MessageStreamActions = {
 	hideMessage: () => {},
 	hideByte: () => {},
 	beginSection: () => {},
+	moveSection: () => {},
 	setSectionFrameSize: () => {},
 	setSectionCollapse: () => {}
 };

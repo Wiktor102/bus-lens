@@ -1,8 +1,7 @@
 import {
 	signature,
 	visiblePositionForRawByte,
-	type Capture,
-	type CaptureSection
+	type Capture
 } from "../capture/capture-framing.ts";
 
 export type DialogFolderOption = {
@@ -54,45 +53,6 @@ export type ContextValues = {
 	baudRate: number;
 	inputFormat: "raw";
 };
-
-export type SectionDialogRow = {
-	id: string;
-	start: number;
-	frameSize: number;
-	collapseRuns: boolean;
-};
-
-export type SectionDialogDraft = {
-	id: string;
-	start: string;
-	frameSize: string;
-	collapseRuns: boolean;
-};
-
-export type SectionsDialogCommand = {
-	type: "sections";
-	requestId: number;
-	captureId: string;
-	streamLength: number;
-	frameSize: number;
-	sections: SectionDialogRow[];
-};
-
-export type SectionsSaveInput = {
-	captureId: string;
-	rows: SectionDialogDraft[];
-};
-
-export type SerializedSections = {
-	id: string;
-	start: number;
-	frameSize: number;
-	collapseRuns: boolean;
-};
-
-export type SectionDraftResult =
-	| { ok: true; sections: SerializedSections[] }
-	| { ok: false; error: "Each section must start at a different raw byte" };
 
 export type AnnotationType = "message" | "byte";
 
@@ -148,14 +108,12 @@ export type ExportDialogCommand = {
 
 export type DialogCommand =
 	| ContextDialogCommand
-	| SectionsDialogCommand
 	| AnnotationDialogCommand
 	| PatternRemarkDialogCommand
 	| ExportDialogCommand;
 
 export type DialogCommandInput =
 	| Omit<ContextDialogCommand, "requestId">
-	| Omit<SectionsDialogCommand, "requestId">
 	| Omit<AnnotationDialogCommand, "requestId">
 	| Omit<PatternRemarkDialogCommand, "requestId">
 	| Omit<ExportDialogCommand, "requestId">;
@@ -218,70 +176,6 @@ export function contextDraftToValues(draft: ContextDialogDraft): ContextValues {
 	};
 }
 
-export function createSectionsDraft(rows: SectionDialogRow[]): SectionDialogDraft[] {
-	return rows.map(row => ({
-		id: row.id,
-		start: String(row.start + 1),
-		frameSize: String(row.frameSize),
-		collapseRuns: row.collapseRuns
-	}));
-}
-
-export function appendSectionDraft(
-	rows: SectionDialogDraft[],
-	streamLength: number,
-	frameSize: number,
-	generateId = defaultDraftId
-): SectionDialogDraft[] | null {
-	if (streamLength < 2) return null;
-	const existingStarts = rows.map(row => Number(row.start) - 1);
-	const fallbackStart = Math.min(streamLength - 1, Math.max(...existingStarts, 0) + 1);
-	return [
-		...rows,
-		{
-			id: generateId(),
-			start: String(fallbackStart + 1),
-			frameSize: String(frameSize),
-			collapseRuns: false
-		}
-	];
-}
-
-export function updateSectionDraft(
-	rows: SectionDialogDraft[],
-	id: string,
-	update: Partial<Pick<SectionDialogDraft, "start" | "frameSize" | "collapseRuns">>
-): SectionDialogDraft[] {
-	return rows.map(row => (row.id === id ? { ...row, ...update } : row));
-}
-
-export function removeSectionDraft(
-	rows: SectionDialogDraft[],
-	id: string
-): SectionDialogDraft[] | null {
-	if (rows.length === 1) return null;
-	return rows.filter(row => row.id !== id);
-}
-
-export function serializeSectionDrafts(
-	rows: SectionDialogDraft[],
-	maxStart: number,
-	fallbackFrameSize: number
-): SectionDraftResult {
-	const sections = rows.map(row => ({
-		id: row.id || crypto.randomUUID(),
-		start: Math.max(0, Math.min(maxStart, Math.floor(Number(row.start) - 1 || 0))),
-		frameSize: Math.max(1, Math.min(1024, Math.floor(Number(row.frameSize) || fallbackFrameSize))),
-		collapseRuns: Boolean(row.collapseRuns)
-	}));
-	const starts = new Set<number>();
-	for (const section of sections) {
-		if (starts.has(section.start)) return { ok: false, error: "Each section must start at a different raw byte" };
-		starts.add(section.start);
-	}
-	return { ok: true, sections };
-}
-
 export function annotationTextIsValid(text: string): boolean {
 	return text.trim().length > 0;
 }
@@ -318,14 +212,5 @@ export function annotationTargetLabel(
 			: signature(message),
 		targetKey,
 		displayPosition
-	};
-}
-
-export function sectionRowFromModel(section: CaptureSection): SectionDialogRow {
-	return {
-		id: String(section.id || ""),
-		start: Number(section.start || 0),
-		frameSize: Number(section.frameSize || 1),
-		collapseRuns: Boolean(section.collapseRuns)
 	};
 }

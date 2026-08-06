@@ -8,13 +8,10 @@ import {
 	contextDraftToValues,
 	normalizeAnnotationText,
 	normalizePatternRemarkText,
-	sectionRowFromModel,
-	serializeSectionDrafts,
 	type AnnotationDeleteInput,
 	type AnnotationSaveInput,
 	type ContextSaveInput,
-	type PatternRemarkSaveInput,
-	type SectionsSaveInput
+	type PatternRemarkSaveInput
 } from "../dialogs/dialog-model.ts";
 import type { RawByteRecord } from "./capture-summary.ts";
 import {
@@ -27,6 +24,7 @@ import {
 	type CaptureSection,
 	type Capture
 } from "./capture-framing.ts";
+import { moveSection as moveSectionStart, type SectionMoveAction } from "./section-repositioning.ts";
 import { publishDialogCommand } from "../dialogs/dialog-bridge.ts";
 
 export type CaptureControllerDependencies = {
@@ -266,40 +264,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		});
 	}
 
-	function publishSectionsDialog() {
-		const c = capture();
-		if (!c) return;
-		normalizeSections(c);
-		dependencies.publishDialogCommand({
-			type: "sections",
-			captureId: String(c.id),
-			streamLength: c.byteStream.length,
-			frameSize: c.frameSections[0]?.frameSize || 3,
-			sections: c.frameSections.map(sectionRowFromModel)
-		});
-	}
-
-	function commitSectionsDraft(input: SectionsSaveInput) {
-		const c = state.captures.find(item => String(item.id) === String(input.captureId));
-		if (!c) return false;
-		const result = serializeSectionDrafts(
-			input.rows,
-			Math.max(0, c.byteStream.length - 1),
-			c.frameSections[0]?.frameSize || 3
-		);
-		if (!result.ok) {
-			dependencies.showToast(result.error);
-			return false;
-		}
-		c.frameSections = result.sections;
-		normalizeSections(c);
-		rebuildPreview(c);
-		dependencies.saveState();
-		dependencies.render();
-		dependencies.showToast("Section framing updated");
-		return true;
-	}
-
 	function startSectionAtByte(messageId: string, position: number) {
 		const c = capture();
 		if (!c) return;
@@ -340,6 +304,25 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		dependencies.saveState();
 		dependencies.render();
 		dependencies.showToast(`Section message length set to ${section.frameSize} bytes`);
+	}
+
+	function moveSection(sectionId: string, action: SectionMoveAction) {
+		const c = capture();
+		if (!c) return;
+		normalizeSections(c);
+		if (!moveSectionStart(c, sectionId, action)) return;
+		rebuildPreview(c);
+		dependencies.saveState({ immediate: true });
+		dependencies.render();
+		const label =
+			action === "byte-before"
+				? "one byte before"
+				: action === "byte-after"
+					? "one byte after"
+					: action === "message-before"
+						? "one message before"
+						: "one message after";
+		dependencies.showToast(`Section moved ${label}`);
 	}
 
 	function setSectionCollapse(sectionId: string, collapseRuns: boolean) {
@@ -484,9 +467,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		clearActiveCaptureMessages,
 		deleteActiveCapture,
 		publishContextDialog,
-		publishSectionsDialog,
-		commitSectionsDraft,
 		startSectionAtByte,
+		moveSection,
 		setSectionFrameSize,
 		setSectionCollapse,
 		commitContextDraft,
