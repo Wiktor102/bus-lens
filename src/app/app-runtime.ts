@@ -5,6 +5,7 @@ import { ArchiveClient } from "../persistence/archive-client.ts";
 
 export type WritableStateStorage = StateStorage & {
 	setItem: (key: string, value: string) => void;
+	removeItem: (key: string) => void;
 };
 
 export type AppRuntimeDependencies = {
@@ -37,7 +38,7 @@ export type AppRuntime = {
 function browserStorage(): WritableStateStorage | undefined {
 	try {
 		const storage = globalThis.localStorage;
-		return storage && typeof storage.setItem === "function" ? storage : undefined;
+		return storage && typeof storage.setItem === "function" && typeof storage.removeItem === "function" ? storage : undefined;
 	} catch {
 		return undefined;
 	}
@@ -117,13 +118,19 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 	if (client) void (async () => {
 		try {
 			await client.health();
-			if (legacyArchive) {
+			const stored = await client.load();
+			if (legacyArchive && !stored.captures.length) {
 				const report = await client.migrate(state);
+				// SQLite is now canonical. Removing the legacy payload makes this a one-time migration.
+				try { storage?.removeItem(STORAGE_KEY); } catch {}
 				databaseReady = true;
 				showToast(`Migrated ${report.captures} captures, ${report.rawBytes.toLocaleString()} bytes, ${report.notes} notes`);
 			} else {
-				const stored = await client.load();
 				if (stored.captures.length) { Object.assign(state, stored); activeId = stored.activeId || stored.captures[0]?.id; }
+				if (legacyArchive) {
+					// An existing SQLite archive means the one-time migration has already been superseded.
+					try { storage?.removeItem(STORAGE_KEY); } catch {}
+				}
 				databaseReady = true;
 			}
 		} catch (error) { reportPersistenceFailure(error); }
