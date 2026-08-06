@@ -1419,7 +1419,7 @@ tr:hover .row-action,
 	color: #b4bcb3;
 	height: 36px;
 }
-.message-table tr:hover td {
+.message-table tr:not(.marker-prompt-row):hover td {
 	background: #181d19;
 }
 .message-table tr.sequence-noted td:first-child {
