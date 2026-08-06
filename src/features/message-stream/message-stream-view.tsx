@@ -346,6 +346,7 @@ function MessageEntry({
 						};
 						return (
 							<button
+								key={`${message.id}:${rawPosition}`}
 								className={byteClasses}
 								style={byteStyle}
 								data-byte-note={`${message.id}:${rawPosition}`}

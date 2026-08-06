@@ -115,8 +115,8 @@ function CaptureItem({
 					<span>{capture.messageCount} msg</span>
 				</small>
 				<span className="capture-tags">
-					{capture.params.slice(0, 2).map(parameter => (
-						<i key={`${parameter.key}:${parameter.value}`}>
+					{capture.params.slice(0, 2).map((parameter, parameterIndex) => (
+						<i key={`${parameter.key}:${parameter.value}:${parameterIndex}`}>
 							{parameter.key}: {parameter.value}
 						</i>
 					))}

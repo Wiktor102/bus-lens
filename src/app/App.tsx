@@ -173,7 +173,7 @@ function CaptureHeader() {
 					<div id="captureMeta" className="capture-meta">
 						{snapshot.metadata.map((item, index) =>
 							item.kind === "message" ? (
-								<span key={`message:${item.value}`} className="meta-chip">
+								<span key={`message:${item.value}:${index}`} className="meta-chip">
 									{item.value}
 								</span>
 							) : (
