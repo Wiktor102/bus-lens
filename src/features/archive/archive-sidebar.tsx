@@ -287,6 +287,11 @@ function CaptureContextMenu({
 		...snapshot.folders.filter(folder => folder.id === currentFolderId),
 		...snapshot.folders.filter(folder => folder.id !== currentFolderId)
 	];
+	const moveDestinations = [
+		...(currentFolderId === null ? [{ id: null, name: "Unfiled" }] : []),
+		...orderedFolders.map(folder => ({ id: folder.id, name: folder.name })),
+		...(currentFolderId !== null ? [{ id: null, name: "Unfiled" }] : [])
+	];
 
 	useEffect(() => {
 		setMoveOpen(false);
@@ -360,29 +365,18 @@ function CaptureContextMenu({
 			</button>
 			{moveOpen ? (
 				<div className="capture-context-submenu" role="menu" aria-label="Move capture to folder">
-					<button
-						type="button"
-						role="menuitem"
-						data-context-action="move-to"
-						data-folder-option="unfiled"
-						disabled={currentFolderId === null}
-						onClick={() => handleMove(null)}
-					>
-						<span>Unfiled</span>
-						{currentFolderId === null ? <span aria-hidden="true">✓</span> : null}
-					</button>
-					{orderedFolders.map(folder => (
+					{moveDestinations.map(destination => (
 						<button
-							key={folder.id}
+							key={destination.id || "unfiled"}
 							type="button"
 							role="menuitem"
 							data-context-action="move-to"
-							data-folder-option={folder.id}
-							disabled={currentFolderId === folder.id}
-							onClick={() => handleMove(folder.id)}
+							data-folder-option={destination.id || "unfiled"}
+							disabled={currentFolderId === destination.id}
+							onClick={() => handleMove(destination.id)}
 						>
-							<span>{folder.name}</span>
-							{currentFolderId === folder.id ? <span aria-hidden="true">✓</span> : null}
+							<span>{destination.name}</span>
+							{currentFolderId === destination.id ? <span aria-hidden="true">✓</span> : null}
 						</button>
 					))}
 				</div>
