@@ -2001,11 +2001,11 @@ tr:hover .row-action,
 	padding: 8px 12px;
 }
 .section-header-content {
-	display: flex;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
 	width: 100%;
 	min-height: 29px;
 	align-items: center;
-	justify-content: space-between;
 	gap: 16px;
 }
 
@@ -2048,6 +2048,8 @@ tr:hover .row-action,
 }
 .section-header-controls {
 	display: flex;
+	grid-column: 2;
+	min-width: 0;
 	align-items: center;
 	justify-content: flex-end;
 	flex-wrap: wrap;
@@ -2090,7 +2092,9 @@ tr:hover .row-action,
 	text-transform: uppercase;
 }
 .section-empty-state {
-	flex: 1 0 100%;
+	grid-column: 1 / -1;
+	width: 100%;
+	box-sizing: border-box;
 	display: grid;
 	gap: 3px;
 	margin-top: 2px;
