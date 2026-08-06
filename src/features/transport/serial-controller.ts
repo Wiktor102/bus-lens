@@ -14,6 +14,10 @@ export type SerialPortLike = {
 	close: () => Promise<void>;
 };
 
+export type DisconnectOptions = {
+	persist?: boolean;
+};
+
 export type SerialProvider = {
 	requestPort: () => Promise<SerialPortLike>;
 };
@@ -200,11 +204,11 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		}
 	}
 
-	async function disconnect() {
+	async function disconnect({ persist = true }: DisconnectOptions = {}) {
 		flushLiveBytes();
 		recording = false;
 		recordingSessionId = null;
-		dependencies.saveState({ immediate: true });
+		if (persist) dependencies.saveState({ immediate: true });
 		readAbort = true;
 		dependencies.stopSendQueue();
 		try {

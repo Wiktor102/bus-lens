@@ -24,6 +24,7 @@ export type AppRuntime = {
 	getActiveId: () => string | null | undefined;
 	setActiveId: (captureId: string | null | undefined) => void;
 	persistState: () => void;
+	beginUnload: () => void;
 	saveState: (options?: SaveStateOptions) => void;
 	showToast: (message: string) => void;
 	saveCapture: (captureId: string) => void;
@@ -50,6 +51,7 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 	let databaseReady = false;
 	let toastTimer: ReturnType<typeof setTimeout> | null = null;
 	let stateSaveTimer: ReturnType<typeof setTimeout> | null = null;
+	let unloading = false;
 	const showToast = (message: string): void => {
 		if (toastTimer) clearTimeout(toastTimer);
 		publishToastSnapshot({ message, visible: true });
@@ -64,29 +66,31 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 	let activeId: string | null | undefined = state.activeId || state.captures[0]?.id;
 
 	function reportPersistenceFailure(error: unknown): void {
+		if (unloading) return;
 		console.error("Bus Lens persistence failed", error);
 		showToast("Archive service unavailable — legacy archive is read-only. Export JSON to recover it.");
 	}
 
 	function saveCapture(captureId: string): void {
 		const capture = state.captures.find(item => item.id === captureId);
-		if (!databaseReady || !capture || !client) return;
+		if (unloading || !databaseReady || !capture || !client) return;
 		void client.saveCapture(capture).catch(reportPersistenceFailure);
 	}
-	function saveArchiveIndex(): void { if (databaseReady && client) void client.saveArchiveIndex(state, activeId).catch(reportPersistenceFailure); }
-	function saveFolder(folderId: string): void { const folder = state.folders.find(item => item.id === folderId); if (databaseReady && folder && client) void client.saveFolder(folder).catch(reportPersistenceFailure); }
-	function saveSendState(): void { if (databaseReady && client) void client.saveSendState(state).catch(reportPersistenceFailure); }
-	function saveSettings(): void { if (databaseReady && client) void client.saveSettings(state.sendSettings).catch(reportPersistenceFailure); }
+	function saveArchiveIndex(): void { if (!unloading && databaseReady && client) void client.saveArchiveIndex(state, activeId).catch(reportPersistenceFailure); }
+	function saveFolder(folderId: string): void { const folder = state.folders.find(item => item.id === folderId); if (!unloading && databaseReady && folder && client) void client.saveFolder(folder).catch(reportPersistenceFailure); }
+	function saveSendState(): void { if (!unloading && databaseReady && client) void client.saveSendState(state).catch(reportPersistenceFailure); }
+	function saveSettings(): void { if (!unloading && databaseReady && client) void client.saveSettings(state.sendSettings).catch(reportPersistenceFailure); }
 
 	function persistState(): void {
 		state.activeId = activeId;
-		if (!databaseReady) return;
+		if (unloading || !databaseReady) return;
 		state.captures.forEach(capture => saveCapture(String(capture.id)));
 		state.folders.forEach(folder => saveFolder(folder.id));
 		saveArchiveIndex(); saveSendState(); saveSettings();
 	}
 
 	function saveState({ immediate = false }: SaveStateOptions = {}): void {
+		if (unloading) return;
 		if (immediate) {
 			if (stateSaveTimer) clearTimeout(stateSaveTimer);
 			stateSaveTimer = null;
@@ -102,6 +106,12 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 
 	function capture(): Capture | undefined {
 		return state.captures.find(item => item.id === activeId) || state.captures[0];
+	}
+
+	function beginUnload(): void {
+		unloading = true;
+		if (stateSaveTimer) clearTimeout(stateSaveTimer);
+		stateSaveTimer = null;
 	}
 
 	if (client) void (async () => {
@@ -127,6 +137,7 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 			activeId = captureId;
 		},
 		persistState,
+		beginUnload,
 		saveState,
 		saveCapture,
 		saveArchiveIndex,

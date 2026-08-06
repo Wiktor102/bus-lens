@@ -197,8 +197,8 @@ export function initializeController(): ControllerLifecycle {
 
 	const lifecycle: ControllerLifecycle = {
 		beforeUnload: createBeforeUnloadHandler({
+			beginUnload: runtime.beginUnload,
 			flushLiveBytes: transport.flushLiveBytes,
-			persistState: runtime.persistState,
 			getPort: transport.getPort,
 			disconnect: transport.disconnect
 		})

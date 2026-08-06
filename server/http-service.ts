@@ -173,6 +173,9 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			if (id && request.method === "DELETE") return send(response, entityDelete(repository, entity, id) ? 204 : 404, {});
 			return send(response, 405, { error: "Method not allowed" });
 		} catch (error) {
+			// A browser may cancel an in-flight request while its page is closing.
+			// There is no response to send and this is not a service failure.
+			if (request.aborted || response.destroyed) return;
 			if (error instanceof RepositoryConflictError) return send(response, 409, { error: error.message, code: error.code });
 			if (error instanceof RepositoryValidationError || error instanceof SyntaxError) return send(response, 400, { error: error.message });
 			console.error("Archive service request failed", error);
