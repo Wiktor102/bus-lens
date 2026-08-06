@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deriveMessageStreamSnapshot } from "../src/features/message-stream/message-stream.ts";
+import {
+	deriveMessageStreamSnapshot,
+	getSectionEmptyState
+} from "../src/features/message-stream/message-stream.ts";
 import { EMPTY_VIEW_STATE_SNAPSHOT } from "../src/shared/view-state.ts";
 import { normalizeCapture, rebuildPreview, type Capture } from "../src/features/capture/capture-framing.ts";
 
@@ -125,4 +128,21 @@ test("keeps a pending marker section header visible while it has no messages", (
 	const snapshot = deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT);
 	assert.equal(snapshot.matchingRows.length, 0);
 	assert.deepEqual(snapshot.entries.map(entry => entry.type === "section" && entry.section.id), ["pending"]);
+	const section = snapshot.entries[0];
+	assert.equal(section?.type, "section");
+	assert.deepEqual(section?.emptyState, getSectionEmptyState({ framingMode: "marker", frameMarker: "" }));
+});
+
+test("describes idle-gap framing in the initial empty state", () => {
+	const current = {
+		id: "time-gap",
+		frameSize: 3,
+		byteStream: [],
+		messages: [],
+		notes: [],
+		frameSections: [{ id: "pending", start: 0, framingMode: "time", frameTimeGap: 5 }]
+	} as Capture;
+
+	const snapshot = deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT);
+	assert.deepEqual(snapshot.emptyState, getSectionEmptyState({ framingMode: "time", frameMarker: "" }));
 });

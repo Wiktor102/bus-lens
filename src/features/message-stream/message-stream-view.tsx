@@ -115,12 +115,15 @@ function SectionEntry({
 	virtualItem: VirtualItem;
 	rowRef: (element: HTMLTableRowElement | null) => void;
 }) {
-	const { section, sectionNumber } = entry;
+	const { section, sectionNumber, emptyState } = entry;
 	const actions = getMessageStreamActions();
 	const [markerDraft, setMarkerDraft] = useState(section.frameMarker);
 	useEffect(() => setMarkerDraft(section.frameMarker), [section.id, section.frameMarker]);
 	const sectionLabel = String(sectionNumber).padStart(2, "0");
 	const toggleLabel = `${section.collapsed ? "Expand" : "Collapse"} section ${sectionLabel} messages`;
+	const markerInputId = `section-marker-${section.id}`;
+	const timeGapInputId = `section-time-gap-${section.id}`;
+	const emptyStateId = `section-framing-status-${section.id}`;
 	return (
 		<tr
 			ref={rowRef}
@@ -182,16 +185,25 @@ function SectionEntry({
 								<label className="section-frame-control section-marker-control">
 									Marker
 									<input
+										id={markerInputId}
+										aria-label={`Section ${sectionLabel} marker byte or pattern`}
+										aria-describedby={emptyState ? emptyStateId : undefined}
 										data-section-marker={section.id}
-										placeholder="AA 55"
+										placeholder="e.g. AA 55"
 										spellCheck={false}
 										value={markerDraft}
 										onChange={event => setMarkerDraft(event.currentTarget.value)}
 										onBlur={event => actions.setSectionFrameMarker(section.id, event.currentTarget.value)}
+										onKeyDown={event => {
+											if (event.key !== "Enter") return;
+											event.preventDefault();
+											actions.setSectionFrameMarker(section.id, event.currentTarget.value);
+										}}
 									/>
 								</label>
 								<label className="section-frame-control">
 									<select
+										aria-label={`Section ${sectionLabel} marker position`}
 										data-section-marker-position={section.id}
 										value={section.markerPosition}
 										onChange={event => actions.setSectionMarkerPosition(section.id, event.currentTarget.value)}
@@ -206,12 +218,20 @@ function SectionEntry({
 							<label className="section-frame-control">
 								Idle gap ≥{" "}
 								<input
+									id={timeGapInputId}
+									aria-label={`Section ${sectionLabel} idle gap in milliseconds`}
+									aria-describedby={emptyState ? emptyStateId : undefined}
 									data-section-time-gap={section.id}
 									type="number"
 									min="0.01"
 									step="0.1"
 									value={section.frameTimeGap}
 									onChange={event => actions.setSectionFrameTimeGap(section.id, event.currentTarget.value)}
+									onKeyDown={event => {
+										if (event.key !== "Enter") return;
+										event.preventDefault();
+										actions.setSectionFrameTimeGap(section.id, event.currentTarget.value);
+									}}
 								/>{" "}ms
 							</label>
 						) : null}
@@ -225,6 +245,12 @@ function SectionEntry({
 							/>
 							<span className="switch" />
 						</label>
+						{emptyState ? (
+							<div className="section-empty-state" id={emptyStateId} role="status" aria-live="polite">
+								<strong>{emptyState.title}</strong>
+								<span>{emptyState.description}</span>
+							</div>
+						) : null}
 					</div>
 				</div>
 			</td>

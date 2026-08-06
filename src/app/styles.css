@@ -2086,8 +2086,28 @@ tr:hover .row-action,
 	box-shadow: 0 0 0 2px color-mix(in srgb, var(--acid) 16%, transparent);
 }
 .section-marker-control input {
-	width: 82px;
+	width: 100px;
 	text-transform: uppercase;
+}
+.section-empty-state {
+	flex: 1 0 100%;
+	display: grid;
+	gap: 3px;
+	margin-top: 2px;
+	padding: 8px 10px;
+	border: 1px dashed color-mix(in srgb, var(--acid) 34%, var(--line));
+	background: color-mix(in srgb, var(--acid) 5%, transparent);
+	color: var(--muted);
+	font: 10px/1.4 var(--mono);
+	text-transform: none;
+	letter-spacing: 0;
+}
+.section-empty-state strong {
+	color: var(--ink);
+	font-weight: 600;
+}
+.section-empty-state span {
+	color: var(--muted);
 }
 .section-header-content input:focus {
 	border-color: var(--acid);
