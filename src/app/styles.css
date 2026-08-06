@@ -2277,7 +2277,7 @@ tr:hover .row-action,
 .toast {
 	position: fixed;
 	right: 22px;
-	bottom: 22px;
+	bottom: 68px;
 	background: var(--acid);
 	color: #151a0d;
 	padding: 11px 15px;
@@ -2294,6 +2294,7 @@ tr:hover .row-action,
 .toast.send-popup-open {
 	left: 22px;
 	right: auto;
+	bottom: 22px;
 }
 
 @media (max-width: 900px) {
