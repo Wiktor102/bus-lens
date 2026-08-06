@@ -49,6 +49,7 @@ type MenuState = MenuPosition &
 				kind: "section";
 				sectionId: string;
 				availability: SectionMoveAvailability;
+				canDelete: boolean;
 			}
 	);
 
@@ -586,6 +587,11 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 	const handleAction = (action: string) => {
 		if (!state) return;
 		if (state.kind === "section") {
+			if (action === "delete-section") {
+				onClose();
+				actions.deleteSection(state.sectionId);
+				return;
+			}
 			const sectionAction = SECTION_MOVE_ACTIONS.find(item => item.action === action)?.action;
 			if (!sectionAction || !state.availability[sectionAction]) return;
 			onClose();
@@ -618,21 +624,36 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 			aria-hidden={state ? "false" : "true"}
 		>
 			{state?.kind === "section" ? (
-				SECTION_MOVE_ACTIONS.map(({ action, label }) => (
+				<>
+					{SECTION_MOVE_ACTIONS.map(({ action, label }) => (
+						<button
+							key={action}
+							type="button"
+							role="menuitem"
+							className="section-context-action"
+							data-context-action={action}
+							data-section-action={action}
+							disabled={!state.availability[action]}
+							onClick={() => handleAction(action)}
+						>
+							<SectionMoveIcon action={action} />
+							<span>{label}</span>
+						</button>
+					))}
 					<button
-						key={action}
 						type="button"
 						role="menuitem"
-						className="section-context-action"
-						data-context-action={action}
-						data-section-action={action}
-						disabled={!state.availability[action]}
-						onClick={() => handleAction(action)}
+						className="context-delete section-context-action"
+						data-context-action="delete-section"
+						disabled={!state.canDelete}
+						onClick={() => handleAction("delete-section")}
 					>
-						<SectionMoveIcon action={action} />
-						<span>{label}</span>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M5.5 7.5h13M9.5 7.5V5h5v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5.5M14 11v5.5" />
+						</svg>
+						<span>Delete section</span>
 					</button>
-				))
+				</>
 			) : (
 				<>
 					<button type="button" role="menuitem" data-context-action="note" onClick={() => handleAction("note")}>
@@ -749,6 +770,7 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 				kind: "section",
 				sectionId,
 				availability: entry.section.moveAvailability,
+				canDelete: entry.section.start > 0,
 				clientX: event.clientX,
 				clientY: event.clientY,
 				origin: (targetElement?.closest("button") as HTMLElement | null) || sectionRow

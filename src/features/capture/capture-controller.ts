@@ -362,6 +362,19 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		dependencies.showToast(`Section moved ${label}`);
 	}
 
+	function deleteSection(sectionId: string) {
+		const c = capture();
+		if (!c) return;
+		normalizeSections(c);
+		const index = c.frameSections.findIndex(section => section.id === sectionId);
+		if (index <= 0) return;
+		c.frameSections.splice(index, 1);
+		rebuildPreview(c);
+		dependencies.saveState({ immediate: true });
+		dependencies.render();
+		dependencies.showToast("Section deleted; its bytes were merged into the preceding section");
+	}
+
 	function setSectionCollapse(sectionId: string, collapseRuns: boolean) {
 		const c = capture();
 		const section = c?.frameSections.find(item => item.id === sectionId);
@@ -515,6 +528,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		publishContextDialog,
 		startSectionAtByte,
 		moveSection,
+		deleteSection,
 		setSectionFraming,
 		setSectionFrameSize,
 		setSectionFramingMode,
