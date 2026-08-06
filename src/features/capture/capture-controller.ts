@@ -219,6 +219,17 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		dependencies.render();
 	}
 
+	function deleteArchiveCapture(captureId: string) {
+		const item = state.captures.find(captureItem => captureItem.id === captureId);
+		if (!item || !dependencies.confirm(`Delete “${item.name}”?`)) return;
+		const deletingActiveCapture = dependencies.getActiveId() === captureId;
+		if (deletingActiveCapture && dependencies.transport.isRecording()) dependencies.transport.stopRecording();
+		state.captures = state.captures.filter(captureItem => captureItem.id !== captureId);
+		if (deletingActiveCapture) dependencies.setActiveId(state.captures[0]?.id || null);
+		dependencies.saveState();
+		dependencies.render();
+	}
+
 	function clearActiveCaptureMessages() {
 		const c = capture();
 		if (!c) return;
@@ -233,13 +244,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	}
 
 	function deleteActiveCapture() {
-		const c = capture();
-		if (!c || !dependencies.confirm(`Delete “${c.name}”?`)) return;
-		if (dependencies.transport.isRecording()) dependencies.transport.stopRecording();
-		state.captures = state.captures.filter(item => item.id !== dependencies.getActiveId());
-		dependencies.setActiveId(state.captures[0]?.id || null);
-		dependencies.saveState();
-		dependencies.render();
+		const activeId = dependencies.getActiveId();
+		if (activeId) deleteArchiveCapture(activeId);
 	}
 
 	function publishContextDialog(isNew = false) {
@@ -513,6 +519,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		selectArchiveCapture,
 		toggleArchiveFolder,
 		moveArchiveCapture,
+		deleteArchiveCapture,
 		saveFolder,
 		deleteFolder,
 		addSequenceNote,
