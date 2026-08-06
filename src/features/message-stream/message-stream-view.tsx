@@ -134,27 +134,28 @@ function SectionEntry({
 		>
 			<td className="section-header-cell" colSpan={7}>
 				<div className="section-header-content">
-					<div className="section-header-title">
-						<button
-							className={`section-toggle ${section.collapsed ? "collapsed" : ""}`.trim()}
-							data-section-toggle={section.id}
-							type="button"
-							aria-expanded={!section.collapsed}
-							aria-label={toggleLabel}
-							title={toggleLabel}
-							onClick={event => {
-								event.stopPropagation();
-								actions.setSectionCollapsed(section.id, !section.collapsed);
-							}}
-						>
-							<svg viewBox="0 0 24 24" aria-hidden="true">
-								<path d="m9 6 6 6-6 6" />
-							</svg>
-						</button>
-						<span>Section {sectionNumber} · raw byte {section.start + 1}</span>
-					</div>
-					<div className="section-header-controls">
-						<label className="section-frame-control">
+					<div className="section-header-topline">
+						<div className="section-header-title">
+							<button
+								className={`section-toggle ${section.collapsed ? "collapsed" : ""}`.trim()}
+								data-section-toggle={section.id}
+								type="button"
+								aria-expanded={!section.collapsed}
+								aria-label={toggleLabel}
+								title={toggleLabel}
+								onClick={event => {
+									event.stopPropagation();
+									actions.setSectionCollapsed(section.id, !section.collapsed);
+								}}
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<path d="m9 6 6 6-6 6" />
+								</svg>
+							</button>
+							<span>Section {sectionNumber} · raw byte {section.start + 1}</span>
+						</div>
+						<div className="section-header-controls">
+							<label className="section-frame-control">
 							Frame by{" "}
 							<select
 								data-section-framing-mode={section.id}
@@ -243,8 +244,9 @@ function SectionEntry({
 								checked={section.collapseRuns}
 								onChange={event => actions.setSectionCollapse(section.id, event.currentTarget.checked)}
 							/>
-							<span className="switch" />
-						</label>
+								<span className="switch" />
+							</label>
+						</div>
 					</div>
 					{emptyState ? (
 						<div className="section-empty-state" id={emptyStateId} role="status" aria-live="polite">
