@@ -122,7 +122,7 @@ test("disables movement at capture and neighboring section boundaries", () => {
 	});
 });
 
-test("new sections inherit the preceding section's framing settings", () => {
+test("new sections default to length framing while retaining useful preceding settings", () => {
 	const current = {
 		id: "capture-inherit",
 		frameSize: 3,
@@ -184,7 +184,7 @@ test("new sections inherit the preceding section's framing settings", () => {
 		},
 		{
 			id: current.frameSections?.[1]?.id,
-			framingMode: "marker",
+			framingMode: "length",
 			frameSize: 7,
 			frameMarker: "AA",
 			markerPosition: "end",

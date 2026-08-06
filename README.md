@@ -52,7 +52,7 @@ frame different parts of the stream independently. Sections support fixed
 length, marker (marker starts or ends a message), and idle time-gap framing.
 Open a section header's context menu to move its boundary by one byte or one
 framed message; changing a section's framing settings rebuilds only that
-section's messages. New sections inherit the preceding section's framing
+section's messages. New sections default to length framing and retain the preceding section's other framing
 settings.
 
 Legacy captures that used the previous global framing settings are migrated to

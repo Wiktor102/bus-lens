@@ -287,7 +287,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		c.frameSections.push({
 			id: crypto.randomUUID(),
 			start,
-			framingMode: inherited?.framingMode || "length",
+			framingMode: "length",
 			frameSize: inherited?.frameSize || 3,
 			frameMarker: inherited?.frameMarker || "",
 			markerPosition: inherited?.markerPosition || "start",
