@@ -2000,6 +2000,48 @@ tr:hover .row-action,
 	align-items: center;
 	padding: 8px 12px;
 }
+.message-table .marker-prompt-row td {
+	grid-column: 1 / -1;
+	min-width: 0;
+	height: 180px;
+	padding: 0;
+	border-bottom: 1px solid var(--line-soft);
+	background:
+		radial-gradient(circle at 50% 0, color-mix(in srgb, var(--acid) 9%, transparent), transparent 52%),
+		var(--panel);
+}
+.marker-prompt {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 20px;
+	min-height: 180px;
+	padding: 24px;
+	text-align: left;
+}
+.marker-prompt-glyph {
+	padding: 10px 12px;
+	border: 1px solid var(--acid-dim);
+	box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--acid) 5%, transparent);
+	color: var(--acid);
+	font: 15px var(--mono);
+	letter-spacing: 0.12em;
+}
+.marker-prompt h2 {
+	margin: 0 0 7px;
+	color: var(--ink);
+	font-size: 14px;
+}
+.marker-prompt p {
+	max-width: 480px;
+	margin: 0;
+	color: var(--muted);
+	font: 10px/1.55 var(--mono);
+}
+.marker-prompt code {
+	color: var(--acid);
+	font: inherit;
+}
 .section-header-content {
 	display: flex;
 	width: 100%;

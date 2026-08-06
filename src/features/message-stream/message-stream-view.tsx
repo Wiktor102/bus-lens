@@ -54,6 +54,7 @@ type MenuState = MenuPosition &
 
 const VIRTUAL_ROW_HEIGHT = 41;
 const VIRTUAL_SECTION_HEIGHT = 48;
+const VIRTUAL_MARKER_PROMPT_HEIGHT = 180;
 const VIRTUAL_OVERSCAN = 8;
 
 function virtualizerOptions(
@@ -66,7 +67,11 @@ function virtualizerOptions(
 		count: snapshot.entries.length,
 		getScrollElement: () => scrollRef.current,
 		estimateSize: (index: number) =>
-			snapshotRef.current.entries[index]?.type === "section" ? VIRTUAL_SECTION_HEIGHT : VIRTUAL_ROW_HEIGHT,
+			snapshotRef.current.entries[index]?.type === "section"
+				? VIRTUAL_SECTION_HEIGHT
+				: snapshotRef.current.entries[index]?.type === "marker-prompt"
+					? VIRTUAL_MARKER_PROMPT_HEIGHT
+					: VIRTUAL_ROW_HEIGHT,
 		getItemKey: (index: number) => snapshotRef.current.entries[index]?.key ?? index,
 		overscan: VIRTUAL_OVERSCAN,
 		scrollToFn: elementScroll,
@@ -188,6 +193,12 @@ function SectionEntry({
 										value={markerDraft}
 										onChange={event => setMarkerDraft(event.currentTarget.value)}
 										onBlur={event => actions.setSectionFrameMarker(section.id, event.currentTarget.value)}
+										onKeyDown={event => {
+											if (event.key !== "Enter") return;
+											event.preventDefault();
+											actions.setSectionFrameMarker(section.id, event.currentTarget.value);
+											event.currentTarget.blur();
+										}}
 									/>
 								</label>
 								<label className="section-frame-control">
@@ -212,6 +223,12 @@ function SectionEntry({
 									step="0.1"
 									value={section.frameTimeGap}
 									onChange={event => actions.setSectionFrameTimeGap(section.id, event.currentTarget.value)}
+									onKeyDown={event => {
+											if (event.key !== "Enter") return;
+											event.preventDefault();
+											actions.setSectionFrameTimeGap(section.id, event.currentTarget.value);
+											event.currentTarget.blur();
+										}}
 								/>{" "}ms
 							</label>
 						) : null}
@@ -225,6 +242,38 @@ function SectionEntry({
 							/>
 							<span className="switch" />
 						</label>
+					</div>
+				</div>
+			</td>
+		</tr>
+	);
+}
+
+function MarkerPromptEntry({
+	entry,
+	virtualItem,
+	rowRef
+}: {
+	entry: Extract<MessageStreamEntry, { type: "marker-prompt" }>;
+	virtualItem: VirtualItem;
+	rowRef: (element: HTMLTableRowElement | null) => void;
+}) {
+	return (
+		<tr
+			ref={rowRef}
+			className="marker-prompt-row"
+			data-index={virtualItem.index}
+			data-section-marker-prompt={entry.section.id}
+			style={{ transform: `translateY(${virtualItem.start}px)` }}
+		>
+			<td colSpan={7}>
+				<div className="marker-prompt">
+					<div className="marker-prompt-glyph" aria-hidden="true">AA 55</div>
+					<div>
+						<h2>Enter a marker byte sequence</h2>
+						<p>
+							Messages are paused until this section has a marker. Enter hexadecimal bytes above, for example <code>AA 55</code>, then press Enter.
+						</p>
 					</div>
 				</div>
 			</td>
@@ -771,6 +820,8 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 						};
 						return entry.type === "section" ? (
 							<SectionEntry key={entry.key} entry={entry} virtualItem={virtualItem} rowRef={ref} />
+						) : entry.type === "marker-prompt" ? (
+							<MarkerPromptEntry key={entry.key} entry={entry} virtualItem={virtualItem} rowRef={ref} />
 						) : (
 							<MessageEntry
 								key={entry.key}

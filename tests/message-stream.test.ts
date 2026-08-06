@@ -111,7 +111,7 @@ test("copies per-section framing settings into the section snapshot", () => {
 	);
 });
 
-test("keeps a pending marker section header visible while it has no messages", () => {
+test("keeps a pending marker section header and marker prompt visible while it has no messages", () => {
 	const current = sectionedCapture();
 	current.frameSections = [{
 		id: "pending",
@@ -124,5 +124,8 @@ test("keeps a pending marker section header visible while it has no messages", (
 
 	const snapshot = deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT);
 	assert.equal(snapshot.matchingRows.length, 0);
-	assert.deepEqual(snapshot.entries.map(entry => entry.type === "section" && entry.section.id), ["pending"]);
+	assert.deepEqual(
+		snapshot.entries.map(entry => entry.type === "section" ? entry.section.id : entry.type),
+		["pending", "marker-prompt"]
+	);
 });

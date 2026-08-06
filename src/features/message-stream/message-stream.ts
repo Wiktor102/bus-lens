@@ -89,6 +89,11 @@ export type MessageStreamEntry =
 		sectionNumber: number | undefined;
 	}
 	| {
+		type: "marker-prompt";
+		key: string;
+		section: MessageStreamSection;
+	}
+	| {
 		type: "message";
 		key: string;
 		row: MessageStreamRow;
@@ -386,6 +391,9 @@ export function deriveMessageStreamSnapshot(
 				section,
 				sectionNumber: sectionNumbers.get(section.id)
 			});
+			if (section.framingMode === "marker" && !section.frameMarker) {
+				entries.push({ type: "marker-prompt", key: `marker-prompt:${section.id}`, section });
+			}
 		}
 	});
 	unsectionedRows.forEach(({ row, rowIndex }) => entries.push({ type: "message", key: `message:${row.id}`, row, rowIndex }));
