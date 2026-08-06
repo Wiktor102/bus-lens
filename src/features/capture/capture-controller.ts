@@ -299,7 +299,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		rebuildPreview(c);
 		dependencies.saveState();
 		dependencies.render();
-		dependencies.showToast(`Section begins at raw byte ${start + 1}`);
 	}
 
 	function updateSectionFraming(sectionId: string, update: SectionFramingUpdate, toast: (section: ActiveCaptureSection) => string) {
@@ -372,7 +371,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		rebuildPreview(c);
 		dependencies.saveState({ immediate: true });
 		dependencies.render();
-		dependencies.showToast("Section deleted; its bytes were merged into the preceding section");
 	}
 
 	function setSectionCollapse(sectionId: string, collapseRuns: boolean) {

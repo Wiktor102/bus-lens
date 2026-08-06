@@ -145,6 +145,7 @@ test("new sections default to length framing while retaining useful preceding se
 	rebuildPreview(current);
 	const sourceMessage = current.messages[1];
 	assert.ok(sourceMessage?.id);
+	const toasts: string[] = [];
 
 	const controller = createCaptureController({
 		state: { captures: [current], folders: [] } as AppState,
@@ -154,7 +155,7 @@ test("new sections default to length framing while retaining useful preceding se
 		saveState: () => {},
 		render: () => {},
 		renderMessages: () => {},
-		showToast: () => {},
+		showToast: message => toasts.push(message),
 		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: () => {} },
 		publishArchiveState: () => {},
@@ -163,6 +164,7 @@ test("new sections default to length framing while retaining useful preceding se
 		publishDialogCommand: () => {}
 	});
 	controller.startSectionAtByte(sourceMessage.id!, 0);
+	assert.deepEqual(toasts, []);
 
 	assert.deepEqual(current.frameSections?.map(section => ({
 		id: section.id,
@@ -224,5 +226,5 @@ test("deletes a non-initial section without deleting its captured bytes", () => 
 	assert.equal(current.messages.flatMap(message => message.bytes).length, 20);
 	assert.deepEqual(saved, [{ immediate: true }]);
 	assert.equal(renders, 1);
-	assert.deepEqual(toasts, ["Section deleted; its bytes were merged into the preceding section"]);
+	assert.deepEqual(toasts, []);
 });
