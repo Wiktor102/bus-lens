@@ -76,11 +76,6 @@ export type MessageStreamSection = {
 	moveAvailability: SectionMoveAvailability;
 };
 
-export type MessageStreamSectionEmptyState = {
-	title: string;
-	description: string;
-};
-
 export type MessageStreamPatterns = {
 	groups: PatternGroup[];
 	membership: Map<number, PatternMembership>;
@@ -92,7 +87,6 @@ export type MessageStreamEntry =
 		key: string;
 		section: MessageStreamSection;
 		sectionNumber: number | undefined;
-		emptyState: MessageStreamSectionEmptyState | null;
 	}
 	| {
 		type: "message";
@@ -202,24 +196,6 @@ function copySections(capture: Capture): MessageStreamSection[] {
 		? capture.frameSections
 		: [{ id: "section-0", start: 0, frameSize: capture.frameSize || 3, collapseRuns: false, collapsed: false }];
 	return sourceSections.map((section, index) => copySection(section, index, capture));
-}
-
-export function getSectionEmptyState(
-	section: Pick<MessageStreamSection, "framingMode" | "frameMarker">
-): MessageStreamSectionEmptyState | null {
-	if (section.framingMode === "marker" && !section.frameMarker) {
-		return {
-			title: "Waiting for a marker byte or pattern",
-			description: "Enter a marker below to split this section into messages."
-		};
-	}
-	if (section.framingMode === "time") {
-		return {
-			title: "Messages split by idle gap",
-			description: "Enter or confirm the gap below to apply this framing."
-		};
-	}
-	return null;
 }
 
 function sectionIdForMessage(message: CaptureMessage, sections: MessageStreamSection[]): string | undefined {
@@ -396,8 +372,7 @@ export function deriveMessageStreamSnapshot(
 				type: "section",
 				key: `section:${section.id}:${sectionRows[0].row._originalStart}`,
 				section,
-				sectionNumber: sectionNumbers.get(section.id),
-				emptyState: null
+				sectionNumber: sectionNumbers.get(section.id)
 			});
 			if (!section.collapsed) {
 				sectionRows.forEach(({ row, rowIndex }) =>
@@ -409,8 +384,7 @@ export function deriveMessageStreamSnapshot(
 				type: "section",
 				key: `section:${section.id}:empty`,
 				section,
-				sectionNumber: sectionNumbers.get(section.id),
-				emptyState: getSectionEmptyState(section)
+				sectionNumber: sectionNumbers.get(section.id)
 			});
 		}
 	});
@@ -422,9 +396,6 @@ export function deriveMessageStreamSnapshot(
 		: "0 rows";
 	const hasVisibleMessages = visible.length > 0;
 	const hasMatchingRows = matchingRows.length > 0;
-	const framingEmptyState = !viewState.filterQuery.trim() && !hasMatchingRows
-		? getSectionEmptyState(sections[0])
-		: null;
 
 	return {
 		captureId: String(capture.id ?? ""),
@@ -449,16 +420,16 @@ export function deriveMessageStreamSnapshot(
 		hasVisibleMessages,
 		hasMatchingRows,
 		emptyState: {
-			title: framingEmptyState?.title || (hasVisibleMessages
+			title: hasVisibleMessages
 				? "No messages match this filter"
 				: capture.messages?.length
 					? "No visible messages in this capture"
-					: "No messages in this capture"),
-			description: framingEmptyState?.description || (hasVisibleMessages
+					: "No messages in this capture",
+			description: hasVisibleMessages
 				? "Try a different byte pattern."
 				: capture.messages?.length
 					? "Hidden messages and bytes remain in the capture and JSON export."
-					: "Connect a serial port and start capture, or import a monitor dump.")
+					: "Connect a serial port and start capture, or import a monitor dump."
 		}
 	};
 }
