@@ -7,13 +7,11 @@ import type {
 	DialogCommandInput,
 	DialogSnapshot,
 	ExportFormat,
-	PatternRemarkSaveInput,
-	SectionsSaveInput
+	PatternRemarkSaveInput
 } from "./dialog-model.ts";
 
 export type DialogActions = {
 	saveContext: (input: ContextSaveInput) => boolean;
-	saveSections: (input: SectionsSaveInput) => boolean;
 	saveAnnotation: (input: AnnotationSaveInput) => boolean;
 	deleteAnnotation: (input: AnnotationDeleteInput) => void;
 	savePatternRemark: (input: PatternRemarkSaveInput) => boolean;
@@ -25,7 +23,6 @@ const EMPTY_DIALOG_SNAPSHOT: DialogSnapshot = { command: null };
 
 const noopActions: DialogActions = {
 	saveContext: () => false,
-	saveSections: () => false,
 	saveAnnotation: () => false,
 	deleteAnnotation: () => {},
 	savePatternRemark: () => false,

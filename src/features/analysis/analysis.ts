@@ -228,7 +228,12 @@ export function recognizeMessagePatterns(capture?: Capture | null): MessagePatte
 		capture.frameMarker,
 		capture.markerPosition,
 		capture.frameTimeGap,
-		JSON.stringify((capture.frameSections || []).map(({ start, frameSize }) => [start, frameSize])),
+		JSON.stringify(
+			(capture.frameSections || []).map(
+				({ start, framingMode, frameSize, frameMarker, markerPosition, frameTimeGap }) =>
+					[start, framingMode, frameSize, frameMarker, markerPosition, frameTimeGap]
+			)
+		),
 		JSON.stringify(capture.patternRemarks || {})
 	].join("|");
 	const cached = patternRecognitionCache.get(capture);

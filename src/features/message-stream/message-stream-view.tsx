@@ -6,7 +6,6 @@ import {
 	useState,
 	useSyncExternalStore,
 	type CSSProperties,
-	type ChangeEvent as ReactChangeEvent,
 	type MouseEvent as ReactMouseEvent
 } from "react";
 import {
@@ -33,18 +32,29 @@ import {
 	type MessageStreamRow,
 	type MessageStreamSnapshot
 } from "./message-stream";
+import type { SectionMoveAction, SectionMoveAvailability } from "../capture/section-repositioning.ts";
 
 type CSSVariableStyle = CSSProperties & Record<`--${string}`, string | number | undefined>;
 
-type MenuState = {
-	target: MessageStreamTarget;
+type MenuPosition = {
 	clientX: number;
 	clientY: number;
 	origin: HTMLElement | null;
 };
 
+type MenuState = MenuPosition &
+	(
+		| { kind: "message"; target: MessageStreamTarget }
+		| {
+				kind: "section";
+				sectionId: string;
+				availability: SectionMoveAvailability;
+			}
+	);
+
 const VIRTUAL_ROW_HEIGHT = 41;
 const VIRTUAL_SECTION_HEIGHT = 48;
+const VIRTUAL_MARKER_PROMPT_HEIGHT = 180;
 const VIRTUAL_OVERSCAN = 8;
 
 function virtualizerOptions(
@@ -57,7 +67,11 @@ function virtualizerOptions(
 		count: snapshot.entries.length,
 		getScrollElement: () => scrollRef.current,
 		estimateSize: (index: number) =>
-			snapshotRef.current.entries[index]?.type === "section" ? VIRTUAL_SECTION_HEIGHT : VIRTUAL_ROW_HEIGHT,
+			snapshotRef.current.entries[index]?.type === "section"
+				? VIRTUAL_SECTION_HEIGHT
+				: snapshotRef.current.entries[index]?.type === "marker-prompt"
+					? VIRTUAL_MARKER_PROMPT_HEIGHT
+					: VIRTUAL_ROW_HEIGHT,
 		getItemKey: (index: number) => snapshotRef.current.entries[index]?.key ?? index,
 		overscan: VIRTUAL_OVERSCAN,
 		scrollToFn: elementScroll,
@@ -108,30 +122,116 @@ function SectionEntry({
 }) {
 	const { section, sectionNumber } = entry;
 	const actions = getMessageStreamActions();
+	const [markerDraft, setMarkerDraft] = useState(section.frameMarker);
+	useEffect(() => setMarkerDraft(section.frameMarker), [section.id, section.frameMarker]);
+	const sectionLabel = String(sectionNumber).padStart(2, "0");
+	const toggleLabel = `${section.collapsed ? "Expand" : "Collapse"} section ${sectionLabel} messages`;
 	return (
 		<tr
 			ref={rowRef}
-			className="section-divider"
+			className={`section-divider ${sectionNumber === 1 ? "first-section-divider" : ""}`.trim()}
+			data-section-id={section.id}
 			data-index={virtualItem.index}
 			style={{ transform: `translateY(${virtualItem.start}px)` }}
 		>
-			<td className="section-number">{String(sectionNumber).padStart(2, "0")}</td>
-			<td colSpan={6}>
+			<td className="section-header-cell" colSpan={7}>
 				<div className="section-header-content">
-					<span>Section · raw byte {section.start + 1}</span>
+					<div className="section-header-title">
+						<button
+							className={`section-toggle ${section.collapsed ? "collapsed" : ""}`.trim()}
+							data-section-toggle={section.id}
+							type="button"
+							aria-expanded={!section.collapsed}
+							aria-label={toggleLabel}
+							title={toggleLabel}
+							onClick={event => {
+								event.stopPropagation();
+								actions.setSectionCollapsed(section.id, !section.collapsed);
+							}}
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="m9 6 6 6-6 6" />
+							</svg>
+						</button>
+						<span>Section {sectionNumber} · raw byte {section.start + 1}</span>
+					</div>
 					<div className="section-header-controls">
-						<label>
-							Message length{" "}
-							<input
-								data-section-length={section.id}
-								type="number"
-								min="1"
-								max="1024"
-								value={section.frameSize}
-								onChange={event => actions.setSectionFrameSize(section.id, event.currentTarget.value)}
-							/>
-							{" "}bytes
+						<label className="section-frame-control">
+							Frame by{" "}
+							<select
+								data-section-framing-mode={section.id}
+								value={section.framingMode}
+								onChange={event => actions.setSectionFramingMode(section.id, event.currentTarget.value)}
+							>
+								<option value="length">LENGTH</option>
+								<option value="marker">MARKER</option>
+								<option value="time">TIME GAP</option>
+							</select>
 						</label>
+						{section.framingMode === "length" ? (
+							<label className="section-frame-control">
+								Message length{" "}
+								<input
+									data-section-length={section.id}
+									type="number"
+									min="1"
+									max="1024"
+									value={section.frameSize}
+									onChange={event => actions.setSectionFrameSize(section.id, event.currentTarget.value)}
+								/>
+								{" "}bytes
+							</label>
+						) : null}
+						{section.framingMode === "marker" ? (
+							<>
+								<label className="section-frame-control section-marker-control">
+									Marker
+									<input
+										data-section-marker={section.id}
+										placeholder="AA 55"
+										spellCheck={false}
+										value={markerDraft}
+										onChange={event => setMarkerDraft(event.currentTarget.value)}
+										onBlur={event => actions.setSectionFrameMarker(section.id, event.currentTarget.value)}
+										onKeyDown={event => {
+											if (event.key !== "Enter") return;
+											event.preventDefault();
+											actions.setSectionFrameMarker(section.id, event.currentTarget.value);
+											event.currentTarget.blur();
+										}}
+									/>
+								</label>
+								<label className="section-frame-control">
+									<select
+										data-section-marker-position={section.id}
+										value={section.markerPosition}
+										onChange={event => actions.setSectionMarkerPosition(section.id, event.currentTarget.value)}
+									>
+										<option value="start">STARTS MESSAGE</option>
+										<option value="end">ENDS MESSAGE</option>
+									</select>
+								</label>
+							</>
+						) : null}
+						{section.framingMode === "time" ? (
+							<label className="section-frame-control">
+								Idle gap ≥{" "}
+								<input
+									data-section-time-gap={section.id}
+									type="number"
+									min="0.01"
+									step="0.1"
+									value={section.frameTimeGap}
+									onChange={event => actions.setSectionFrameTimeGap(section.id, event.currentTarget.value)}
+									onKeyDown={event => {
+											if (event.key !== "Enter") return;
+											event.preventDefault();
+											actions.setSectionFrameTimeGap(section.id, event.currentTarget.value);
+											event.currentTarget.blur();
+										}}
+								/>{" "}ms
+							</label>
+						) : null}
 						<label className="switch-label section-collapse">
 							Collapse runs{" "}
 							<input
@@ -142,6 +242,38 @@ function SectionEntry({
 							/>
 							<span className="switch" />
 						</label>
+					</div>
+				</div>
+			</td>
+		</tr>
+	);
+}
+
+function MarkerPromptEntry({
+	entry,
+	virtualItem,
+	rowRef
+}: {
+	entry: Extract<MessageStreamEntry, { type: "marker-prompt" }>;
+	virtualItem: VirtualItem;
+	rowRef: (element: HTMLTableRowElement | null) => void;
+}) {
+	return (
+		<tr
+			ref={rowRef}
+			className="marker-prompt-row"
+			data-index={virtualItem.index}
+			data-section-marker-prompt={entry.section.id}
+			style={{ transform: `translateY(${virtualItem.start}px)` }}
+		>
+			<td colSpan={7}>
+				<div className="marker-prompt">
+					<div className="marker-prompt-glyph" aria-hidden="true">AA 55</div>
+					<div>
+						<h2>Enter a marker byte sequence</h2>
+						<p>
+							Messages are paused until this section has a marker. Enter hexadecimal bytes above, for example <code>AA 55</code>, then press Enter.
+						</p>
 					</div>
 				</div>
 			</td>
@@ -397,6 +529,39 @@ function formatByte(byte: number): string {
 	return byte.toString(16).padStart(2, "0").toUpperCase();
 }
 
+const SECTION_MOVE_ACTIONS: Array<{ action: SectionMoveAction; label: string }> = [
+	{ action: "byte-before", label: "Move one byte before" },
+	{ action: "byte-after", label: "Move one byte after" },
+	{ action: "message-before", label: "Move one message before" },
+	{ action: "message-after", label: "Move one message after" }
+];
+
+function SectionMoveIcon({ action }: { action: SectionMoveAction }) {
+	const movesBefore = action.endsWith("before");
+	const isMessage = action.startsWith("message");
+	const arrow = isMessage
+		? movesBefore
+			? "M15 19V5m0 0-5 5m5-5 5 5"
+			: "M15 5v14m0 0-5-5m5 5 5-5"
+		: movesBefore
+			? "M19 12H5m0 0 5-5m-5 5 5 5"
+			: "M5 12h14m0 0-5-5m5 5-5 5";
+	const messageLines = "M4.5 5.5h4M4.5 12h4M4.5 18.5h4";
+
+	return (
+		<svg viewBox="0 0 24 24" aria-hidden="true">
+			{isMessage ? (
+				<>
+					<path d={messageLines} />
+					<path d={arrow} />
+				</>
+			) : (
+				<path d={arrow} />
+			)}
+		</svg>
+	);
+}
+
 function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClose: (restoreFocus?: boolean) => void }) {
 	const menuRef = useRef<HTMLDivElement>(null);
 	const positionRef = useRef({ left: 10, top: 10 });
@@ -415,10 +580,18 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 	}, [state]);
 
 	const actions = getMessageStreamActions();
-	const target = state?.target;
+	const target = state?.kind === "message" ? state.target : undefined;
 	const deleteLabel = target?.position === null ? "Delete message" : "Delete byte";
 
 	const handleAction = (action: string) => {
+		if (!state) return;
+		if (state.kind === "section") {
+			const sectionAction = SECTION_MOVE_ACTIONS.find(item => item.action === action)?.action;
+			if (!sectionAction || !state.availability[sectionAction]) return;
+			onClose();
+			actions.moveSection(state.sectionId, sectionAction);
+			return;
+		}
 		if (!target) return;
 		onClose();
 		if (action === "note") {
@@ -436,53 +609,73 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 
 	return (
 		<div
-			id="messageContextMenu"
+			id={state?.kind === "section" ? "sectionContextMenu" : "messageContextMenu"}
 			ref={menuRef}
 			className={`message-context-menu ${state ? "" : "hidden"}`.trim()}
 			style={{ left: position.left, top: position.top }}
 			role="menu"
-			aria-label="Message actions"
+			aria-label={state?.kind === "section" ? "Section actions" : "Message actions"}
 			aria-hidden={state ? "false" : "true"}
 		>
-			<button type="button" role="menuitem" data-context-action="note" onClick={() => handleAction("note")}>
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M4.5 4.5h10.25L19.5 9.25V19.5H4.5Z" />
-					<path d="M14.75 4.5v4.75h4.75M8 14.5h4.5M8 17.5h6.5" />
-				</svg>
-				<span>Add note</span>
-			</button>
-			<button type="button" role="menuitem" data-context-action="replay" onClick={() => handleAction("replay")}>
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M19 8.5A7.5 7.5 0 1 0 19.15 15" />
-					<path d="M19 4.5v4h-4" />
-				</svg>
-				<span>Replay</span>
-			</button>
-			<button
-				type="button"
-				role="menuitem"
-				className="context-delete"
-				data-context-action="delete"
-				aria-label={`${deleteLabel} (keep data hidden)`}
-				onClick={() => handleAction("delete")}
-			>
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M5.5 7.5h13M9.5 7.5V5h5v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5.5M14 11v5.5" />
-				</svg>
-				<span>{deleteLabel}</span>
-			</button>
-			<button
-				type="button"
-				role="menuitem"
-				className={`byte-context-action ${target?.position === null ? "hidden" : ""}`.trim()}
-				data-context-action="section"
-				onClick={() => handleAction("section")}
-			>
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M5 4.5v15M19 4.5v15M5 8.5h5M14 8.5h5M5 15.5h5M14 15.5h5" />
-				</svg>
-				<span>Begin new section here</span>
-			</button>
+			{state?.kind === "section" ? (
+				SECTION_MOVE_ACTIONS.map(({ action, label }) => (
+					<button
+						key={action}
+						type="button"
+						role="menuitem"
+						className="section-context-action"
+						data-context-action={action}
+						data-section-action={action}
+						disabled={!state.availability[action]}
+						onClick={() => handleAction(action)}
+					>
+						<SectionMoveIcon action={action} />
+						<span>{label}</span>
+					</button>
+				))
+			) : (
+				<>
+					<button type="button" role="menuitem" data-context-action="note" onClick={() => handleAction("note")}>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M4.5 4.5h10.25L19.5 9.25V19.5H4.5Z" />
+							<path d="M14.75 4.5v4.75h4.75M8 14.5h4.5M8 17.5h6.5" />
+						</svg>
+						<span>Add note</span>
+					</button>
+					<button type="button" role="menuitem" data-context-action="replay" onClick={() => handleAction("replay")}>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M19 8.5A7.5 7.5 0 1 0 19.15 15" />
+							<path d="M19 4.5v4h-4" />
+						</svg>
+						<span>Replay</span>
+					</button>
+					<button
+						type="button"
+						role="menuitem"
+						className="context-delete"
+						data-context-action="delete"
+						aria-label={`${deleteLabel} (keep data hidden)`}
+						onClick={() => handleAction("delete")}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M5.5 7.5h13M9.5 7.5V5h5v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5.5M14 11v5.5" />
+						</svg>
+						<span>{deleteLabel}</span>
+					</button>
+					<button
+						type="button"
+						role="menuitem"
+						className={`byte-context-action ${target?.position === null ? "hidden" : ""}`.trim()}
+						data-context-action="section"
+						onClick={() => handleAction("section")}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M5 4.5v15M19 4.5v15M5 8.5h5M14 8.5h5M5 15.5h5M14 15.5h5" />
+						</svg>
+						<span>Begin new section here</span>
+					</button>
+				</>
+			)}
 		</div>
 	);
 }
@@ -494,6 +687,7 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 		getMessageStreamSnapshot
 	);
 	const actions = getMessageStreamActions();
+	const hasEntries = snapshot.entries.length > 0;
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const previousFilter = useRef(snapshot.filterQuery);
 	const [menuState, setMenuState] = useState<MenuState | null>(null);
@@ -516,13 +710,14 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 	useEffect(() => {
 		if (!menuState) return;
 		const closeOnOutsideClick = (event: MouseEvent) => {
-			if (!event.target || !document.getElementById("messageContextMenu")?.contains(event.target as Node)) {
+			const menu = document.getElementById("messageContextMenu") || document.getElementById("sectionContextMenu");
+			if (!event.target || !menu?.contains(event.target as Node)) {
 				closeMenu();
 			}
 		};
 		const closeOnOutsideContextMenu = (event: MouseEvent) => {
 			const target = event.target instanceof Element ? event.target : null;
-			if (!target?.closest("#messageContextMenu, #messageBody")) {
+			if (!target?.closest("#messageContextMenu, #sectionContextMenu, #messageBody")) {
 				closeMenu();
 			}
 		};
@@ -544,6 +739,22 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 
 	const openContextMenu = (event: ReactMouseEvent<HTMLTableSectionElement>) => {
 		const targetElement = event.target instanceof Element ? event.target : null;
+		const sectionRow = targetElement?.closest<HTMLTableRowElement>("tr[data-section-id]");
+		if (sectionRow) {
+			const sectionId = sectionRow.dataset.sectionId;
+			const entry = snapshot.entries.find(item => item.type === "section" && item.section.id === sectionId);
+			if (!sectionId || !entry || entry.type !== "section") return;
+			event.preventDefault();
+			setMenuState({
+				kind: "section",
+				sectionId,
+				availability: entry.section.moveAvailability,
+				clientX: event.clientX,
+				clientY: event.clientY,
+				origin: (targetElement?.closest("button") as HTMLElement | null) || sectionRow
+			});
+			return;
+		}
 		const row = targetElement?.closest<HTMLTableRowElement>("tr[data-message-id]");
 		if (!row) return;
 		const byteButton = targetElement?.closest<HTMLElement>("[data-byte-note]");
@@ -554,6 +765,7 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 		if (!messageId || (byteButton && !Number.isInteger(position))) return;
 		event.preventDefault();
 		setMenuState({
+			kind: "message",
 			target: { messageId, position },
 			clientX: event.clientX,
 			clientY: event.clientY,
@@ -578,22 +790,9 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 		}
 	};
 
-	const handleChange = (event: ReactChangeEvent<HTMLTableSectionElement>) => {
-		const targetElement = event.target instanceof Element ? event.target : null;
-		const lengthInput = targetElement?.closest<HTMLInputElement>("[data-section-length]");
-		if (lengthInput?.dataset.sectionLength) {
-			actions.setSectionFrameSize(lengthInput.dataset.sectionLength, lengthInput.value);
-			return;
-		}
-		const collapseInput = targetElement?.closest<HTMLInputElement>("[data-section-collapse]");
-		if (collapseInput?.dataset.sectionCollapse) {
-			actions.setSectionCollapse(collapseInput.dataset.sectionCollapse, collapseInput.checked);
-		}
-	};
-
 	return (
 		<div className="table-wrap" ref={scrollRef} onScroll={() => menuState && closeMenu()}>
-			<table className={`message-table ${snapshot.hasMatchingRows ? "" : "hidden"}`.trim()}>
+			<table className={`message-table ${hasEntries ? "" : "hidden"}`.trim()}>
 				<thead>
 					<tr>
 						<th>#</th>
@@ -612,7 +811,6 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 					style={{ height: virtualizer.getTotalSize() }}
 					onClick={handleClick}
 					onContextMenu={openContextMenu}
-					onChange={handleChange}
 				>
 					{virtualizer.getVirtualItems().map(virtualItem => {
 						const entry = snapshot.entries[virtualItem.index];
@@ -622,6 +820,8 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 						};
 						return entry.type === "section" ? (
 							<SectionEntry key={entry.key} entry={entry} virtualItem={virtualItem} rowRef={ref} />
+						) : entry.type === "marker-prompt" ? (
+							<MarkerPromptEntry key={entry.key} entry={entry} virtualItem={virtualItem} rowRef={ref} />
 						) : (
 							<MessageEntry
 								key={entry.key}
@@ -634,7 +834,7 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 					})}
 				</tbody>
 			</table>
-			<div id="emptyState" className={`empty-state ${snapshot.hasMatchingRows ? "hidden" : ""}`.trim()}>
+			<div id="emptyState" className={`empty-state ${hasEntries ? "hidden" : ""}`.trim()}>
 				<div className="empty-glyph">
 					01<span>10</span>
 				</div>

@@ -2,19 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	appendContextParameter,
-	appendSectionDraft,
 	annotationTextIsValid,
 	annotationTargetLabel,
 	contextDraftToValues,
 	createContextDraft,
-	createSectionsDraft,
 	normalizeAnnotationText,
 	normalizePatternRemarkText,
 	removeContextParameter,
-	removeSectionDraft,
-	serializeSectionDrafts,
-	updateContextParameter,
-	updateSectionDraft
+	updateContextParameter
 } from "../src/features/dialogs/dialog-model.ts";
 
 test("builds context drafts without mutating the open command", () => {
@@ -45,31 +40,6 @@ test("builds context drafts without mutating the open command", () => {
 		inputFormat: "raw"
 	});
 	assert.deepEqual(command.params, []);
-});
-
-test("keeps section drafts string-valued until save and validates starts", () => {
-	const rows = createSectionsDraft([
-		{ id: "first", start: 0, frameSize: 2, collapseRuns: true },
-		{ id: "second", start: 3, frameSize: 4, collapseRuns: false }
-	]);
-	const appended = appendSectionDraft(rows, 8, 3, () => "third");
-	assert.equal(appended?.at(-1)?.start, "5");
-	const edited = updateSectionDraft(appended!, "third", { start: "9", frameSize: "0" });
-	const serialized = serializeSectionDrafts(edited, 7, 3);
-	assert.deepEqual(serialized, {
-		ok: true,
-		sections: [
-			{ id: "first", start: 0, frameSize: 2, collapseRuns: true },
-			{ id: "second", start: 3, frameSize: 4, collapseRuns: false },
-			{ id: "third", start: 7, frameSize: 3, collapseRuns: false }
-		]
-	});
-	assert.deepEqual(serializeSectionDrafts([{ ...rows[1], start: "1" }, { ...rows[0], start: "1" }], 7, 3), {
-		ok: false,
-		error: "Each section must start at a different raw byte"
-	});
-	assert.deepEqual(removeSectionDraft(rows, "first"), [rows[1]]);
-	assert.equal(removeSectionDraft([rows[0]], "first"), null);
 });
 
 test("normalizes annotation drafts and labels a raw byte by its visible position", () => {

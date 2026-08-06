@@ -41,21 +41,24 @@ send, transport, notes, dialogs, and data-transfer modules, and `src/shared/`
 contains cross-feature state and utilities. React components live at the UI
 feature boundary; controllers and domain modules remain DOM-free.
 
-## Capture modes
+## Capture framing
 
 The serial input is a raw binary stream, compatible with ESP32 `Serial.write()`.
 Every byte is stored with its own receive timestamp before any framing is applied.
 
-Message framing is a preview setting and can be changed without recapturing:
+Every capture is sectioned. The first section starts at raw byte 1, and each
+section header has its own **Frame by** mode and settings, so one capture can
+frame different parts of the stream independently. Sections support fixed
+length, marker (marker starts or ends a message), and idle time-gap framing.
+Open a section header's context menu to move its boundary by one byte or one
+framed message; changing a section's framing settings rebuilds only that
+section's messages. New sections inherit the preceding section's framing
+settings.
 
-- **Length** groups the raw stream into a configurable number of bytes.
-- **Sectioned length** lets one capture use different frame lengths across raw-byte
-  sections; each section starts at a selected raw-byte position.
-- **Marker** starts or ends a message at a configurable hex byte sequence.
-- **Time gap** starts a new message after a configurable idle interval.
-
-Marker mode leaves the preview empty until a marker is configured and found; the
-raw byte stream remains preserved while the framing rule is being set.
+Legacy captures that used the previous global framing settings are migrated to
+sections when loaded, while their raw byte stream remains preserved. The old
+top-level framing fields remain readable in JSON for import compatibility but
+do not override normalized section settings.
 
 Because the timestamp is recorded when a Web Serial read delivers a byte, multiple
 bytes delivered in the same browser read may have effectively identical times.

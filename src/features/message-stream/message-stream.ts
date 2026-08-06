@@ -1,13 +1,15 @@
 import {
 	frameWidth,
 	hexByte,
-	markerBytes,
+	normalizeSectionFramingSettings,
 	signature,
 	visibleByteEntries,
 	visibleMessages,
 	type Capture,
 	type CaptureMessage,
-	type CaptureSection
+	type CaptureSection,
+	type MarkerPosition,
+	type SectionFramingMode
 } from "../capture/capture-framing.ts";
 import {
 	colorForByte,
@@ -22,6 +24,10 @@ import {
 	type TransitionFrame
 } from "../analysis/analysis.ts";
 import { collapseAdjacentRuns, countVisibleRowsByPatternOccurrence } from "../analysis/collapse-runs.ts";
+import {
+	getSectionMoveAvailability,
+	type SectionMoveAvailability
+} from "../capture/section-repositioning.ts";
 import type { DisplayMode, ViewStateSnapshot } from "../../shared/view-state.ts";
 
 export const VIRTUAL_ROW_HEIGHT = 41;
@@ -60,8 +66,14 @@ export type MessageStreamRow = MessageStreamBaseRow & {
 export type MessageStreamSection = {
 	id: string;
 	start: number;
+	framingMode: SectionFramingMode;
 	frameSize: number;
+	frameMarker: string;
+	markerPosition: MarkerPosition;
+	frameTimeGap: number;
 	collapseRuns: boolean;
+	collapsed: boolean;
+	moveAvailability: SectionMoveAvailability;
 };
 
 export type MessageStreamPatterns = {
@@ -75,6 +87,11 @@ export type MessageStreamEntry =
 		key: string;
 		section: MessageStreamSection;
 		sectionNumber: number | undefined;
+	}
+	| {
+		type: "marker-prompt";
+		key: string;
+		section: MessageStreamSection;
 	}
 	| {
 		type: "message";
@@ -166,13 +183,33 @@ function copyMessage(message: CaptureMessage): CaptureMessage & { id: string } {
 	};
 }
 
-function copySection(section: CaptureSection, index: number): MessageStreamSection {
+function copySection(section: CaptureSection, index: number, capture: Capture): MessageStreamSection {
+	const id = String(section.id ?? `section-${index}`);
+	const settings = normalizeSectionFramingSettings(section);
 	return {
-		id: String(section.id ?? `section-${index}`),
+		id,
 		start: Number(section.start || 0),
-		frameSize: Number(section.frameSize || 1),
-		collapseRuns: Boolean(section.collapseRuns)
+		...settings,
+		collapseRuns: Boolean(section.collapseRuns),
+		collapsed: Boolean(section.collapsed),
+		moveAvailability: getSectionMoveAvailability(capture, id)
 	};
+}
+
+function copySections(capture: Capture): MessageStreamSection[] {
+	const sourceSections = capture.frameSections?.length
+		? capture.frameSections
+		: [{ id: "section-0", start: 0, frameSize: capture.frameSize || 3, collapseRuns: false, collapsed: false }];
+	return sourceSections.map((section, index) => copySection(section, index, capture));
+}
+
+function sectionIdForMessage(message: CaptureMessage, sections: MessageStreamSection[]): string | undefined {
+	if (message.sectionId && sections.some(section => section.id === message.sectionId)) return String(message.sectionId);
+	const rawStart = message._rawPositions?.[0] ?? message._byteStart ?? 0;
+	return sections.reduce<MessageStreamSection | undefined>(
+		(current, section) => (section.start <= rawStart ? section : current),
+		undefined
+	)?.id;
 }
 
 function copyPatternGroup(group: PatternGroup): PatternGroup {
@@ -231,7 +268,12 @@ function copySequenceNotes(capture: Capture): MessageStreamSequenceNote[] {
 		}));
 }
 
-function filterRows(capture: Capture, viewState: ViewStateSnapshot, patterns: MessagePatterns) {
+function filterRows(
+	capture: Capture,
+	viewState: ViewStateSnapshot,
+	patterns: MessagePatterns,
+	sections: MessageStreamSection[]
+) {
 	const sequenceNoteRows = new Set<number>();
 	const maxMessageIndex = (capture.messages?.length || 0) - 1;
 	for (const note of capture.notes || []) {
@@ -245,6 +287,7 @@ function filterRows(capture: Capture, viewState: ViewStateSnapshot, patterns: Me
 	let rows = (capture.messages || [])
 		.map((sourceMessage, originalIndex): MessageStreamBaseRow => {
 			const message = copyMessage(sourceMessage);
+			message.sectionId ||= sectionIdForMessage(message, sections);
 			const patternMember = patterns.membership.get(originalIndex);
 			return {
 				...message,
@@ -276,12 +319,7 @@ function filterRows(capture: Capture, viewState: ViewStateSnapshot, patterns: Me
 		} catch {}
 	}
 
-	const sectionsById = new Map(
-		(capture.frameSections || []).map((section, index) => {
-			const copied = copySection(section, index);
-			return [copied.id, copied] as const;
-		})
-	);
+	const sectionsById = new Map(sections.map(section => [section.id, section]));
 	if (viewState.collapseRuns || capture.previewMode === "sections") {
 		rows = collapseAdjacentRuns(
 			rows,
@@ -302,9 +340,10 @@ export function deriveMessageStreamSnapshot(
 ): MessageStreamSnapshot {
 	if (!capture) return { ...EMPTY_MESSAGE_STREAM_SNAPSHOT, filterQuery: viewState.filterQuery, mode: viewState.displayMode, highlight: viewState.showFrameChanges };
 
+	const sections = copySections(capture);
 	const rawPatterns = recognizeMessagePatterns(capture);
 	const patterns = copyPatterns(rawPatterns);
-	const matchingRows = filterRows(capture, viewState, rawPatterns);
+	const matchingRows = filterRows(capture, viewState, rawPatterns, sections);
 	const visible = visibleMessages(capture);
 	const signatureCounts = getCounts(visible);
 	const countsByPosition = Array.from({ length: frameWidth(capture) }, (_, position) => {
@@ -321,33 +360,48 @@ export function deriveMessageStreamSnapshot(
 		: matchingRows.map(row => visibleByteEntries(row).map(() => ({ incoming: null, outgoing: null })));
 	const patternNumbers = new Map(patterns.groups.map((group, index) => [group.id, index + 1]));
 	const visiblePatternRowCounts = countVisibleRowsByPatternOccurrence(matchingRows);
-	const sections = (capture.frameSections || []).map(copySection);
 	const sectionsById = new Map(sections.map(section => [section.id, section]));
 	const sectionNumbers = new Map(sections.map((section, index) => [section.id, index + 1]));
 	const entries: MessageStreamEntry[] = [];
-	let previousSectionId: string | undefined;
+	const rowsBySection = new Map<string, Array<{ row: MessageStreamRow; rowIndex: number }>>();
+	const unsectionedRows: Array<{ row: MessageStreamRow; rowIndex: number }> = [];
 	matchingRows.forEach((row, rowIndex) => {
-		const rowSectionId = row.sectionId === undefined ? undefined : String(row.sectionId);
-		if (capture.previewMode === "sections" && rowSectionId !== previousSectionId) {
-			const section = rowSectionId ? sectionsById.get(rowSectionId) : undefined;
-			if (section) {
-				entries.push({
-					type: "section",
-					key: `section:${section.id}:${row._originalStart}`,
-					section,
-					sectionNumber: sectionNumbers.get(section.id)
-				});
+		const sectionId = row.sectionId === undefined ? undefined : String(row.sectionId);
+		if (!sectionId || !sectionsById.has(sectionId)) unsectionedRows.push({ row, rowIndex });
+		else rowsBySection.set(sectionId, [...(rowsBySection.get(sectionId) || []), { row, rowIndex }]);
+	});
+	sections.forEach(section => {
+		const sectionRows = rowsBySection.get(section.id) || [];
+		if (sectionRows.length) {
+			entries.push({
+				type: "section",
+				key: `section:${section.id}:${sectionRows[0].row._originalStart}`,
+				section,
+				sectionNumber: sectionNumbers.get(section.id)
+			});
+			if (!section.collapsed) {
+				sectionRows.forEach(({ row, rowIndex }) =>
+					entries.push({ type: "message", key: `message:${row.id}`, row, rowIndex })
+				);
+			}
+		} else if (!viewState.filterQuery.trim() && capture.byteStream?.length) {
+			entries.push({
+				type: "section",
+				key: `section:${section.id}:empty`,
+				section,
+				sectionNumber: sectionNumbers.get(section.id)
+			});
+			if (section.framingMode === "marker" && !section.frameMarker) {
+				entries.push({ type: "marker-prompt", key: `marker-prompt:${section.id}`, section });
 			}
 		}
-		entries.push({ type: "message", key: `message:${row.id}`, row, rowIndex });
-		previousSectionId = rowSectionId;
 	});
+	unsectionedRows.forEach(({ row, rowIndex }) => entries.push({ type: "message", key: `message:${row.id}`, row, rowIndex }));
 
 	const telegramCount = matchingRows.reduce((sum, row) => sum + row._repeats, 0);
 	const visibleSummary = matchingRows.length
 		? `${matchingRows.length.toLocaleString()} row${matchingRows.length === 1 ? "" : "s"}`
 		: "0 rows";
-	const marker = capture.previewMode === "marker" ? markerBytes(capture.frameMarker) : [];
 	const hasVisibleMessages = visible.length > 0;
 	const hasMatchingRows = matchingRows.length > 0;
 
@@ -374,26 +428,16 @@ export function deriveMessageStreamSnapshot(
 		hasVisibleMessages,
 		hasMatchingRows,
 		emptyState: {
-			title:
-				capture.previewMode === "marker"
-					? marker.length
-						? "No marker matches in this capture"
-						: "Enter a marker to preview messages"
-					: hasVisibleMessages
-						? "No messages match this filter"
-						: capture.messages?.length
-						? "No visible messages in this capture"
-						: "No messages in this capture",
-			description:
-				capture.previewMode === "marker"
-					? marker.length
-						? "The raw byte stream is still preserved; adjust the marker or capture more data."
-						: "Type a hex byte sequence such as AA 55 in the Marker field."
-					: hasVisibleMessages
-						? "Try a different byte pattern."
-						: capture.messages?.length
-						? "Hidden messages and bytes remain in the capture and JSON export."
-						: "Connect a serial port and start capture, or import a monitor dump."
+			title: hasVisibleMessages
+				? "No messages match this filter"
+				: capture.messages?.length
+					? "No visible messages in this capture"
+					: "No messages in this capture",
+			description: hasVisibleMessages
+				? "Try a different byte pattern."
+				: capture.messages?.length
+					? "Hidden messages and bytes remain in the capture and JSON export."
+					: "Connect a serial port and start capture, or import a monitor dump."
 		}
 	};
 }
