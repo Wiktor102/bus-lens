@@ -130,7 +130,7 @@ function SectionEntry({
 			style={{ transform: `translateY(${virtualItem.start}px)` }}
 		>
 			<td className="section-number">{String(sectionNumber).padStart(2, "0")}</td>
-			<td colSpan={6}>
+			<td className="section-header-cell" colSpan={6}>
 				<div className="section-header-content">
 					<div className="section-header-title">
 						<button

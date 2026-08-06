@@ -1988,13 +1988,18 @@ tr:hover .row-action,
 	letter-spacing: 0.03em;
 }
 .section-divider .section-number {
-	width: auto;
+	grid-column: 1;
+	width: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
 	color: var(--acid);
-	text-align: center;
 	font: 500 11px var(--mono);
 }
-.section-divider td:nth-child(2) {
+.section-divider .section-header-cell {
 	grid-column: 2 / -1;
+	width: 100%;
+	min-width: 0;
 }
 .section-header-content {
 	display: flex;
