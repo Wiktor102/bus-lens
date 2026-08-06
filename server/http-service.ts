@@ -7,6 +7,7 @@ import {
 	ArchiveRepository,
 	RepositoryConflictError,
 	RepositoryValidationError,
+	type LegacyArchive,
 	type ArchiveIndex,
 	type JsonDocument
 } from "./archive-repository.ts";
@@ -130,6 +131,14 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 					return send(response, 200, repository.getArchiveIndex());
 				}
 			}
+			if (segments[1] === "migrations" && segments[2] === "local-storage") {
+				if (request.method === "POST") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					const archive = documentFrom(body.archive) as unknown as LegacyArchive;
+					if (!Array.isArray(archive.captures) || !Array.isArray(archive.folders)) throw new RepositoryValidationError("Legacy archive is invalid");
+					return send(response, 201, repository.migrateLegacyArchive(String(body.fingerprint ?? ""), archive, body.report));
+				}
+			}
 			if (segments[1] === "settings") {
 				const key = segments[2];
 				if (!key && request.method === "GET") return send(response, 200, repository.getSettings());
@@ -164,6 +173,9 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			if (id && request.method === "DELETE") return send(response, entityDelete(repository, entity, id) ? 204 : 404, {});
 			return send(response, 405, { error: "Method not allowed" });
 		} catch (error) {
+			// A browser may cancel an in-flight request while its page is closing.
+			// There is no response to send and this is not a service failure.
+			if (request.aborted || response.destroyed) return;
 			if (error instanceof RepositoryConflictError) return send(response, 409, { error: error.message, code: error.code });
 			if (error instanceof RepositoryValidationError || error instanceof SyntaxError) return send(response, 400, { error: error.message });
 			console.error("Archive service request failed", error);

@@ -1,14 +1,14 @@
 export type BeforeUnloadDependencies = {
+	beginUnload: () => void;
 	flushLiveBytes: () => void;
-	persistState: () => void;
 	getPort: () => unknown;
-	disconnect: () => Promise<void> | void;
+	disconnect: (options?: { persist?: boolean }) => Promise<void> | void;
 };
 
 export function createBeforeUnloadHandler(dependencies: BeforeUnloadDependencies): () => void {
 	return () => {
+		dependencies.beginUnload();
 		dependencies.flushLiveBytes();
-		dependencies.persistState();
-		if (dependencies.getPort()) void dependencies.disconnect();
+		if (dependencies.getPort()) void dependencies.disconnect({ persist: false });
 	};
 }
