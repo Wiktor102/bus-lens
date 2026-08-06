@@ -122,7 +122,7 @@ test("disables movement at capture and neighboring section boundaries", () => {
 	});
 });
 
-test("new sections inherit the preceding section's framing settings", () => {
+test("new sections default to length framing while retaining useful preceding settings", () => {
 	const current = {
 		id: "capture-inherit",
 		frameSize: 3,
@@ -145,6 +145,7 @@ test("new sections inherit the preceding section's framing settings", () => {
 	rebuildPreview(current);
 	const sourceMessage = current.messages[1];
 	assert.ok(sourceMessage?.id);
+	const toasts: string[] = [];
 
 	const controller = createCaptureController({
 		state: { captures: [current], folders: [] } as AppState,
@@ -154,7 +155,7 @@ test("new sections inherit the preceding section's framing settings", () => {
 		saveState: () => {},
 		render: () => {},
 		renderMessages: () => {},
-		showToast: () => {},
+		showToast: message => toasts.push(message),
 		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: () => {} },
 		publishArchiveState: () => {},
@@ -163,6 +164,7 @@ test("new sections inherit the preceding section's framing settings", () => {
 		publishDialogCommand: () => {}
 	});
 	controller.startSectionAtByte(sourceMessage.id!, 0);
+	assert.deepEqual(toasts, []);
 
 	assert.deepEqual(current.frameSections?.map(section => ({
 		id: section.id,
@@ -184,7 +186,7 @@ test("new sections inherit the preceding section's framing settings", () => {
 		},
 		{
 			id: current.frameSections?.[1]?.id,
-			framingMode: "marker",
+			framingMode: "length",
 			frameSize: 7,
 			frameMarker: "AA",
 			markerPosition: "end",
@@ -192,4 +194,37 @@ test("new sections inherit the preceding section's framing settings", () => {
 			collapseRuns: true
 		}
 	]);
+});
+
+test("deletes a non-initial section without deleting its captured bytes", () => {
+	const current = capture();
+	const saved: unknown[] = [];
+	let renders = 0;
+	const toasts: string[] = [];
+	const controller = createCaptureController({
+		state: { captures: [current], folders: [] } as AppState,
+		capture: () => current,
+		getActiveId: () => current.id,
+		setActiveId: () => {},
+		saveState: options => saved.push(options),
+		render: () => { renders += 1; },
+		renderMessages: () => {},
+		showToast: message => toasts.push(message),
+		confirm: () => true,
+		transport: { isRecording: () => false, stopRecording: () => {} },
+		publishArchiveState: () => {},
+		publishCaptureHeaderState: () => {},
+		publishNotesState: () => {},
+		publishDialogCommand: () => {}
+	});
+
+	controller.deleteSection("header");
+	assert.deepEqual(current.frameSections?.map(section => section.id), ["header", "payload", "tail"]);
+
+	controller.deleteSection("payload");
+	assert.deepEqual(current.frameSections?.map(section => section.id), ["header", "tail"]);
+	assert.equal(current.messages.flatMap(message => message.bytes).length, 20);
+	assert.deepEqual(saved, [{ immediate: true }]);
+	assert.equal(renders, 1);
+	assert.deepEqual(toasts, []);
 });

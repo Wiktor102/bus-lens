@@ -287,7 +287,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		c.frameSections.push({
 			id: crypto.randomUUID(),
 			start,
-			framingMode: inherited?.framingMode || "length",
+			framingMode: "length",
 			frameSize: inherited?.frameSize || 3,
 			frameMarker: inherited?.frameMarker || "",
 			markerPosition: inherited?.markerPosition || "start",
@@ -299,7 +299,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		rebuildPreview(c);
 		dependencies.saveState();
 		dependencies.render();
-		dependencies.showToast(`Section begins at raw byte ${start + 1}`);
 	}
 
 	function updateSectionFraming(sectionId: string, update: SectionFramingUpdate, toast: (section: ActiveCaptureSection) => string) {
@@ -362,6 +361,18 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		dependencies.showToast(`Section moved ${label}`);
 	}
 
+	function deleteSection(sectionId: string) {
+		const c = capture();
+		if (!c) return;
+		normalizeSections(c);
+		const index = c.frameSections.findIndex(section => section.id === sectionId);
+		if (index <= 0) return;
+		c.frameSections.splice(index, 1);
+		rebuildPreview(c);
+		dependencies.saveState({ immediate: true });
+		dependencies.render();
+	}
+
 	function setSectionCollapse(sectionId: string, collapseRuns: boolean) {
 		const c = capture();
 		const section = c?.frameSections.find(item => item.id === sectionId);
@@ -379,7 +390,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		section.collapsed = Boolean(collapsed);
 		dependencies.saveState();
 		dependencies.renderMessages();
-		dependencies.showToast(section.collapsed ? "Section collapsed" : "Section expanded");
 	}
 
 	function commitContextDraft(input: ContextSaveInput) {
@@ -516,6 +526,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		publishContextDialog,
 		startSectionAtByte,
 		moveSection,
+		deleteSection,
 		setSectionFraming,
 		setSectionFrameSize,
 		setSectionFramingMode,

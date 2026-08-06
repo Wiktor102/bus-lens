@@ -372,6 +372,9 @@ export function frameSectionRanges(
 		frameStart = index;
 		index += marker.length - 1;
 	}
+	// A section can begin between marker-delimited messages. Until its marker
+	// appears, keep its bytes in one frame instead of dropping the whole section.
+	if (frameStart < 0) return [[start, end]];
 	if (frameStart >= 0 && frameStart < end) ranges.push([frameStart, end]);
 	return ranges;
 }

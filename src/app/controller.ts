@@ -182,6 +182,7 @@ export function initializeController(): ControllerLifecycle {
 		},
 		beginSection: captureController.startSectionAtByte,
 		moveSection: captureController.moveSection,
+		deleteSection: captureController.deleteSection,
 		setSectionFraming: captureController.setSectionFraming,
 		setSectionFrameSize: (sectionId, value) => captureController.setSectionFrameSize(sectionId, Number(value)),
 		setSectionFramingMode: captureController.setSectionFramingMode,
