@@ -2001,21 +2001,16 @@ tr:hover .row-action,
 	padding: 8px 12px;
 }
 .section-header-content {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
 	width: 100%;
 	min-height: 29px;
-}
-.section-header-topline {
-	display: flex;
-	min-height: 29px;
 	align-items: center;
-	justify-content: space-between;
 	gap: 16px;
 }
 
 .section-header-title {
 	display: flex;
-	flex: 0 0 auto;
-	min-width: 0;
 	align-items: center;
 	gap: 7px;
 	color: var(--acid);
@@ -2053,7 +2048,7 @@ tr:hover .row-action,
 }
 .section-header-controls {
 	display: flex;
-	flex: 1 1 auto;
+	grid-column: 2;
 	min-width: 0;
 	align-items: center;
 	justify-content: flex-end;
@@ -2097,6 +2092,7 @@ tr:hover .row-action,
 	text-transform: uppercase;
 }
 .section-empty-state {
+	grid-column: 1 / -1;
 	width: 100%;
 	box-sizing: border-box;
 	display: grid;
