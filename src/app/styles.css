@@ -2002,6 +2002,8 @@ tr:hover .row-action,
 }
 .message-table .marker-prompt-row td {
 	grid-column: 1 / -1;
+	box-sizing: border-box;
+	width: 100%;
 	min-width: 0;
 	height: 180px;
 	padding: 0;
