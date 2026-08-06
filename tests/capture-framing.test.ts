@@ -175,6 +175,18 @@ test("does not let one section's framing affect its neighbor", () => {
 	assert.deepEqual(current.messages.map(message => message.sectionId), ["marker", "marker", "length", "length"]);
 });
 
+test("keeps bytes visible when a marker-start section contains no marker", () => {
+	const current = capture([0xaa, 1, 2, 3]);
+	current.frameSections = [
+		{ id: "first", start: 0, framingMode: "marker", frameMarker: "AA", markerPosition: "start" },
+		{ id: "new", start: 2, framingMode: "marker", frameMarker: "AA", markerPosition: "start" }
+	];
+	rebuildPreview(current);
+
+	assert.deepEqual(current.messages.map(message => message.bytes), [[0xaa, 1], [2, 3]]);
+	assert.deepEqual(current.messages.map(message => message.sectionId), ["first", "new"]);
+});
+
 test("keeps an empty marker section pending without discarding raw bytes", () => {
 	const current = capture([1, 2, 3]);
 	current.frameSections = [{ id: "pending", start: 0, framingMode: "marker", frameMarker: "AA" }];
