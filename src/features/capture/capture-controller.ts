@@ -379,7 +379,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		section.collapsed = Boolean(collapsed);
 		dependencies.saveState();
 		dependencies.renderMessages();
-		dependencies.showToast(section.collapsed ? "Section collapsed" : "Section expanded");
 	}
 
 	function commitContextDraft(input: ContextSaveInput) {
