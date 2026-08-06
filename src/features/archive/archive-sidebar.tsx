@@ -283,6 +283,10 @@ function CaptureContextMenu({
 
 	const capture = state ? snapshot.captures.find(item => item.id === state.captureId) : undefined;
 	const currentFolderId = capture?.folderId || null;
+	const orderedFolders = [
+		...snapshot.folders.filter(folder => folder.id === currentFolderId),
+		...snapshot.folders.filter(folder => folder.id !== currentFolderId)
+	];
 
 	useEffect(() => {
 		setMoveOpen(false);
@@ -367,7 +371,7 @@ function CaptureContextMenu({
 						<span>Unfiled</span>
 						{currentFolderId === null ? <span aria-hidden="true">✓</span> : null}
 					</button>
-					{snapshot.folders.map(folder => (
+					{orderedFolders.map(folder => (
 						<button
 							key={folder.id}
 							type="button"
