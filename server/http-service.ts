@@ -7,6 +7,7 @@ import {
 	ArchiveRepository,
 	RepositoryConflictError,
 	RepositoryValidationError,
+	type LegacyArchive,
 	type ArchiveIndex,
 	type JsonDocument
 } from "./archive-repository.ts";
@@ -128,6 +129,14 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 				if (request.method === "PUT") {
 					repository.replaceArchiveIndex((await jsonBody(request, maxBodyBytes)) as ArchiveIndex);
 					return send(response, 200, repository.getArchiveIndex());
+				}
+			}
+			if (segments[1] === "migrations" && segments[2] === "local-storage") {
+				if (request.method === "POST") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					const archive = documentFrom(body.archive) as unknown as LegacyArchive;
+					if (!Array.isArray(archive.captures) || !Array.isArray(archive.folders)) throw new RepositoryValidationError("Legacy archive is invalid");
+					return send(response, 201, repository.migrateLegacyArchive(String(body.fingerprint ?? ""), archive, body.report));
 				}
 			}
 			if (segments[1] === "settings") {

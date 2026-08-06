@@ -45,6 +45,16 @@ export type ArchiveRepositoryDependencies = {
 	generateId?: () => string;
 };
 
+export type LegacyArchive = {
+	captures: JsonDocument[];
+	folders: JsonDocument[];
+	activeId?: string | null;
+	unfiledCollapsed?: boolean;
+	sendHistory?: JsonDocument[];
+	sendQueue?: JsonDocument[];
+	sendSettings?: JsonDocument;
+};
+
 type StoredDocumentRow = {
 	id: string;
 	document_version: number;
@@ -355,11 +365,18 @@ export class ArchiveRepository {
 	putHistoryItem(id: string | undefined, document: JsonDocument, expectedVersion?: number): DocumentRecord {
 		const normalizedId = id?.trim() || this.generateId();
 		const transaction = this.database.transaction(() => {
-			const record = this.putDocument("send_history", normalizedId, document, expectedVersion);
-			const occurredAt = timestampAsIso(document.timestamp, record.createdAt);
-			this.database
-				.prepare("UPDATE send_history SET occurred_at = @occurredAt WHERE id = @id")
-				.run({ id: record.id, occurredAt });
+			const existing = this.getHistoryItem(normalizedId);
+			const createdAt = this.nowIso();
+			const occurredAt = timestampAsIso(document.timestamp, createdAt);
+			const record = existing
+				? this.putDocument("send_history", normalizedId, document, expectedVersion)
+				: (() => {
+					if (expectedVersion !== undefined) throw new RepositoryConflictError();
+					this.database.prepare(`INSERT INTO send_history (id, document_version, document_json, occurred_at, created_at, updated_at)
+						VALUES (@id, 1, @documentJson, @occurredAt, @createdAt, @createdAt)`).run({ id: normalizedId, documentJson: serializeDocument(document), occurredAt, createdAt });
+					return { id: normalizedId, version: 1, document, createdAt, updatedAt: createdAt };
+				})();
+			if (existing) this.database.prepare("UPDATE send_history SET occurred_at = @occurredAt WHERE id = @id").run({ id: record.id, occurredAt });
 			return record;
 		});
 		return transaction();
@@ -535,6 +552,30 @@ export class ArchiveRepository {
 
 	deleteImport(fingerprint: string): boolean {
 		return this.database.prepare("DELETE FROM import_migrations WHERE fingerprint = @fingerprint").run({ fingerprint }).changes > 0;
+	}
+
+	/** Imports one legacy localStorage archive atomically. A completed fingerprint is immutable. */
+	migrateLegacyArchive(fingerprint: string, archive: LegacyArchive, report: unknown): { imported: boolean; record: ImportRecord } {
+		if (!fingerprint.trim()) throw new RepositoryValidationError("Migration fingerprint is required");
+		const existing = this.getImport(fingerprint);
+		if (existing?.status === "completed") return { imported: false, record: existing };
+		const migrate = this.database.transaction(() => {
+			const anyCapture = this.database.prepare("SELECT id FROM capture_documents LIMIT 1").get();
+			if (anyCapture) throw new RepositoryConflictError("An archive already exists; refusing to overwrite it during migration");
+			for (const folder of archive.folders) this.putFolder(String(folder.id), folder);
+			for (const capture of archive.captures) this.putCapture(String(capture.id), capture);
+			for (const [position, item] of (archive.sendQueue ?? []).entries()) this.putQueueItem(String(item.id), item, undefined, position);
+			for (const item of archive.sendHistory ?? []) this.putHistoryItem(typeof item.id === "string" ? item.id : undefined, item);
+			if (archive.sendSettings) this.setSetting("send", archive.sendSettings);
+			this.replaceArchiveIndex({
+				activeId: archive.activeId ?? null,
+				unfiledCollapsed: Boolean(archive.unfiledCollapsed),
+				captures: archive.captures.map((capture, position) => ({ id: String(capture.id), folderId: documentFolderId(capture), position })),
+				folders: archive.folders.map((folder, position) => ({ id: String(folder.id), position }))
+			});
+			return this.putImport({ fingerprint, sourceKey: "bus-lens-state-v1", status: "completed", report });
+		});
+		return { imported: true, record: migrate() };
 	}
 
 	private importRecord(row: StoredImportRow): ImportRecord {

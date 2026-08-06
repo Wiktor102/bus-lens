@@ -1,6 +1,7 @@
 import { loadState, STORAGE_KEY, type AppState, type StateStorage } from "../shared/app-state.ts";
 import { publishToastSnapshot } from "../shared/toast-bridge.ts";
 import type { Capture } from "../features/capture/capture-framing.ts";
+import { ArchiveClient } from "../persistence/archive-client.ts";
 
 export type WritableStateStorage = StateStorage & {
 	setItem: (key: string, value: string) => void;
@@ -25,6 +26,11 @@ export type AppRuntime = {
 	persistState: () => void;
 	saveState: (options?: SaveStateOptions) => void;
 	showToast: (message: string) => void;
+	saveCapture: (captureId: string) => void;
+	saveArchiveIndex: () => void;
+	saveFolder: (folderId: string) => void;
+	saveSendState: () => void;
+	saveSettings: () => void;
 };
 
 function browserStorage(): WritableStateStorage | undefined {
@@ -38,6 +44,10 @@ function browserStorage(): WritableStateStorage | undefined {
 
 export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): AppRuntime {
 	const storage = dependencies.storage || browserStorage();
+	let legacyArchive: string | null = null;
+	try { legacyArchive = storage?.getItem(STORAGE_KEY) ?? null; } catch {}
+	const client = typeof fetch === "function" && !dependencies.storage ? new ArchiveClient() : undefined;
+	let databaseReady = false;
 	let toastTimer: ReturnType<typeof setTimeout> | null = null;
 	let stateSaveTimer: ReturnType<typeof setTimeout> | null = null;
 	const showToast = (message: string): void => {
@@ -46,22 +56,34 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		toastTimer = setTimeout(() => publishToastSnapshot({ message: "", visible: false }), 2_600);
 	};
 	const state = loadState({
-		storage,
+		storage: { getItem: key => key === STORAGE_KEY ? legacyArchive : null },
 		generateId: dependencies.generateId,
 		now: dependencies.now,
 		nowIso: dependencies.nowIso
 	});
 	let activeId: string | null | undefined = state.activeId || state.captures[0]?.id;
 
+	function reportPersistenceFailure(error: unknown): void {
+		console.error("Bus Lens persistence failed", error);
+		showToast("Archive service unavailable — legacy archive is read-only. Export JSON to recover it.");
+	}
+
+	function saveCapture(captureId: string): void {
+		const capture = state.captures.find(item => item.id === captureId);
+		if (!databaseReady || !capture || !client) return;
+		void client.saveCapture(capture).catch(reportPersistenceFailure);
+	}
+	function saveArchiveIndex(): void { if (databaseReady && client) void client.saveArchiveIndex(state, activeId).catch(reportPersistenceFailure); }
+	function saveFolder(folderId: string): void { const folder = state.folders.find(item => item.id === folderId); if (databaseReady && folder && client) void client.saveFolder(folder).catch(reportPersistenceFailure); }
+	function saveSendState(): void { if (databaseReady && client) void client.saveSendState(state).catch(reportPersistenceFailure); }
+	function saveSettings(): void { if (databaseReady && client) void client.saveSettings(state.sendSettings).catch(reportPersistenceFailure); }
+
 	function persistState(): void {
 		state.activeId = activeId;
-		try {
-			if (!storage) throw new Error("Browser storage is unavailable");
-			storage.setItem(STORAGE_KEY, JSON.stringify(state));
-		} catch (error) {
-			console.warn("Could not save Bus Lens state", error);
-			showToast("Capture is live, but browser storage is full");
-		}
+		if (!databaseReady) return;
+		state.captures.forEach(capture => saveCapture(String(capture.id)));
+		state.folders.forEach(folder => saveFolder(folder.id));
+		saveArchiveIndex(); saveSendState(); saveSettings();
 	}
 
 	function saveState({ immediate = false }: SaveStateOptions = {}): void {
@@ -82,6 +104,21 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		return state.captures.find(item => item.id === activeId) || state.captures[0];
 	}
 
+	if (client) void (async () => {
+		try {
+			await client.health();
+			if (legacyArchive) {
+				const report = await client.migrate(state);
+				databaseReady = true;
+				showToast(`Migrated ${report.captures} captures, ${report.rawBytes.toLocaleString()} bytes, ${report.notes} notes`);
+			} else {
+				const stored = await client.load();
+				if (stored.captures.length) { Object.assign(state, stored); activeId = stored.activeId || stored.captures[0]?.id; }
+				databaseReady = true;
+			}
+		} catch (error) { reportPersistenceFailure(error); }
+	})();
+
 	return {
 		state,
 		capture,
@@ -91,6 +128,11 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		},
 		persistState,
 		saveState,
+		saveCapture,
+		saveArchiveIndex,
+		saveFolder,
+		saveSendState,
+		saveSettings,
 		showToast
 	};
 }

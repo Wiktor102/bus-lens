@@ -59,3 +59,24 @@ test("SQLite backup restores a complete archive", async () => {
 		recovered.close();
 	});
 });
+
+test("legacy migration is transactional and idempotent by fingerprint", async () => {
+	await withTemporaryArchive(async directory => {
+		const repository = new ArchiveRepository(openDatabase(join(directory, "archive.sqlite")));
+		const archive = {
+			captures: [{ id: "capture-1", name: "Imported", byteStream: [{ value: 1 }], notes: [] }],
+			folders: [{ id: "folder-1", name: "Imported folder", collapsed: false }],
+			activeId: "capture-1",
+			sendQueue: [{ id: "queue-1", bytes: [1] }],
+			sendHistory: [{ id: "history-1", bytes: [2] }],
+			sendSettings: { baudRate: 115200 }
+		};
+		assert.equal(repository.migrateLegacyArchive("fingerprint", archive, { captures: 1 }).imported, true);
+		assert.equal(repository.migrateLegacyArchive("fingerprint", archive, { captures: 1 }).imported, false);
+		assert.equal(repository.listCaptures().length, 1);
+		assert.equal(repository.listFolders().length, 1);
+		assert.equal(repository.listQueue().length, 1);
+		assert.equal(repository.listHistory().length, 1);
+		repository.close();
+	});
+});
