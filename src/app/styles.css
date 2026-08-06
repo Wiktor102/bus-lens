@@ -1991,11 +1991,18 @@ tr:hover .row-action,
 	grid-column: 1 / -1;
 	width: 100%;
 	min-width: 0;
+	padding: 8px 12px;
 	text-align: left;
 	color: var(--muted);
 }
+.message-table .section-divider.first-section-divider .section-header-cell {
+	display: flex;
+	align-items: center;
+	padding: 8px 12px;
+}
 .section-header-content {
 	display: flex;
+	width: 100%;
 	min-height: 29px;
 	align-items: center;
 	justify-content: space-between;

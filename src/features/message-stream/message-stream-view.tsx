@@ -124,7 +124,7 @@ function SectionEntry({
 	return (
 		<tr
 			ref={rowRef}
-			className="section-divider"
+			className={`section-divider ${sectionNumber === 1 ? "first-section-divider" : ""}`.trim()}
 			data-section-id={section.id}
 			data-index={virtualItem.index}
 			style={{ transform: `translateY(${virtualItem.start}px)` }}
