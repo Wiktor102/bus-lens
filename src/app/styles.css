@@ -2003,9 +2003,43 @@ tr:hover .row-action,
 	justify-content: space-between;
 	gap: 16px;
 }
-.section-header-content > span {
+
+.section-header-title {
+	display: flex;
+	align-items: center;
+	gap: 7px;
 	color: var(--acid);
 	text-transform: uppercase;
+}
+.section-toggle {
+	display: grid;
+	place-items: center;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--acid);
+	cursor: pointer;
+}
+.section-toggle:hover,
+.section-toggle:focus-visible {
+	border-color: var(--acid-dim);
+	background: color-mix(in srgb, var(--acid) 10%, transparent);
+	outline: 0;
+}
+.section-toggle svg {
+	width: 16px;
+	height: 16px;
+	fill: none;
+	stroke: currentColor;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 1.8;
+	transition: transform 0.15s ease;
+}
+.section-toggle:not(.collapsed) svg {
+	transform: rotate(90deg);
 }
 .section-header-controls {
 	display: flex;

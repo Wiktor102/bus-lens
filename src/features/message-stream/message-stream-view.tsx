@@ -118,6 +118,8 @@ function SectionEntry({
 }) {
 	const { section, sectionNumber } = entry;
 	const actions = getMessageStreamActions();
+	const sectionLabel = String(sectionNumber).padStart(2, "0");
+	const toggleLabel = `${section.collapsed ? "Expand" : "Collapse"} section ${sectionLabel} messages`;
 	return (
 		<tr
 			ref={rowRef}
@@ -129,7 +131,25 @@ function SectionEntry({
 			<td className="section-number">{String(sectionNumber).padStart(2, "0")}</td>
 			<td colSpan={6}>
 				<div className="section-header-content">
-					<span>Section · raw byte {section.start + 1}</span>
+					<div className="section-header-title">
+						<button
+							className={`section-toggle ${section.collapsed ? "collapsed" : ""}`.trim()}
+							data-section-toggle={section.id}
+							type="button"
+							aria-expanded={!section.collapsed}
+							aria-label={toggleLabel}
+							title={toggleLabel}
+							onClick={event => {
+								event.stopPropagation();
+								actions.setSectionCollapsed(section.id, !section.collapsed);
+							}}
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="m9 6 6 6-6 6" />
+							</svg>
+						</button>
+						<span>Section · raw byte {section.start + 1}</span>
+					</div>
 					<div className="section-header-controls">
 						<label>
 							Message length{" "}

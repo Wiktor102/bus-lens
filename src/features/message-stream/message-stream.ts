@@ -65,6 +65,7 @@ export type MessageStreamSection = {
 	start: number;
 	frameSize: number;
 	collapseRuns: boolean;
+	collapsed: boolean;
 	moveAvailability: SectionMoveAvailability;
 };
 
@@ -177,6 +178,7 @@ function copySection(section: CaptureSection, index: number, capture: Capture): 
 		start: Number(section.start || 0),
 		frameSize: Number(section.frameSize || 1),
 		collapseRuns: Boolean(section.collapseRuns),
+		collapsed: Boolean(section.collapsed),
 		moveAvailability: getSectionMoveAvailability(capture, id)
 	};
 }
@@ -184,7 +186,7 @@ function copySection(section: CaptureSection, index: number, capture: Capture): 
 function copySections(capture: Capture): MessageStreamSection[] {
 	const sourceSections = capture.frameSections?.length
 		? capture.frameSections
-		: [{ id: "section-0", start: 0, frameSize: capture.frameSize || 3, collapseRuns: false }];
+		: [{ id: "section-0", start: 0, frameSize: capture.frameSize || 3, collapseRuns: false, collapsed: false }];
 	return sourceSections.map((section, index) => copySection(section, index, capture));
 }
 
@@ -362,7 +364,9 @@ export function deriveMessageStreamSnapshot(
 				});
 			}
 		}
-		entries.push({ type: "message", key: `message:${row.id}`, row, rowIndex });
+		if (!rowSectionId || !sectionsById.get(rowSectionId)?.collapsed) {
+			entries.push({ type: "message", key: `message:${row.id}`, row, rowIndex });
+		}
 		previousSectionId = rowSectionId;
 	});
 

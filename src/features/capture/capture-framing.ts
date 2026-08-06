@@ -31,6 +31,7 @@ export type CaptureSection = {
 	start?: number;
 	frameSize?: number;
 	collapseRuns?: boolean;
+	collapsed?: boolean;
 };
 
 const DEFAULT_FRAME_SIZE = 3;
@@ -173,7 +174,8 @@ function migrateLegacySections(
 			id: message.sectionId || generateId(),
 			start,
 			frameSize: Math.max(1, Math.min(MAX_FRAME_SIZE, message.bytes.length)),
-			collapseRuns: false
+			collapseRuns: false,
+			collapsed: false
 		});
 		fallbackStart = Math.max(fallbackStart, rawPositions[rawPositions.length - 1] + 1);
 	}
@@ -186,20 +188,22 @@ export function normalizeSections(capture: Capture, generateId = createId): void
 	(Array.isArray(capture.frameSections) ? capture.frameSections : [])
 		.filter(section => Boolean(section && typeof section === "object"))
 		.forEach(section => {
-		const start = Math.max(0, Math.min(Math.max(0, streamLength - 1), Math.floor(+section.start! || 0)));
-		byStart.set(start, {
-			id: section.id || generateId(),
-			start,
-			frameSize: Math.max(1, Math.min(MAX_FRAME_SIZE, Math.floor(+section.frameSize! || capture.frameSize || DEFAULT_FRAME_SIZE))),
-			collapseRuns: Boolean(section.collapseRuns)
-		});
+			const start = Math.max(0, Math.min(Math.max(0, streamLength - 1), Math.floor(+section.start! || 0)));
+			byStart.set(start, {
+				id: section.id || generateId(),
+				start,
+				frameSize: Math.max(1, Math.min(MAX_FRAME_SIZE, Math.floor(+section.frameSize! || capture.frameSize || DEFAULT_FRAME_SIZE))),
+				collapseRuns: Boolean(section.collapseRuns),
+				collapsed: Boolean(section.collapsed)
+			});
 		});
 	if (!byStart.has(0)) {
 		byStart.set(0, {
 			id: generateId(),
 			start: 0,
 			frameSize: capture.frameSize || DEFAULT_FRAME_SIZE,
-			collapseRuns: false
+			collapseRuns: false,
+			collapsed: false
 		});
 	}
 	capture.frameSections = [...byStart.values()].sort((a, b) => a.start! - b.start!);

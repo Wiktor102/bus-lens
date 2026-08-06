@@ -285,7 +285,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			id: crypto.randomUUID(),
 			start,
 			frameSize: preceding?.frameSize || c.frameSections[0]?.frameSize || 3,
-			collapseRuns: preceding?.collapseRuns || false
+			collapseRuns: preceding?.collapseRuns || false,
+			collapsed: false
 		});
 		normalizeSections(c);
 		rebuildPreview(c);
@@ -333,6 +334,16 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		dependencies.saveState();
 		dependencies.renderMessages();
 		dependencies.showToast(collapseRuns ? "Runs collapse in this section" : "Runs expand in this section");
+	}
+
+	function setSectionCollapsed(sectionId: string, collapsed: boolean) {
+		const c = capture();
+		const section = c?.frameSections.find(item => item.id === sectionId);
+		if (!section) return;
+		section.collapsed = Boolean(collapsed);
+		dependencies.saveState();
+		dependencies.renderMessages();
+		dependencies.showToast(section.collapsed ? "Section collapsed" : "Section expanded");
 	}
 
 	function commitContextDraft(input: ContextSaveInput) {
@@ -471,6 +482,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		moveSection,
 		setSectionFrameSize,
 		setSectionCollapse,
+		setSectionCollapsed,
 		commitContextDraft,
 		publishAnnotationDialog,
 		commitAnnotationDraft,

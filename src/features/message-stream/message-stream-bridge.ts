@@ -21,6 +21,7 @@ export type MessageStreamActions = {
 	moveSection: (sectionId: string, action: SectionMoveAction) => void;
 	setSectionFrameSize: (sectionId: string, value: string) => void;
 	setSectionCollapse: (sectionId: string, collapseRuns: boolean) => void;
+	setSectionCollapsed: (sectionId: string, collapsed: boolean) => void;
 };
 
 const noopActions: MessageStreamActions = {
@@ -33,7 +34,8 @@ const noopActions: MessageStreamActions = {
 	beginSection: () => {},
 	moveSection: () => {},
 	setSectionFrameSize: () => {},
-	setSectionCollapse: () => {}
+	setSectionCollapse: () => {},
+	setSectionCollapsed: () => {}
 };
 
 const messageStreamStore = createExternalStore<MessageStreamSnapshot, MessageStreamActions>(

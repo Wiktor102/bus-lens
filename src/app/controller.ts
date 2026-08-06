@@ -183,7 +183,8 @@ export function initializeController(): ControllerLifecycle {
 		beginSection: captureController.startSectionAtByte,
 		moveSection: captureController.moveSection,
 		setSectionFrameSize: (sectionId, value) => captureController.setSectionFrameSize(sectionId, Number(value)),
-		setSectionCollapse: captureController.setSectionCollapse
+		setSectionCollapse: captureController.setSectionCollapse,
+		setSectionCollapsed: captureController.setSectionCollapsed
 	});
 
 	registerNotesActions({ addSequenceNote: captureController.addSequenceNote });

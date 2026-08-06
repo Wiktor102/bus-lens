@@ -54,9 +54,9 @@ test("moves after to the selected section's next framed message boundary", () =>
 	assert.equal(getSectionMoveTarget(current, "payload", "message-after"), 10);
 	assert.equal(moveSection(current, "payload", "message-after"), true);
 	assert.deepEqual(current.frameSections, [
-		{ id: "header", start: 0, frameSize: 3, collapseRuns: true },
-		{ id: "payload", start: 10, frameSize: 2, collapseRuns: false },
-		{ id: "tail", start: 16, frameSize: 4, collapseRuns: true }
+		{ id: "header", start: 0, frameSize: 3, collapseRuns: true, collapsed: false },
+		{ id: "payload", start: 10, frameSize: 2, collapseRuns: false, collapsed: false },
+		{ id: "tail", start: 16, frameSize: 4, collapseRuns: true, collapsed: false }
 	]);
 });
 
