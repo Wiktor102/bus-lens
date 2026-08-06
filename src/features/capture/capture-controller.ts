@@ -16,7 +16,6 @@ import {
 	type PatternRemarkSaveInput,
 	type SectionsSaveInput
 } from "../dialogs/dialog-model.ts";
-import { applyFramingSettings, type FramingSettingsUpdate } from "./framing-toolbar.ts";
 import type { RawByteRecord } from "./capture-summary.ts";
 import {
 	hexByte,
@@ -275,25 +274,19 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			type: "sections",
 			captureId: String(c.id),
 			streamLength: c.byteStream.length,
-			frameSize: c.frameSize,
+			frameSize: c.frameSections[0]?.frameSize || 3,
 			sections: c.frameSections.map(sectionRowFromModel)
 		});
-	}
-
-	function updateFramingSettings(update: FramingSettingsUpdate) {
-		const c = capture();
-		if (!c) return;
-		applyFramingSettings(c, update);
-		normalizeSections(c);
-		rebuildPreview(c);
-		dependencies.saveState();
-		dependencies.render();
 	}
 
 	function commitSectionsDraft(input: SectionsSaveInput) {
 		const c = state.captures.find(item => String(item.id) === String(input.captureId));
 		if (!c) return false;
-		const result = serializeSectionDrafts(input.rows, Math.max(0, c.byteStream.length - 1), c.frameSize);
+		const result = serializeSectionDrafts(
+			input.rows,
+			Math.max(0, c.byteStream.length - 1),
+			c.frameSections[0]?.frameSize || 3
+		);
 		if (!result.ok) {
 			dependencies.showToast(result.error);
 			return false;
@@ -327,7 +320,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		c.frameSections.push({
 			id: crypto.randomUUID(),
 			start,
-			frameSize: preceding?.frameSize || c.frameSize,
+			frameSize: preceding?.frameSize || c.frameSections[0]?.frameSize || 3,
 			collapseRuns: preceding?.collapseRuns || false
 		});
 		normalizeSections(c);
@@ -492,7 +485,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		deleteActiveCapture,
 		publishContextDialog,
 		publishSectionsDialog,
-		updateFramingSettings,
 		commitSectionsDraft,
 		startSectionAtByte,
 		setSectionFrameSize,

@@ -48,39 +48,49 @@ test("frames a raw stream by message length and calculates visible width", () =>
 	current.frameSize = 2;
 	rebuildPreview(current);
 
+	assert.equal(current.previewMode, "sections");
+	assert.deepEqual(current.frameSections?.map(section => ({ start: section.start, frameSize: section.frameSize })), [
+		{ start: 0, frameSize: 2 }
+	]);
 	assert.deepEqual(current.messages.map(message => message.bytes), [[1, 2], [3, 4], [5]]);
 	assert.equal(frameWidth(current), 2);
 });
 
-test("frames markers at the start or end without changing marker behavior", () => {
+test("keeps marker and time-framed legacy boundaries when migrating to sections", () => {
 	const values = [0x10, 0xaa, 0x55, 0x01, 0xaa, 0x55, 0x02];
 	assert.deepEqual(markerBytes("AA 55"), [0xaa, 0x55]);
 	assert.equal(markerAt(values.map(value => ({ value, timestamp: 0, rawPosition: 0 })), 1, [0xaa, 0x55]), true);
 
-	const start = capture(values);
-	start.previewMode = "marker";
-	start.markerConfigured = true;
-	start.frameMarker = "AA 55";
-	start.markerPosition = "start";
-	rebuildPreview(start);
-	assert.deepEqual(start.messages.map(message => message.bytes), [[0xaa, 0x55, 0x01], [0xaa, 0x55, 0x02]]);
+	const markerCapture = {
+		...capture([0xaa, 0x55, 0x01, 0xaa, 0x55, 0x02]),
+		previewMode: "marker",
+		markerConfigured: true,
+		frameMarker: "AA 55",
+		messages: [
+			{ bytes: [0xaa, 0x55, 0x01], timestamp: 0, _rawPositions: [0, 1, 2] },
+			{ bytes: [0xaa, 0x55, 0x02], timestamp: 3, _rawPositions: [3, 4, 5] }
+		]
+	};
+	rebuildPreview(markerCapture);
+	assert.equal(markerCapture.previewMode, "sections");
+	assert.deepEqual(markerCapture.messages.map(message => message.bytes), [
+		[0xaa, 0x55, 0x01],
+		[0xaa, 0x55, 0x02]
+	]);
+	assert.deepEqual(markerCapture.frameSections?.map(section => section.start), [0, 3]);
 
-	const end = capture(values);
-	end.previewMode = "marker";
-	end.markerConfigured = true;
-	end.frameMarker = "AA 55";
-	end.markerPosition = "end";
-	rebuildPreview(end);
-	assert.deepEqual(end.messages.map(message => message.bytes), [[0x10, 0xaa, 0x55], [0x01, 0xaa, 0x55], [0x02]]);
-});
-
-test("splits frames at time gaps greater than or equal to the configured threshold", () => {
-	const current = capture([1, 2, 3, 4], [0, 4, 9, 10]);
-	current.previewMode = "time";
-	current.frameTimeGap = 5;
-	rebuildPreview(current);
-
-	assert.deepEqual(current.messages.map(message => message.bytes), [[1, 2], [3, 4]]);
+	const timeCapture = {
+		...capture([1, 2, 3, 4], [0, 4, 9, 10]),
+		previewMode: "time",
+		messages: [
+			{ bytes: [1, 2], timestamp: 0, _rawPositions: [0, 1] },
+			{ bytes: [3, 4], timestamp: 9, _rawPositions: [2, 3] }
+		]
+	};
+	rebuildPreview(timeCapture);
+	assert.equal(timeCapture.previewMode, "sections");
+	assert.deepEqual(timeCapture.messages.map(message => message.bytes), [[1, 2], [3, 4]]);
+	assert.deepEqual(timeCapture.frameSections?.map(section => section.frameSize), [2, 2]);
 });
 
 test("normalizes raw section starts and frames each section independently", () => {
@@ -163,6 +173,10 @@ test("normalizes legacy message-only captures without losing timestamps or hidde
 		{ value: 0x20, timestamp: 125, hidden: true, direction: "rx" }
 	]);
 	assert.equal(current.description, "Legacy observation");
+	assert.equal(current.previewMode, "sections");
+	assert.deepEqual(current.frameSections?.map(section => ({ start: section.start, frameSize: section.frameSize })), [
+		{ start: 0, frameSize: 2 }
+	]);
 	assert.deepEqual(current.notes, [{ id: "sequence-note", type: "sequence", text: "Keep me", createdAt: 2 }]);
 });
 

@@ -33,6 +33,9 @@ export type CaptureSection = {
 	collapseRuns?: boolean;
 };
 
+const DEFAULT_FRAME_SIZE = 3;
+const MAX_FRAME_SIZE = 1024;
+
 export type Capture = Omit<CaptureSummaryData, "notes"> & {
 	id?: string;
 	name?: string;
@@ -87,6 +90,8 @@ export function parseTime(value: string, now = Date.now): number {
 }
 
 export function normalizeCapture(capture: Capture, generateId = createId): Capture {
+	const legacyPreviewMode = String(capture.previewMode || "length");
+	const hasPersistedSections = Array.isArray(capture.frameSections) && capture.frameSections.length > 0;
 	capture.params ||= [];
 	capture.notes ||= [];
 	capture.annotations ||= {};
@@ -99,8 +104,7 @@ export function normalizeCapture(capture: Capture, generateId = createId): Captu
 			: message.bytes.map(() => false);
 	});
 	capture.notes.forEach(note => (note.id ||= generateId()));
-	capture.previewMode ||= "length";
-	capture.frameSize = Math.max(1, +capture.frameSize! || 3);
+	capture.frameSize = Math.max(1, Math.min(MAX_FRAME_SIZE, +capture.frameSize! || DEFAULT_FRAME_SIZE));
 	if (capture.markerConfigured === undefined) {
 		// 0A was the old UI default, not a marker the user necessarily chose.
 		capture.markerConfigured = Boolean(capture.frameMarker && capture.frameMarker !== "0A");
@@ -130,7 +134,13 @@ export function normalizeCapture(capture: Capture, generateId = createId): Captu
 			if (hidden && capture.byteStream?.[rawPosition]) capture.byteStream[rawPosition].hidden = true;
 		});
 	});
+	if (!hasPersistedSections) {
+		capture.frameSections = migrateLegacySections(capture, legacyPreviewMode, generateId);
+	}
 	normalizeCaptureSummaryData(capture, generateId);
+	// Sections are now the only framing model. Keep the legacy framing fields
+	// readable for old exports, but never let them select another preview mode.
+	capture.previewMode = "sections";
 	normalizeSections(capture, generateId);
 	capture.messages.forEach(message => {
 		message.byteTimestamps ||= message.bytes.map(() => message.timestamp);
@@ -138,23 +148,58 @@ export function normalizeCapture(capture: Capture, generateId = createId): Captu
 	return capture;
 }
 
+function migrateLegacySections(
+	capture: Capture,
+	legacyPreviewMode: string,
+	generateId: () => string
+): CaptureSection[] {
+	if (legacyPreviewMode !== "marker" && legacyPreviewMode !== "time") return [];
+
+	// Marker and time framing could produce variable-length messages. Preserve
+	// those existing boundaries by making each legacy message its own section;
+	// users can merge the boundaries later in the section editor if desired.
+	let fallbackStart = 0;
+	const sections: CaptureSection[] = [];
+	for (const message of capture.messages || []) {
+		if (!message.bytes.length) continue;
+		const rawPositions =
+			message._rawPositions && message._rawPositions.length === message.bytes.length
+				? message._rawPositions
+				: Number.isInteger(message._byteStart)
+					? message.bytes.map((_, index) => message._byteStart! + index)
+					: message.bytes.map((_, index) => fallbackStart + index);
+		const start = rawPositions[0];
+		if (!Number.isInteger(start)) continue;
+		sections.push({
+			id: message.sectionId || generateId(),
+			start,
+			frameSize: Math.max(1, Math.min(MAX_FRAME_SIZE, message.bytes.length)),
+			collapseRuns: false
+		});
+		fallbackStart = Math.max(fallbackStart, rawPositions[rawPositions.length - 1] + 1);
+	}
+	return sections;
+}
+
 export function normalizeSections(capture: Capture, generateId = createId): void {
 	const streamLength = capture.byteStream?.length || 0;
 	const byStart = new Map<number, CaptureSection>();
-	(Array.isArray(capture.frameSections) ? capture.frameSections : []).forEach(section => {
+	(Array.isArray(capture.frameSections) ? capture.frameSections : [])
+		.filter(section => Boolean(section && typeof section === "object"))
+		.forEach(section => {
 		const start = Math.max(0, Math.min(Math.max(0, streamLength - 1), Math.floor(+section.start! || 0)));
 		byStart.set(start, {
 			id: section.id || generateId(),
 			start,
-			frameSize: Math.max(1, Math.min(1024, Math.floor(+section.frameSize! || capture.frameSize || 3))),
+			frameSize: Math.max(1, Math.min(MAX_FRAME_SIZE, Math.floor(+section.frameSize! || capture.frameSize || DEFAULT_FRAME_SIZE))),
 			collapseRuns: Boolean(section.collapseRuns)
 		});
-	});
+		});
 	if (!byStart.has(0)) {
 		byStart.set(0, {
 			id: generateId(),
 			start: 0,
-			frameSize: capture.frameSize,
+			frameSize: capture.frameSize || DEFAULT_FRAME_SIZE,
 			collapseRuns: false
 		});
 	}
@@ -182,62 +227,20 @@ export function rebuildPreview(capture: Capture, generateId = createId): void {
 		.map((record, rawPosition) => ({ ...record, rawPosition }))
 		.filter(record => !record.hidden);
 	const ranges: Array<[number, number, string?]> = [];
-	if (capture.previewMode === "marker") {
-		const marker = markerBytes(capture.frameMarker);
-		if (capture.markerPosition === "end") {
-			let start = 0;
-			let foundMarker = false;
-			for (let index = 0; index < stream.length; index++) {
-				if (markerAt(stream, index, marker)) {
-					foundMarker = true;
-					const end = index + marker.length;
-					ranges.push([start, end]);
-					start = end;
-					index = end - 1;
-				}
-			}
-			if (foundMarker && start < stream.length) ranges.push([start, stream.length]);
-		} else {
-			let start = -1;
-			for (let index = 0; index < stream.length; index++) {
-				if (!markerAt(stream, index, marker)) continue;
-				if (start >= 0 && index > start) ranges.push([start, index]);
-				start = index;
-				index += marker.length - 1;
-			}
-			if (start >= 0 && start < stream.length) ranges.push([start, stream.length]);
+	normalizeSections(capture, generateId);
+	const sections = capture.frameSections as Array<Required<CaptureSection>>;
+	sections.forEach((section, sectionIndex) => {
+		// Section starts are persisted as raw positions. Translate them to the
+		// compact stream so deleting bytes before a section shifts it naturally.
+		const start = stream.findIndex(record => record.rawPosition >= section.start);
+		const nextRawStart = sections[sectionIndex + 1]?.start;
+		const nextStart = nextRawStart === undefined ? -1 : stream.findIndex(record => record.rawPosition >= nextRawStart);
+		const sectionEnd = nextStart < 0 ? stream.length : nextStart;
+		if (start < 0) return;
+		for (let offset = start; offset < sectionEnd; offset += section.frameSize) {
+			ranges.push([offset, Math.min(offset + section.frameSize, sectionEnd), section.id]);
 		}
-	} else if (capture.previewMode === "time") {
-		if (stream.length) {
-			let start = 0;
-			for (let index = 1; index < stream.length; index++) {
-				if (stream[index].timestamp - stream[index - 1].timestamp >= capture.frameTimeGap!) {
-					ranges.push([start, index]);
-					start = index;
-				}
-			}
-			ranges.push([start, stream.length]);
-		}
-	} else if (capture.previewMode === "sections") {
-		normalizeSections(capture);
-		const sections = capture.frameSections as Array<Required<CaptureSection>>;
-		sections.forEach((section, sectionIndex) => {
-			// Section starts are persisted as raw positions. Translate them to the
-			// compact stream so deleting bytes before a section shifts it naturally.
-			const start = stream.findIndex(record => record.rawPosition >= section.start);
-			const nextRawStart = sections[sectionIndex + 1]?.start;
-			const nextStart = nextRawStart === undefined ? -1 : stream.findIndex(record => record.rawPosition >= nextRawStart);
-			const sectionEnd = nextStart < 0 ? stream.length : nextStart;
-			if (start < 0) return;
-			for (let offset = start; offset < sectionEnd; offset += section.frameSize) {
-				ranges.push([offset, Math.min(offset + section.frameSize, sectionEnd), section.id]);
-			}
-		});
-	} else {
-		for (let start = 0; start < stream.length; start += capture.frameSize!) {
-			ranges.push([start, Math.min(start + capture.frameSize!, stream.length)]);
-		}
-	}
+	});
 	const oldMessagesByRange = new Map<string, ExistingMessage>(
 		(capture.messages || []).map(message => {
 			const rawPositions =

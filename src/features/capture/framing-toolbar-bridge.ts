@@ -1,17 +1,14 @@
 import { createExternalStore } from "../../shared/external-store.ts";
 import {
 	EMPTY_FRAMING_TOOLBAR_SNAPSHOT,
-	type FramingSettingsUpdate,
 	type FramingToolbarSnapshot
 } from "./framing-toolbar.ts";
 
 export type FramingToolbarActions = {
-	updateSettings: (update: FramingSettingsUpdate) => void;
 	openSections: () => void;
 };
 
 const noopActions: FramingToolbarActions = {
-	updateSettings: () => {},
 	openSections: () => {}
 };
 

@@ -123,7 +123,6 @@ export function initializeController(): ControllerLifecycle {
 	});
 
 	registerFramingToolbarActions({
-		updateSettings: captureController.updateFramingSettings,
 		openSections: captureController.publishSectionsDialog
 	});
 
