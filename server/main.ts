@@ -18,8 +18,8 @@ service.server.listen(port, LOOPBACK_HOST, () => {
 
 let vite: ReturnType<typeof spawn> | undefined;
 if (!production && !serverOnly) {
-	const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-	vite = spawn(pnpmCommand, ["exec", "vite", "--configLoader", "runner", "--host", LOOPBACK_HOST, "--port", String(resolveDevPort())], { stdio: "inherit" });
+	const viteCli = join(process.cwd(), "node_modules", "vite", "bin", "vite.js");
+	vite = spawn(process.execPath, [viteCli, "--configLoader", "runner", "--host", LOOPBACK_HOST, "--port", String(resolveDevPort())], { stdio: "inherit" });
 	vite.on("exit", code => { if (code && !service.server.listening) process.exitCode = code; });
 }
 
