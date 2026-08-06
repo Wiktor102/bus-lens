@@ -26,5 +26,5 @@ export function selectFramingToolbarSnapshot(
 export function selectFrameSizeLabel(capture: Capture | null | undefined): string {
 	if (!capture) return "—";
 	const count = capture.frameSections?.length || 1;
-	return `${count} SECTION${count === 1 ? "" : "S"} · INDEPENDENT LENGTHS`;
+	return `${count} SECTION${count === 1 ? "" : "S"} · INDEPENDENT FRAMING`;
 }

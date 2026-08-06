@@ -84,3 +84,45 @@ test("keeps a collapsed section header visible when filtering matches its messag
 	assert.deepEqual(entrySummary(snapshot), ["section:header"]);
 	assert.equal(snapshot.hasMatchingRows, true);
 });
+
+test("copies per-section framing settings into the section snapshot", () => {
+	const current = sectionedCapture();
+	current.frameSections![0] = {
+		...current.frameSections![0],
+		framingMode: "marker",
+		frameMarker: "AA 55",
+		markerPosition: "end",
+		frameTimeGap: 12
+	};
+	normalizeCapture(current, idFactory("snapshot"));
+
+	const snapshot = deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT);
+	const section = snapshot.entries.find(entry => entry.type === "section" && entry.section.id === "header");
+	assert.equal(section?.type, "section");
+	if (section?.type !== "section") return;
+	assert.deepEqual(
+		{
+			framingMode: section.section.framingMode,
+			frameMarker: section.section.frameMarker,
+			markerPosition: section.section.markerPosition,
+			frameTimeGap: section.section.frameTimeGap
+		},
+		{ framingMode: "marker", frameMarker: "AA 55", markerPosition: "end", frameTimeGap: 12 }
+	);
+});
+
+test("keeps a pending marker section header visible while it has no messages", () => {
+	const current = sectionedCapture();
+	current.frameSections = [{
+		id: "pending",
+		start: 0,
+		framingMode: "marker",
+		frameMarker: "",
+		markerPosition: "start"
+	}];
+	rebuildPreview(current, idFactory("pending"));
+
+	const snapshot = deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT);
+	assert.equal(snapshot.matchingRows.length, 0);
+	assert.deepEqual(snapshot.entries.map(entry => entry.type === "section" && entry.section.id), ["pending"]);
+});

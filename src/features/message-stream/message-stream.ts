@@ -1,12 +1,15 @@
 import {
 	frameWidth,
 	hexByte,
+	normalizeSectionFramingSettings,
 	signature,
 	visibleByteEntries,
 	visibleMessages,
 	type Capture,
 	type CaptureMessage,
-	type CaptureSection
+	type CaptureSection,
+	type MarkerPosition,
+	type SectionFramingMode
 } from "../capture/capture-framing.ts";
 import {
 	colorForByte,
@@ -63,7 +66,11 @@ export type MessageStreamRow = MessageStreamBaseRow & {
 export type MessageStreamSection = {
 	id: string;
 	start: number;
+	framingMode: SectionFramingMode;
 	frameSize: number;
+	frameMarker: string;
+	markerPosition: MarkerPosition;
+	frameTimeGap: number;
 	collapseRuns: boolean;
 	collapsed: boolean;
 	moveAvailability: SectionMoveAvailability;
@@ -173,10 +180,11 @@ function copyMessage(message: CaptureMessage): CaptureMessage & { id: string } {
 
 function copySection(section: CaptureSection, index: number, capture: Capture): MessageStreamSection {
 	const id = String(section.id ?? `section-${index}`);
+	const settings = normalizeSectionFramingSettings(section);
 	return {
 		id,
 		start: Number(section.start || 0),
-		frameSize: Number(section.frameSize || 1),
+		...settings,
 		collapseRuns: Boolean(section.collapseRuns),
 		collapsed: Boolean(section.collapsed),
 		moveAvailability: getSectionMoveAvailability(capture, id)
@@ -350,25 +358,37 @@ export function deriveMessageStreamSnapshot(
 	const sectionsById = new Map(sections.map(section => [section.id, section]));
 	const sectionNumbers = new Map(sections.map((section, index) => [section.id, index + 1]));
 	const entries: MessageStreamEntry[] = [];
-	let previousSectionId: string | undefined;
+	const rowsBySection = new Map<string, Array<{ row: MessageStreamRow; rowIndex: number }>>();
+	const unsectionedRows: Array<{ row: MessageStreamRow; rowIndex: number }> = [];
 	matchingRows.forEach((row, rowIndex) => {
-		const rowSectionId = row.sectionId === undefined ? undefined : String(row.sectionId);
-		if (rowSectionId !== previousSectionId) {
-			const section = rowSectionId ? sectionsById.get(rowSectionId) : undefined;
-			if (section) {
-				entries.push({
-					type: "section",
-					key: `section:${section.id}:${row._originalStart}`,
-					section,
-					sectionNumber: sectionNumbers.get(section.id)
-				});
-			}
-		}
-		if (!rowSectionId || !sectionsById.get(rowSectionId)?.collapsed) {
-			entries.push({ type: "message", key: `message:${row.id}`, row, rowIndex });
-		}
-		previousSectionId = rowSectionId;
+		const sectionId = row.sectionId === undefined ? undefined : String(row.sectionId);
+		if (!sectionId || !sectionsById.has(sectionId)) unsectionedRows.push({ row, rowIndex });
+		else rowsBySection.set(sectionId, [...(rowsBySection.get(sectionId) || []), { row, rowIndex }]);
 	});
+	sections.forEach(section => {
+		const sectionRows = rowsBySection.get(section.id) || [];
+		if (sectionRows.length) {
+			entries.push({
+				type: "section",
+				key: `section:${section.id}:${sectionRows[0].row._originalStart}`,
+				section,
+				sectionNumber: sectionNumbers.get(section.id)
+			});
+			if (!section.collapsed) {
+				sectionRows.forEach(({ row, rowIndex }) =>
+					entries.push({ type: "message", key: `message:${row.id}`, row, rowIndex })
+				);
+			}
+		} else if (!viewState.filterQuery.trim() && capture.byteStream?.length) {
+			entries.push({
+				type: "section",
+				key: `section:${section.id}:empty`,
+				section,
+				sectionNumber: sectionNumbers.get(section.id)
+			});
+		}
+	});
+	unsectionedRows.forEach(({ row, rowIndex }) => entries.push({ type: "message", key: `message:${row.id}`, row, rowIndex }));
 
 	const telegramCount = matchingRows.reduce((sum, row) => sum + row._repeats, 0);
 	const visibleSummary = matchingRows.length

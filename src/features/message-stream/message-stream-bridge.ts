@@ -4,6 +4,7 @@ import {
 	type MessageStreamSnapshot
 } from "./message-stream.ts";
 import type { SectionMoveAction } from "../capture/section-repositioning.ts";
+import type { SectionFramingUpdate } from "../capture/capture-framing.ts";
 
 export type MessageStreamTarget = {
 	messageId: string;
@@ -19,7 +20,12 @@ export type MessageStreamActions = {
 	hideByte: (messageId: string, position: number) => void;
 	beginSection: (messageId: string, position: number) => void;
 	moveSection: (sectionId: string, action: SectionMoveAction) => void;
+	setSectionFraming: (sectionId: string, update: SectionFramingUpdate) => void;
 	setSectionFrameSize: (sectionId: string, value: string) => void;
+	setSectionFramingMode: (sectionId: string, value: string) => void;
+	setSectionFrameMarker: (sectionId: string, value: string) => void;
+	setSectionMarkerPosition: (sectionId: string, value: string) => void;
+	setSectionFrameTimeGap: (sectionId: string, value: string) => void;
 	setSectionCollapse: (sectionId: string, collapseRuns: boolean) => void;
 	setSectionCollapsed: (sectionId: string, collapsed: boolean) => void;
 };
@@ -33,7 +39,12 @@ const noopActions: MessageStreamActions = {
 	hideByte: () => {},
 	beginSection: () => {},
 	moveSection: () => {},
+	setSectionFraming: () => {},
 	setSectionFrameSize: () => {},
+	setSectionFramingMode: () => {},
+	setSectionFrameMarker: () => {},
+	setSectionMarkerPosition: () => {},
+	setSectionFrameTimeGap: () => {},
 	setSectionCollapse: () => {},
 	setSectionCollapsed: () => {}
 };

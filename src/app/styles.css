@@ -2044,6 +2044,8 @@ tr:hover .row-action,
 .section-header-controls {
 	display: flex;
 	align-items: center;
+	justify-content: flex-end;
+	flex-wrap: wrap;
 	gap: 14px;
 }
 .section-header-content label {
@@ -2063,6 +2065,24 @@ tr:hover .row-action,
 	color: var(--ink);
 	outline: 0;
 	font: 10px var(--mono);
+}
+.section-frame-control select {
+	max-width: 150px;
+	padding: 4px 5px;
+	border: 1px solid var(--acid-dim);
+	background: #0d110d;
+	color: var(--ink);
+	outline: 0;
+	font: 10px var(--mono);
+}
+.section-frame-control select:focus,
+.section-frame-control input:focus {
+	border-color: var(--acid);
+	box-shadow: 0 0 0 2px color-mix(in srgb, var(--acid) 16%, transparent);
+}
+.section-marker-control input {
+	width: 82px;
+	text-transform: uppercase;
 }
 .section-header-content input:focus {
 	border-color: var(--acid);

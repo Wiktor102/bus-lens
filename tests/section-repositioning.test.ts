@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { rebuildPreview, type Capture } from "../src/features/capture/capture-framing.ts";
+import { createCaptureController } from "../src/features/capture/capture-controller.ts";
+import type { AppState } from "../src/shared/app-state.ts";
 import {
 	getSectionMoveAvailability,
 	getSectionMoveTarget,
@@ -53,11 +55,54 @@ test("moves after to the selected section's next framed message boundary", () =>
 
 	assert.equal(getSectionMoveTarget(current, "payload", "message-after"), 10);
 	assert.equal(moveSection(current, "payload", "message-after"), true);
-	assert.deepEqual(current.frameSections, [
-		{ id: "header", start: 0, frameSize: 3, collapseRuns: true, collapsed: false },
-		{ id: "payload", start: 10, frameSize: 2, collapseRuns: false, collapsed: false },
-		{ id: "tail", start: 16, frameSize: 4, collapseRuns: true, collapsed: false }
-	]);
+	assert.deepEqual(
+		current.frameSections?.map(section => ({
+			id: section.id,
+			start: section.start,
+			framingMode: section.framingMode,
+			frameSize: section.frameSize,
+			frameMarker: section.frameMarker,
+			markerPosition: section.markerPosition,
+			frameTimeGap: section.frameTimeGap,
+			collapseRuns: section.collapseRuns,
+			collapsed: section.collapsed
+		})),
+		[
+			{
+				id: "header",
+				start: 0,
+				framingMode: "length",
+				frameSize: 3,
+				frameMarker: "",
+				markerPosition: "start",
+				frameTimeGap: 5,
+				collapseRuns: true,
+				collapsed: false
+			},
+			{
+				id: "payload",
+				start: 10,
+				framingMode: "length",
+				frameSize: 2,
+				frameMarker: "",
+				markerPosition: "start",
+				frameTimeGap: 5,
+				collapseRuns: false,
+				collapsed: false
+			},
+			{
+				id: "tail",
+				start: 16,
+				framingMode: "length",
+				frameSize: 4,
+				frameMarker: "",
+				markerPosition: "start",
+				frameTimeGap: 5,
+				collapseRuns: true,
+				collapsed: false
+			}
+		]
+	);
 });
 
 test("disables movement at capture and neighboring section boundaries", () => {
@@ -75,4 +120,76 @@ test("disables movement at capture and neighboring section boundaries", () => {
 		"message-before": true,
 		"message-after": false
 	});
+});
+
+test("new sections inherit the preceding section's framing settings", () => {
+	const current = {
+		id: "capture-inherit",
+		frameSize: 3,
+		byteStream: [0xaa, 1, 2, 3].map((value, timestamp) => ({ value, timestamp })),
+		messages: [],
+		notes: [],
+		frameSections: [
+			{
+				id: "first",
+				start: 0,
+				framingMode: "marker",
+				frameSize: 7,
+				frameMarker: "AA",
+				markerPosition: "end",
+				frameTimeGap: 17,
+				collapseRuns: true
+			}
+		]
+	} as Capture;
+	rebuildPreview(current);
+	const sourceMessage = current.messages[1];
+	assert.ok(sourceMessage?.id);
+
+	const controller = createCaptureController({
+		state: { captures: [current], folders: [] } as AppState,
+		capture: () => current,
+		getActiveId: () => current.id,
+		setActiveId: () => {},
+		saveState: () => {},
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => false, stopRecording: () => {} },
+		publishArchiveState: () => {},
+		publishCaptureHeaderState: () => {},
+		publishNotesState: () => {},
+		publishDialogCommand: () => {}
+	});
+	controller.startSectionAtByte(sourceMessage.id!, 0);
+
+	assert.deepEqual(current.frameSections?.map(section => ({
+		id: section.id,
+		framingMode: section.framingMode,
+		frameSize: section.frameSize,
+		frameMarker: section.frameMarker,
+		markerPosition: section.markerPosition,
+		frameTimeGap: section.frameTimeGap,
+		collapseRuns: section.collapseRuns
+	})), [
+		{
+			id: "first",
+			framingMode: "marker",
+			frameSize: 7,
+			frameMarker: "AA",
+			markerPosition: "end",
+			frameTimeGap: 17,
+			collapseRuns: true
+		},
+		{
+			id: current.frameSections?.[1]?.id,
+			framingMode: "marker",
+			frameSize: 7,
+			frameMarker: "AA",
+			markerPosition: "end",
+			frameTimeGap: 17,
+			collapseRuns: true
+		}
+	]);
 });

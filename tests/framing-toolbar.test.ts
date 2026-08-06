@@ -34,19 +34,19 @@ test("selects section framing summary without global framing settings", () => {
 	assert.deepEqual(selectFramingToolbarSnapshot(current), {
 		captureId: "capture-1",
 		disabled: false,
-		frameSizeLabel: "2 SECTIONS · INDEPENDENT LENGTHS"
+		frameSizeLabel: "2 SECTIONS · INDEPENDENT FRAMING"
 	});
 });
 
 test("selects a section label instead of a global frame-size label", () => {
 	const current = capture([1, 2, 3]);
 	rebuildPreview(current);
-	assert.equal(selectFrameSizeLabel(current), "1 SECTION · INDEPENDENT LENGTHS");
+	assert.equal(selectFrameSizeLabel(current), "1 SECTION · INDEPENDENT FRAMING");
 
 	current.frameSections = [
 		{ id: "header", start: 0, frameSize: 1 },
 		{ id: "payload", start: 1, frameSize: 2 }
 	];
 	normalizeSections(current);
-	assert.equal(selectFrameSizeLabel(current), "2 SECTIONS · INDEPENDENT LENGTHS");
+	assert.equal(selectFrameSizeLabel(current), "2 SECTIONS · INDEPENDENT FRAMING");
 });

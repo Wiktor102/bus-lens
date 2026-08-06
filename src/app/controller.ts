@@ -182,7 +182,12 @@ export function initializeController(): ControllerLifecycle {
 		},
 		beginSection: captureController.startSectionAtByte,
 		moveSection: captureController.moveSection,
+		setSectionFraming: captureController.setSectionFraming,
 		setSectionFrameSize: (sectionId, value) => captureController.setSectionFrameSize(sectionId, Number(value)),
+		setSectionFramingMode: captureController.setSectionFramingMode,
+		setSectionFrameMarker: captureController.setSectionFrameMarker,
+		setSectionMarkerPosition: captureController.setSectionMarkerPosition,
+		setSectionFrameTimeGap: captureController.setSectionFrameTimeGap,
 		setSectionCollapse: captureController.setSectionCollapse,
 		setSectionCollapsed: captureController.setSectionCollapsed
 	});

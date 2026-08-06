@@ -6,7 +6,6 @@ import {
 	useState,
 	useSyncExternalStore,
 	type CSSProperties,
-	type ChangeEvent as ReactChangeEvent,
 	type MouseEvent as ReactMouseEvent
 } from "react";
 import {
@@ -118,6 +117,8 @@ function SectionEntry({
 }) {
 	const { section, sectionNumber } = entry;
 	const actions = getMessageStreamActions();
+	const [markerDraft, setMarkerDraft] = useState(section.frameMarker);
+	useEffect(() => setMarkerDraft(section.frameMarker), [section.id, section.frameMarker]);
 	const sectionLabel = String(sectionNumber).padStart(2, "0");
 	const toggleLabel = `${section.collapsed ? "Expand" : "Collapse"} section ${sectionLabel} messages`;
 	return (
@@ -151,18 +152,70 @@ function SectionEntry({
 						<span>Section · raw byte {section.start + 1}</span>
 					</div>
 					<div className="section-header-controls">
-						<label>
-							Message length{" "}
-							<input
-								data-section-length={section.id}
-								type="number"
-								min="1"
-								max="1024"
-								value={section.frameSize}
-								onChange={event => actions.setSectionFrameSize(section.id, event.currentTarget.value)}
-							/>
-							{" "}bytes
+						<label className="section-frame-control">
+							Frame by{" "}
+							<select
+								data-section-framing-mode={section.id}
+								value={section.framingMode}
+								onChange={event => actions.setSectionFramingMode(section.id, event.currentTarget.value)}
+							>
+								<option value="length">LENGTH</option>
+								<option value="marker">MARKER</option>
+								<option value="time">TIME GAP</option>
+							</select>
 						</label>
+						{section.framingMode === "length" ? (
+							<label className="section-frame-control">
+								Message length{" "}
+								<input
+									data-section-length={section.id}
+									type="number"
+									min="1"
+									max="1024"
+									value={section.frameSize}
+									onChange={event => actions.setSectionFrameSize(section.id, event.currentTarget.value)}
+								/>
+								{" "}bytes
+							</label>
+						) : null}
+						{section.framingMode === "marker" ? (
+							<>
+								<label className="section-frame-control section-marker-control">
+									Marker
+									<input
+										data-section-marker={section.id}
+										placeholder="AA 55"
+										spellCheck={false}
+										value={markerDraft}
+										onChange={event => setMarkerDraft(event.currentTarget.value)}
+										onBlur={event => actions.setSectionFrameMarker(section.id, event.currentTarget.value)}
+									/>
+								</label>
+								<label className="section-frame-control">
+									<select
+										data-section-marker-position={section.id}
+										value={section.markerPosition}
+										onChange={event => actions.setSectionMarkerPosition(section.id, event.currentTarget.value)}
+									>
+										<option value="start">STARTS MESSAGE</option>
+										<option value="end">ENDS MESSAGE</option>
+									</select>
+								</label>
+							</>
+						) : null}
+						{section.framingMode === "time" ? (
+							<label className="section-frame-control">
+								Idle gap ≥{" "}
+								<input
+									data-section-time-gap={section.id}
+									type="number"
+									min="0.01"
+									step="0.1"
+									value={section.frameTimeGap}
+									onChange={event => actions.setSectionFrameTimeGap(section.id, event.currentTarget.value)}
+								/>{" "}ms
+							</label>
+						) : null}
 						<label className="switch-label section-collapse">
 							Collapse runs{" "}
 							<input
@@ -586,6 +639,7 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 		getMessageStreamSnapshot
 	);
 	const actions = getMessageStreamActions();
+	const hasEntries = snapshot.entries.length > 0;
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const previousFilter = useRef(snapshot.filterQuery);
 	const [menuState, setMenuState] = useState<MenuState | null>(null);
@@ -688,22 +742,9 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 		}
 	};
 
-	const handleChange = (event: ReactChangeEvent<HTMLTableSectionElement>) => {
-		const targetElement = event.target instanceof Element ? event.target : null;
-		const lengthInput = targetElement?.closest<HTMLInputElement>("[data-section-length]");
-		if (lengthInput?.dataset.sectionLength) {
-			actions.setSectionFrameSize(lengthInput.dataset.sectionLength, lengthInput.value);
-			return;
-		}
-		const collapseInput = targetElement?.closest<HTMLInputElement>("[data-section-collapse]");
-		if (collapseInput?.dataset.sectionCollapse) {
-			actions.setSectionCollapse(collapseInput.dataset.sectionCollapse, collapseInput.checked);
-		}
-	};
-
 	return (
 		<div className="table-wrap" ref={scrollRef} onScroll={() => menuState && closeMenu()}>
-			<table className={`message-table ${snapshot.hasMatchingRows ? "" : "hidden"}`.trim()}>
+			<table className={`message-table ${hasEntries ? "" : "hidden"}`.trim()}>
 				<thead>
 					<tr>
 						<th>#</th>
@@ -722,7 +763,6 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 					style={{ height: virtualizer.getTotalSize() }}
 					onClick={handleClick}
 					onContextMenu={openContextMenu}
-					onChange={handleChange}
 				>
 					{virtualizer.getVirtualItems().map(virtualItem => {
 						const entry = snapshot.entries[virtualItem.index];
@@ -744,7 +784,7 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 					})}
 				</tbody>
 			</table>
-			<div id="emptyState" className={`empty-state ${snapshot.hasMatchingRows ? "hidden" : ""}`.trim()}>
+			<div id="emptyState" className={`empty-state ${hasEntries ? "hidden" : ""}`.trim()}>
 				<div className="empty-glyph">
 					01<span>10</span>
 				</div>

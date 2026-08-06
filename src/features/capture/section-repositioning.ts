@@ -1,17 +1,18 @@
-import type { Capture, CaptureSection } from "./capture-framing.ts";
+import {
+	DEFAULT_FRAME_SIZE,
+	frameSectionRanges,
+	normalizeSectionFramingSettings,
+	type Capture,
+	type CaptureSection,
+	type NormalizedCaptureSection,
+	type PreviewByteRecord
+} from "./capture-framing.ts";
 
 export type SectionMoveAction = "byte-before" | "byte-after" | "message-before" | "message-after";
 
 export type SectionMoveAvailability = Record<SectionMoveAction, boolean>;
 
-const DEFAULT_FRAME_SIZE = 3;
-
-type SectionState = {
-	id: string;
-	start: number;
-	frameSize: number;
-	collapseRuns: boolean;
-};
+type SectionState = NormalizedCaptureSection;
 
 type FramedMessageStarts = Map<string, number[]>;
 
@@ -26,8 +27,9 @@ function effectiveSections(capture: Capture): SectionState[] {
 		.map((section, index) => ({
 			id: String(section.id ?? `section-${index}`),
 			start: Math.max(0, Math.min(maxStart, Math.trunc(Number(section.start) || 0))),
-			frameSize: Math.max(1, Math.trunc(Number(section.frameSize) || Number(capture.frameSize) || DEFAULT_FRAME_SIZE)),
-			collapseRuns: Boolean(section.collapseRuns)
+			...normalizeSectionFramingSettings(section, capture.frameSections?.length ? DEFAULT_FRAME_SIZE : capture.frameSize || DEFAULT_FRAME_SIZE),
+			collapseRuns: Boolean(section.collapseRuns),
+			collapsed: Boolean(section.collapsed)
 		}))
 		.sort((left, right) => left.start - right.start);
 }
@@ -37,22 +39,23 @@ function firstVisibleIndexAtOrAfter(rawPositions: number[], rawStart: number): n
 }
 
 function framedMessageStarts(capture: Capture, sections: SectionState[]): FramedMessageStarts {
-	const rawPositions = (capture.byteStream || [])
-		.map((record, rawPosition) => (record.hidden ? -1 : rawPosition))
-		.filter(rawPosition => rawPosition >= 0);
+	const stream: PreviewByteRecord[] = (capture.byteStream || [])
+		.map((record, rawPosition) => ({ ...record, rawPosition }))
+		.filter(record => !record.hidden);
+	const rawPositions = stream.map(record => record.rawPosition);
 	const starts: FramedMessageStarts = new Map();
 
 	sections.forEach((section, sectionIndex) => {
 		const compactStart = firstVisibleIndexAtOrAfter(rawPositions, section.start);
 		const nextSectionStart = sections[sectionIndex + 1]?.start;
 		const nextCompactStart =
-			nextSectionStart === undefined ? rawPositions.length : firstVisibleIndexAtOrAfter(rawPositions, nextSectionStart);
-		const compactEnd = nextCompactStart < 0 ? rawPositions.length : nextCompactStart;
+			nextSectionStart === undefined ? stream.length : firstVisibleIndexAtOrAfter(rawPositions, nextSectionStart);
+		const compactEnd = nextCompactStart < 0 ? stream.length : nextCompactStart;
 		const sectionStarts: number[] = [];
 		if (compactStart >= 0 && compactStart < compactEnd) {
-			for (let offset = compactStart; offset < compactEnd; offset += section.frameSize) {
-				sectionStarts.push(rawPositions[offset]);
-			}
+			frameSectionRanges(stream, compactStart, compactEnd, section).forEach(([start]) => {
+				sectionStarts.push(stream[start].rawPosition);
+			});
 		}
 		starts.set(section.id, sectionStarts);
 	});

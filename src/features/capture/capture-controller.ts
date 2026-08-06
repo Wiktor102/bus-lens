@@ -15,14 +15,16 @@ import {
 } from "../dialogs/dialog-model.ts";
 import type { RawByteRecord } from "./capture-summary.ts";
 import {
+	applySectionFramingSettings,
 	hexByte,
 	normalizeCapture,
 	normalizeSections,
 	rebuildPreview,
 	signature,
 	type CaptureMessage,
-	type CaptureSection,
-	type Capture
+	type Capture,
+	type NormalizedCaptureSection,
+	type SectionFramingUpdate
 } from "./capture-framing.ts";
 import { moveSection as moveSectionStart, type SectionMoveAction } from "./section-repositioning.ts";
 import { publishDialogCommand } from "../dialogs/dialog-bridge.ts";
@@ -46,7 +48,7 @@ export type CaptureControllerDependencies = {
 
 type AnnotationValue = { text?: unknown; [key: string]: unknown };
 type PatternRemarkValue = { text?: unknown; [key: string]: unknown };
-type ActiveCaptureSection = Required<CaptureSection>;
+type ActiveCaptureSection = NormalizedCaptureSection;
 type ActiveCapture = Omit<
 	Capture,
 	"byteStream" | "frameSections" | "messages" | "params" | "annotations" | "patternRemarks" | "frameSize"
@@ -281,11 +283,16 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			return;
 		}
 		const preceding = [...c.frameSections].reverse().find(section => section.start < start);
+		const inherited = preceding || c.frameSections[0];
 		c.frameSections.push({
 			id: crypto.randomUUID(),
 			start,
-			frameSize: preceding?.frameSize || c.frameSections[0]?.frameSize || 3,
-			collapseRuns: preceding?.collapseRuns || false,
+			framingMode: inherited?.framingMode || "length",
+			frameSize: inherited?.frameSize || 3,
+			frameMarker: inherited?.frameMarker || "",
+			markerPosition: inherited?.markerPosition || "start",
+			frameTimeGap: inherited?.frameTimeGap || 5,
+			collapseRuns: Boolean(inherited?.collapseRuns),
 			collapsed: false
 		});
 		normalizeSections(c);
@@ -295,16 +302,45 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		dependencies.showToast(`Section begins at raw byte ${start + 1}`);
 	}
 
-	function setSectionFrameSize(sectionId: string, value: number) {
+	function updateSectionFraming(sectionId: string, update: SectionFramingUpdate, toast: (section: ActiveCaptureSection) => string) {
 		const c = capture();
 		if (!c) return;
+		normalizeSections(c);
 		const section = c.frameSections.find(item => item.id === sectionId);
 		if (!section) return;
-		section.frameSize = Math.max(1, Math.min(1024, Math.floor(+value || section.frameSize)));
+		applySectionFramingSettings(section, update);
 		rebuildPreview(c);
 		dependencies.saveState();
 		dependencies.render();
-		dependencies.showToast(`Section message length set to ${section.frameSize} bytes`);
+		dependencies.showToast(toast(section));
+	}
+
+	function setSectionFraming(sectionId: string, update: SectionFramingUpdate) {
+		updateSectionFraming(sectionId, update, () => "Section framing updated");
+	}
+
+	function setSectionFrameSize(sectionId: string, value: number | string) {
+		updateSectionFraming(sectionId, { frameSize: value }, section => `Section message length set to ${section.frameSize} bytes`);
+	}
+
+	function setSectionFramingMode(sectionId: string, framingMode: string) {
+		updateSectionFraming(sectionId, { framingMode }, section => `Section framing set to ${section.framingMode.toUpperCase()}`);
+	}
+
+	function setSectionFrameMarker(sectionId: string, frameMarker: string) {
+		updateSectionFraming(sectionId, { frameMarker }, section =>
+			section.frameMarker ? `Section marker set to ${section.frameMarker}` : "Section marker pending"
+		);
+	}
+
+	function setSectionMarkerPosition(sectionId: string, markerPosition: string) {
+		updateSectionFraming(sectionId, { markerPosition }, section =>
+			`Section marker ${section.markerPosition === "end" ? "ends" : "starts"} messages`
+		);
+	}
+
+	function setSectionFrameTimeGap(sectionId: string, frameTimeGap: string | number) {
+		updateSectionFraming(sectionId, { frameTimeGap }, section => `Section idle gap set to ${section.frameTimeGap} ms`);
 	}
 
 	function moveSection(sectionId: string, action: SectionMoveAction) {
@@ -480,7 +516,12 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		publishContextDialog,
 		startSectionAtByte,
 		moveSection,
+		setSectionFraming,
 		setSectionFrameSize,
+		setSectionFramingMode,
+		setSectionFrameMarker,
+		setSectionMarkerPosition,
+		setSectionFrameTimeGap,
 		setSectionCollapse,
 		setSectionCollapsed,
 		commitContextDraft,

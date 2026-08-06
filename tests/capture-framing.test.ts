@@ -77,7 +77,14 @@ test("keeps marker and time-framed legacy boundaries when migrating to sections"
 		[0xaa, 0x55, 0x01],
 		[0xaa, 0x55, 0x02]
 	]);
-	assert.deepEqual(markerCapture.frameSections?.map(section => section.start), [0, 3]);
+	assert.deepEqual(
+		markerCapture.frameSections?.map(section => ({
+			start: section.start,
+			framingMode: section.framingMode,
+			frameMarker: section.frameMarker
+		})),
+		[{ start: 0, framingMode: "marker", frameMarker: "AA 55" }]
+	);
 
 	const timeCapture = {
 		...capture([1, 2, 3, 4], [0, 4, 9, 10]),
@@ -90,7 +97,9 @@ test("keeps marker and time-framed legacy boundaries when migrating to sections"
 	rebuildPreview(timeCapture);
 	assert.equal(timeCapture.previewMode, "sections");
 	assert.deepEqual(timeCapture.messages.map(message => message.bytes), [[1, 2], [3, 4]]);
-	assert.deepEqual(timeCapture.frameSections?.map(section => section.frameSize), [2, 2]);
+	assert.deepEqual(timeCapture.frameSections?.map(section => ({ framingMode: section.framingMode, frameTimeGap: section.frameTimeGap })), [
+		{ framingMode: "time", frameTimeGap: 5 }
+	]);
 });
 
 test("normalizes raw section starts and frames each section independently", () => {
@@ -112,6 +121,106 @@ test("normalizes raw section starts and frames each section independently", () =
 	);
 	assert.deepEqual(current.messages.map(message => message.bytes), [[1, 2], [3, 4], [5, 6, 7]]);
 	assert.deepEqual(current.messages.map(message => message.sectionId), ["header", "header", "payload"]);
+});
+
+test("frames marker START and END sections with their own marker settings", () => {
+	const starts = capture([0x00, 0xaa, 0x01, 0xaa, 0x02]);
+	starts.frameSections = [
+		{
+			id: "starts",
+			start: 0,
+			framingMode: "marker",
+			frameMarker: "AA",
+			markerPosition: "start"
+		}
+	];
+	rebuildPreview(starts);
+	assert.deepEqual(starts.messages.map(message => message.bytes), [[0xaa, 0x01], [0xaa, 0x02]]);
+
+	const ends = capture([0x10, 0xbb, 0x20, 0xbb, 0x30]);
+	ends.frameSections = [
+		{
+			id: "ends",
+			start: 0,
+			framingMode: "marker",
+			frameMarker: "BB",
+			markerPosition: "end"
+		}
+	];
+	rebuildPreview(ends);
+	assert.deepEqual(ends.messages.map(message => message.bytes), [[0x10, 0xbb], [0x20, 0xbb], [0x30]]);
+});
+
+test("frames time-gap sections from their own first byte", () => {
+	const current = capture([1, 2, 3, 4, 5, 6], [0, 2, 10, 11, 20, 21]);
+	current.frameSections = [
+		{ id: "first", start: 0, framingMode: "time", frameTimeGap: 5 },
+		{ id: "second", start: 4, framingMode: "time", frameTimeGap: 5 }
+	];
+	rebuildPreview(current);
+
+	assert.deepEqual(current.messages.map(message => message.bytes), [[1, 2], [3, 4], [5, 6]]);
+	assert.deepEqual(current.messages.map(message => message.sectionId), ["first", "first", "second"]);
+});
+
+test("does not let one section's framing affect its neighbor", () => {
+	const current = capture([0xaa, 1, 0xaa, 2, 0xaa, 3, 4, 5]);
+	current.frameSections = [
+		{ id: "marker", start: 0, framingMode: "marker", frameMarker: "AA", markerPosition: "start" },
+		{ id: "length", start: 4, framingMode: "length", frameSize: 2 }
+	];
+	rebuildPreview(current);
+
+	assert.deepEqual(current.messages.map(message => message.bytes), [[0xaa, 1], [0xaa, 2], [0xaa, 3], [4, 5]]);
+	assert.deepEqual(current.messages.map(message => message.sectionId), ["marker", "marker", "length", "length"]);
+});
+
+test("keeps an empty marker section pending without discarding raw bytes", () => {
+	const current = capture([1, 2, 3]);
+	current.frameSections = [{ id: "pending", start: 0, framingMode: "marker", frameMarker: "AA" }];
+	current.frameSections[0].frameMarker = "";
+	rebuildPreview(current);
+
+	assert.deepEqual(current.messages, []);
+	assert.deepEqual(current.byteStream?.map(record => record.value), [1, 2, 3]);
+});
+
+test("migrates global framing into one section and defaults old PR sections to LENGTH", () => {
+	const legacy = {
+		...capture([0xaa, 1, 0xaa, 2]),
+		previewMode: "marker",
+		markerConfigured: true,
+		frameMarker: "AA",
+		markerPosition: "end"
+	};
+	normalizeCapture(legacy);
+	assert.deepEqual(legacy.frameSections?.map(section => ({
+		framingMode: section.framingMode,
+		frameMarker: section.frameMarker,
+		markerPosition: section.markerPosition
+	})), [{ framingMode: "marker", frameMarker: "AA", markerPosition: "end" }]);
+
+	const earlierPr = {
+		...capture([0xaa, 1, 0xaa, 2]),
+		previewMode: "marker",
+		markerConfigured: true,
+		frameMarker: "AA",
+		frameSections: [{ id: "saved", start: 0, frameSize: 2 }]
+	};
+	normalizeCapture(earlierPr);
+	assert.deepEqual(earlierPr.frameSections?.[0], {
+		id: "saved",
+		start: 0,
+		framingMode: "length",
+		frameSize: 2,
+		frameMarker: "",
+		markerPosition: "start",
+		frameTimeGap: 5,
+		collapseRuns: false,
+		collapsed: false
+	});
+	rebuildPreview(earlierPr);
+	assert.deepEqual(earlierPr.messages.map(message => message.bytes), [[0xaa, 1], [0xaa, 2]]);
 });
 
 test("omits hidden raw bytes before framing and keeps visible-byte positions explicit", () => {

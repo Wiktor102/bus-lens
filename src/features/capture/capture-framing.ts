@@ -29,13 +29,47 @@ export type CaptureMessage = FramedMessage & {
 export type CaptureSection = {
 	id?: string;
 	start?: number;
+	framingMode?: string;
+	frameMode?: string;
+	previewMode?: string;
 	frameSize?: number;
+	frameMarker?: string;
+	markerConfigured?: boolean;
+	markerPosition?: string;
+	frameTimeGap?: number;
 	collapseRuns?: boolean;
 	collapsed?: boolean;
 };
 
-const DEFAULT_FRAME_SIZE = 3;
-const MAX_FRAME_SIZE = 1024;
+export type SectionFramingMode = "length" | "marker" | "time";
+export type MarkerPosition = "start" | "end";
+
+export type SectionFramingSettings = {
+	framingMode: SectionFramingMode;
+	frameSize: number;
+	frameMarker: string;
+	markerPosition: MarkerPosition;
+	frameTimeGap: number;
+};
+
+export type NormalizedCaptureSection = SectionFramingSettings & {
+	id: string;
+	start: number;
+	collapseRuns: boolean;
+	collapsed: boolean;
+};
+
+export type SectionFramingUpdate = {
+	framingMode?: string;
+	frameSize?: string | number;
+	frameMarker?: string;
+	markerPosition?: string;
+	frameTimeGap?: string | number;
+};
+
+export const DEFAULT_FRAME_SIZE = 3;
+export const MAX_FRAME_SIZE = 1024;
+export const DEFAULT_FRAME_TIME_GAP = 5;
 
 export type Capture = Omit<CaptureSummaryData, "notes"> & {
 	id?: string;
@@ -59,7 +93,7 @@ export type Capture = Omit<CaptureSummaryData, "notes"> & {
 	frameSections?: CaptureSection[];
 };
 
-type PreviewByteRecord = RawByteRecord & { rawPosition: number };
+export type PreviewByteRecord = RawByteRecord & { rawPosition: number };
 type ExistingMessage = { id?: string; hidden: boolean };
 
 const createId: () => string = () => crypto.randomUUID();
@@ -90,8 +124,73 @@ export function parseTime(value: string, now = Date.now): number {
 	return date.getTime();
 }
 
+function normalizeFramingMode(value: unknown): SectionFramingMode {
+	const mode = String(value || "").trim().toLowerCase();
+	if (mode === "marker") return "marker";
+	if (mode === "time" || mode === "time-gap" || mode === "timegap") return "time";
+	return "length";
+}
+
+function normalizeMarkerPosition(value: unknown): MarkerPosition {
+	return String(value || "").trim().toLowerCase() === "end" ? "end" : "start";
+}
+
+function normalizeFrameSize(value: unknown, fallback = DEFAULT_FRAME_SIZE): number {
+	const number = Math.floor(Number(value));
+	return Math.max(1, Math.min(MAX_FRAME_SIZE, number || fallback));
+}
+
+function normalizeFrameTimeGap(value: unknown, fallback = DEFAULT_FRAME_TIME_GAP): number {
+	const number = Number(value);
+	return Math.max(0.01, number || fallback);
+}
+
+function normalizeMarker(value: unknown, configured = true): string {
+	if (!configured) return "";
+	return markerBytes(value)
+		.map(hexByte)
+		.join(" ");
+}
+
+function sectionModeValue(section: CaptureSection): unknown {
+	return section.framingMode ?? section.frameMode ?? section.previewMode;
+}
+
+export function normalizeSectionFramingSettings(
+	section: CaptureSection,
+	fallbackFrameSize = DEFAULT_FRAME_SIZE
+): SectionFramingSettings {
+	const markerConfigured = section.markerConfigured === undefined ? true : Boolean(section.markerConfigured);
+	return {
+		framingMode: normalizeFramingMode(sectionModeValue(section)),
+		frameSize: normalizeFrameSize(section.frameSize, fallbackFrameSize),
+		frameMarker: normalizeMarker(section.frameMarker, markerConfigured),
+		markerPosition: normalizeMarkerPosition(section.markerPosition),
+		frameTimeGap: normalizeFrameTimeGap(section.frameTimeGap)
+	};
+}
+
+export function applySectionFramingSettings(section: CaptureSection, update: SectionFramingUpdate): void {
+	const current = normalizeSectionFramingSettings(section, DEFAULT_FRAME_SIZE);
+	const next: SectionFramingSettings = {
+		framingMode: update.framingMode === undefined ? current.framingMode : normalizeFramingMode(update.framingMode),
+		frameSize: update.frameSize === undefined ? current.frameSize : normalizeFrameSize(update.frameSize, current.frameSize),
+		frameMarker: update.frameMarker === undefined ? current.frameMarker : normalizeMarker(update.frameMarker),
+		markerPosition:
+			update.markerPosition === undefined ? current.markerPosition : normalizeMarkerPosition(update.markerPosition),
+		frameTimeGap:
+			update.frameTimeGap === undefined
+				? current.frameTimeGap
+				: normalizeFrameTimeGap(update.frameTimeGap, current.frameTimeGap)
+	};
+	Object.assign(section, next);
+	delete section.frameMode;
+	delete section.previewMode;
+	delete section.markerConfigured;
+}
+
 export function normalizeCapture(capture: Capture, generateId = createId): Capture {
-	const legacyPreviewMode = String(capture.previewMode || "length");
+	const legacyPreviewMode = normalizeFramingMode(capture.previewMode);
 	const hasPersistedSections = Array.isArray(capture.frameSections) && capture.frameSections.length > 0;
 	capture.params ||= [];
 	capture.notes ||= [];
@@ -151,35 +250,25 @@ export function normalizeCapture(capture: Capture, generateId = createId): Captu
 
 function migrateLegacySections(
 	capture: Capture,
-	legacyPreviewMode: string,
+	legacyPreviewMode: SectionFramingMode,
 	generateId: () => string
 ): CaptureSection[] {
-	if (legacyPreviewMode !== "marker" && legacyPreviewMode !== "time") return [];
-
-	// Marker and time framing could produce variable-length messages. Preserve
-	// those existing boundaries by making each legacy message its own section.
-	let fallbackStart = 0;
-	const sections: CaptureSection[] = [];
-	for (const message of capture.messages || []) {
-		if (!message.bytes.length) continue;
-		const rawPositions =
-			message._rawPositions && message._rawPositions.length === message.bytes.length
-				? message._rawPositions
-				: Number.isInteger(message._byteStart)
-					? message.bytes.map((_, index) => message._byteStart! + index)
-					: message.bytes.map((_, index) => fallbackStart + index);
-		const start = rawPositions[0];
-		if (!Number.isInteger(start)) continue;
-		sections.push({
-			id: message.sectionId || generateId(),
-			start,
-			frameSize: Math.max(1, Math.min(MAX_FRAME_SIZE, message.bytes.length)),
+	const markerConfigured = capture.markerConfigured === undefined
+		? Boolean(capture.frameMarker && capture.frameMarker !== "0A")
+		: Boolean(capture.markerConfigured);
+	return [
+		{
+			id: generateId(),
+			start: 0,
+			framingMode: legacyPreviewMode,
+			frameSize: normalizeFrameSize(capture.frameSize),
+			frameMarker: normalizeMarker(capture.frameMarker, markerConfigured),
+			markerPosition: normalizeMarkerPosition(capture.markerPosition),
+			frameTimeGap: normalizeFrameTimeGap(capture.frameTimeGap),
 			collapseRuns: false,
 			collapsed: false
-		});
-		fallbackStart = Math.max(fallbackStart, rawPositions[rawPositions.length - 1] + 1);
-	}
-	return sections;
+		}
+	];
 }
 
 export function normalizeSections(capture: Capture, generateId = createId): void {
@@ -189,10 +278,11 @@ export function normalizeSections(capture: Capture, generateId = createId): void
 		.filter(section => Boolean(section && typeof section === "object"))
 		.forEach(section => {
 			const start = Math.max(0, Math.min(Math.max(0, streamLength - 1), Math.floor(+section.start! || 0)));
+			const settings = normalizeSectionFramingSettings(section, DEFAULT_FRAME_SIZE);
 			byStart.set(start, {
 				id: section.id || generateId(),
 				start,
-				frameSize: Math.max(1, Math.min(MAX_FRAME_SIZE, Math.floor(+section.frameSize! || capture.frameSize || DEFAULT_FRAME_SIZE))),
+				...settings,
 				collapseRuns: Boolean(section.collapseRuns),
 				collapsed: Boolean(section.collapsed)
 			});
@@ -201,7 +291,11 @@ export function normalizeSections(capture: Capture, generateId = createId): void
 		byStart.set(0, {
 			id: generateId(),
 			start: 0,
-			frameSize: capture.frameSize || DEFAULT_FRAME_SIZE,
+			framingMode: "length",
+			frameSize: normalizeFrameSize(capture.frameSize),
+			frameMarker: "",
+			markerPosition: "start",
+			frameTimeGap: DEFAULT_FRAME_TIME_GAP,
 			collapseRuns: false,
 			collapsed: false
 		});
@@ -214,11 +308,72 @@ export function frameWidth(capture: Capture): number {
 }
 
 export function markerBytes(value: unknown): number[] {
-	return (String(value).match(/[0-9a-f]{2}/gi) || []).map(byte => parseInt(byte, 16));
+	return (value === undefined || value === null ? "" : String(value)).match(/[0-9a-f]{2}/gi)?.map(byte => parseInt(byte, 16)) || [];
 }
 
 export function markerAt(stream: PreviewByteRecord[], index: number, marker: number[]): boolean {
 	return marker.length > 0 && marker.every((value, offset) => stream[index + offset]?.value === value);
+}
+
+export function frameSectionRanges(
+	stream: PreviewByteRecord[],
+	sectionStart: number,
+	sectionEnd: number,
+	section: CaptureSection | SectionFramingSettings
+): Array<[number, number]> {
+	const settings = normalizeSectionFramingSettings(section, DEFAULT_FRAME_SIZE);
+	const start = Math.max(0, sectionStart);
+	const end = Math.max(start, Math.min(stream.length, sectionEnd));
+	if (start >= end) return [];
+
+	if (settings.framingMode === "length") {
+		const ranges: Array<[number, number]> = [];
+		for (let offset = start; offset < end; offset += settings.frameSize) {
+			ranges.push([offset, Math.min(offset + settings.frameSize, end)]);
+		}
+		return ranges;
+	}
+
+	if (settings.framingMode === "time") {
+		const ranges: Array<[number, number]> = [];
+		let frameStart = start;
+		for (let index = start + 1; index < end; index++) {
+			if (stream[index].timestamp - stream[index - 1].timestamp < settings.frameTimeGap) continue;
+			ranges.push([frameStart, index]);
+			frameStart = index;
+		}
+		ranges.push([frameStart, end]);
+		return ranges;
+	}
+
+	const marker = markerBytes(settings.frameMarker);
+	if (!marker.length) return [];
+	const markerMatchesAt = (index: number) => index + marker.length <= end && markerAt(stream, index, marker);
+	const ranges: Array<[number, number]> = [];
+	if (settings.markerPosition === "end") {
+		let frameStart = start;
+		let foundMarker = false;
+		for (let index = start; index < end; index++) {
+			if (!markerMatchesAt(index)) continue;
+			foundMarker = true;
+			const markerEnd = index + marker.length;
+			ranges.push([frameStart, markerEnd]);
+			frameStart = markerEnd;
+			index = markerEnd - 1;
+		}
+		if (foundMarker && frameStart < end) ranges.push([frameStart, end]);
+		return ranges;
+	}
+
+	let frameStart = -1;
+	for (let index = start; index < end; index++) {
+		if (!markerMatchesAt(index)) continue;
+		if (frameStart >= 0 && index > frameStart) ranges.push([frameStart, index]);
+		frameStart = index;
+		index += marker.length - 1;
+	}
+	if (frameStart >= 0 && frameStart < end) ranges.push([frameStart, end]);
+	return ranges;
 }
 
 export function rebuildPreview(capture: Capture, generateId = createId): void {
@@ -231,18 +386,18 @@ export function rebuildPreview(capture: Capture, generateId = createId): void {
 		.filter(record => !record.hidden);
 	const ranges: Array<[number, number, string?]> = [];
 	normalizeSections(capture, generateId);
-	const sections = capture.frameSections as Array<Required<CaptureSection>>;
+	const sections = capture.frameSections || [];
 	sections.forEach((section, sectionIndex) => {
 		// Section starts are persisted as raw positions. Translate them to the
 		// compact stream so deleting bytes before a section shifts it naturally.
-		const start = stream.findIndex(record => record.rawPosition >= section.start);
+		const start = stream.findIndex(record => record.rawPosition >= (section.start ?? 0));
 		const nextRawStart = sections[sectionIndex + 1]?.start;
 		const nextStart = nextRawStart === undefined ? -1 : stream.findIndex(record => record.rawPosition >= nextRawStart);
 		const sectionEnd = nextStart < 0 ? stream.length : nextStart;
-		if (start < 0) return;
-		for (let offset = start; offset < sectionEnd; offset += section.frameSize) {
-			ranges.push([offset, Math.min(offset + section.frameSize, sectionEnd), section.id]);
-		}
+		if (start < 0 || start >= sectionEnd) return;
+		frameSectionRanges(stream, start, sectionEnd, section).forEach(([rangeStart, rangeEnd]) => {
+			ranges.push([rangeStart, rangeEnd, section.id]);
+		});
 	});
 	const oldMessagesByRange = new Map<string, ExistingMessage>(
 		(capture.messages || []).map(message => {
