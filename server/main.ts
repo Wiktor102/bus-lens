@@ -6,7 +6,8 @@ import { LOOPBACK_HOST, resolveAppPort, resolveDatabaseConfig, resolveDevPort, r
 
 const databaseConfig = resolveDatabaseConfig();
 const staticDirectory = join(process.cwd(), "dist");
-const production = existsSync(join(staticDirectory, "index.html"));
+const production = !process.argv.includes("--dev") && existsSync(join(staticDirectory, "index.html"));
+const serverOnly = process.argv.includes("--server-only");
 const port = production ? resolveAppPort() : resolveServicePort();
 const service = createArchiveHttpService({ databasePath: databaseConfig.databasePath, staticDirectory: production ? staticDirectory : undefined, maxBodyBytes: resolveMaxBodyBytes() });
 
@@ -16,7 +17,7 @@ service.server.listen(port, LOOPBACK_HOST, () => {
 });
 
 let vite: ReturnType<typeof spawn> | undefined;
-if (!production) {
+if (!production && !serverOnly) {
 	vite = spawn("pnpm", ["exec", "vite", "--configLoader", "runner", "--host", LOOPBACK_HOST, "--port", String(resolveDevPort())], { stdio: "inherit", shell: process.platform === "win32" });
 	vite.on("exit", code => { if (code && !service.server.listening) process.exitCode = code; });
 }
