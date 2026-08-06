@@ -1987,19 +1987,12 @@ tr:hover .row-action,
 	font: 9px var(--mono);
 	letter-spacing: 0.03em;
 }
-.section-divider .section-number {
-	grid-column: 1;
-	width: 100%;
-	display: flex;
-	align-items: center;
-	justify-content: flex-end;
-	color: var(--acid);
-	font: 500 11px var(--mono);
-}
-.section-divider .section-header-cell {
-	grid-column: 2 / -1;
+.message-table .section-divider .section-header-cell {
+	grid-column: 1 / -1;
 	width: 100%;
 	min-width: 0;
+	text-align: left;
+	color: var(--muted);
 }
 .section-header-content {
 	display: flex;

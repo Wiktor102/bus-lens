@@ -129,8 +129,7 @@ function SectionEntry({
 			data-index={virtualItem.index}
 			style={{ transform: `translateY(${virtualItem.start}px)` }}
 		>
-			<td className="section-number">{String(sectionNumber).padStart(2, "0")}</td>
-			<td className="section-header-cell" colSpan={6}>
+			<td className="section-header-cell" colSpan={7}>
 				<div className="section-header-content">
 					<div className="section-header-title">
 						<button
@@ -149,7 +148,7 @@ function SectionEntry({
 								<path d="m9 6 6 6-6 6" />
 							</svg>
 						</button>
-						<span>Section · raw byte {section.start + 1}</span>
+						<span>Section {sectionNumber} · raw byte {section.start + 1}</span>
 					</div>
 					<div className="section-header-controls">
 						<label className="section-frame-control">
