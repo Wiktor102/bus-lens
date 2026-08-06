@@ -245,13 +245,13 @@ function SectionEntry({
 							/>
 							<span className="switch" />
 						</label>
+						{emptyState ? (
+							<div className="section-empty-state" id={emptyStateId} role="status" aria-live="polite">
+								<strong>{emptyState.title}</strong>
+								<span>{emptyState.description}</span>
+							</div>
+						) : null}
 					</div>
-					{emptyState ? (
-						<div className="section-empty-state" id={emptyStateId} role="status" aria-live="polite">
-							<strong>{emptyState.title}</strong>
-							<span>{emptyState.description}</span>
-						</div>
-					) : null}
 				</div>
 			</td>
 		</tr>
