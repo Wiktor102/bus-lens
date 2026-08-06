@@ -434,36 +434,6 @@ p {
 	color: var(--muted);
 	font: 9px var(--mono);
 }
-.capture-move {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	padding: 0 9px 8px;
-	opacity: 0;
-	max-height: 0;
-	overflow: hidden;
-	transition:
-		opacity 0.12s ease,
-		max-height 0.12s ease;
-	color: var(--faint);
-	font: 8px var(--mono);
-	text-transform: uppercase;
-}
-.capture-item:hover .capture-move,
-.capture-item:focus-within .capture-move {
-	opacity: 1;
-	max-height: 32px;
-}
-.capture-move select {
-	min-width: 0;
-	flex: 1;
-	padding: 3px 5px;
-	border: 1px solid var(--line);
-	background: #101410;
-	color: var(--muted);
-	font: 9px var(--mono);
-	outline: 0;
-}
 .sidebar-empty {
 	display: grid;
 	gap: 6px;
@@ -763,6 +733,43 @@ p {
 	stroke-linecap: round;
 	stroke-linejoin: round;
 	stroke-width: 1.6;
+}
+.capture-context-menu {
+	width: 220px;
+}
+.capture-context-menu > button:first-child {
+	border-bottom-color: var(--line);
+}
+.capture-context-icon {
+	display: inline-flex;
+	flex: 0 0 17px;
+	width: 17px;
+	height: 17px;
+}
+.capture-context-icon svg {
+	width: 100%;
+	height: 100%;
+}
+.capture-context-chevron {
+	margin-left: auto;
+	color: var(--muted);
+	font-size: 16px;
+	line-height: 1;
+}
+.capture-context-submenu {
+	margin: 1px 0 4px 27px;
+	padding: 3px 0 3px 4px;
+	border-left: 1px solid var(--line);
+}
+.capture-context-submenu button {
+	justify-content: space-between;
+	min-height: 30px;
+	padding: 6px 8px;
+	font-size: 9px;
+}
+.capture-context-submenu button:disabled {
+	color: var(--acid);
+	opacity: 0.82;
 }
 @media (prefers-reduced-motion: reduce) {
 	.message-context-menu {

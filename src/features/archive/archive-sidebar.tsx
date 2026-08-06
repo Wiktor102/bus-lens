@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import {
+	useCallback,
+	useEffect,
+	useLayoutEffect,
+	useMemo,
+	useRef,
+	useState,
+	useSyncExternalStore,
+	type MouseEvent as ReactMouseEvent
+} from "react";
 import { getArchiveActions, getArchiveSnapshot, subscribeToArchive } from "./archive-bridge";
 import { buildArchiveGroups, type ArchiveCapture, type ArchiveGroup } from "./archive-list";
 
@@ -9,6 +18,13 @@ const FOLDER_ICON = (
 	</svg>
 );
 
+type CaptureContextMenuState = {
+	captureId: string;
+	clientX: number;
+	clientY: number;
+	origin: HTMLElement;
+};
+
 function FolderGroup({
 	group,
 	searching,
@@ -17,8 +33,7 @@ function FolderGroup({
 	onRename,
 	onDelete,
 	onSelect,
-	onMove,
-	folders
+	onContextMenu
 }: {
 	group: ArchiveGroup;
 	searching: boolean;
@@ -27,8 +42,7 @@ function FolderGroup({
 	onRename: (folderId: string) => void;
 	onDelete: (folderId: string) => void;
 	onSelect: (captureId: string) => void;
-	onMove: (captureId: string, folderId: string | null) => void;
-	folders: { id: string; name: string }[];
+	onContextMenu: (event: ReactMouseEvent<HTMLDivElement>, captureId: string) => void;
 }) {
 	const collapsed = group.collapsed && !searching;
 
@@ -80,9 +94,8 @@ function FolderGroup({
 							key={capture.id}
 							capture={capture}
 							active={capture.id === activeId}
-							folders={folders}
 							onSelect={onSelect}
-							onMove={onMove}
+							onContextMenu={event => onContextMenu(event, capture.id)}
 						/>
 					))
 				) : (
@@ -96,18 +109,19 @@ function FolderGroup({
 function CaptureItem({
 	capture,
 	active,
-	folders,
 	onSelect,
-	onMove
+	onContextMenu
 }: {
 	capture: ArchiveCapture;
 	active: boolean;
-	folders: { id: string; name: string }[];
 	onSelect: (captureId: string) => void;
-	onMove: (captureId: string, folderId: string | null) => void;
+	onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void;
 }) {
 	return (
-		<div className={`capture-item ${active ? "active" : ""}`}>
+		<div
+			className={`capture-item ${active ? "active" : ""}`}
+			onContextMenu={onContextMenu}
+		>
 			<button className="capture-open" type="button" data-capture-id={capture.id} onClick={() => onSelect(capture.id)}>
 				<strong>{capture.name}</strong>
 				<small>
@@ -122,22 +136,6 @@ function CaptureItem({
 					))}
 				</span>
 			</button>
-			<label className="capture-move" title="Move capture to another folder">
-				<span>Move to</span>
-				<select
-					data-capture-folder={capture.id}
-					aria-label={`Move ${capture.name} to folder`}
-					value={capture.folderId || ""}
-					onChange={event => onMove(capture.id, event.currentTarget.value || null)}
-				>
-					<option value="">Unfiled</option>
-					{folders.map(folder => (
-						<option key={folder.id} value={folder.id} data-folder-option={folder.id}>
-							{folder.name}
-						</option>
-					))}
-				</select>
-			</label>
 		</div>
 	);
 }
@@ -148,6 +146,13 @@ export function ArchiveSidebar() {
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const [query, setQuery] = useState("");
 	const [folderDialogId, setFolderDialogId] = useState<string | null | undefined>(undefined);
+	const [captureMenuState, setCaptureMenuState] = useState<CaptureContextMenuState | null>(null);
+	const closeCaptureMenu = useCallback((restoreFocus = false) => {
+		setCaptureMenuState(current => {
+			if (restoreFocus && current?.origin.isConnected) current.origin.focus();
+			return null;
+		});
+	}, []);
 	const archive = useMemo(
 		() => buildArchiveGroups(snapshot.captures, snapshot.folders, query, snapshot.unfiledCollapsed),
 		[snapshot, query]
@@ -203,12 +208,20 @@ export function ArchiveSidebar() {
 							group={group}
 							searching={archive.searching}
 							activeId={snapshot.activeId}
-							folders={snapshot.folders}
 							onToggle={actions.toggleFolder}
 							onRename={folderId => setFolderDialogId(folderId)}
 							onDelete={actions.deleteFolder}
 							onSelect={actions.selectCapture}
-							onMove={actions.moveCapture}
+							onContextMenu={(event, captureId) => {
+								event.preventDefault();
+								setCaptureMenuState({
+									captureId,
+									clientX: event.clientX,
+									clientY: event.clientY,
+									origin:
+										(event.target instanceof Element ? event.target.closest("button") : null) || event.currentTarget
+								});
+							}}
 						/>
 					))
 				) : (
@@ -248,7 +261,143 @@ export function ArchiveSidebar() {
 				folderId={folderDialogId}
 				onClose={() => setFolderDialogId(undefined)}
 			/>
+			<CaptureContextMenu state={captureMenuState} onClose={closeCaptureMenu} />
 		</>
+	);
+}
+
+function CaptureContextMenu({
+	state,
+	onClose
+}: {
+	state: CaptureContextMenuState | null;
+	onClose: (restoreFocus?: boolean) => void;
+}) {
+	const snapshot = useSyncExternalStore(subscribeToArchive, getArchiveSnapshot, getArchiveSnapshot);
+	const actions = getArchiveActions();
+	const menuRef = useRef<HTMLDivElement>(null);
+	const positionRef = useRef({ left: 10, top: 10 });
+	const [position, setPosition] = useState({ left: 10, top: 10 });
+	const [moveOpen, setMoveOpen] = useState(false);
+	positionRef.current = position;
+
+	const capture = state ? snapshot.captures.find(item => item.id === state.captureId) : undefined;
+	const currentFolderId = capture?.folderId || null;
+	const orderedFolders = [
+		...snapshot.folders.filter(folder => folder.id === currentFolderId),
+		...snapshot.folders.filter(folder => folder.id !== currentFolderId)
+	];
+	const moveDestinations = [
+		...(currentFolderId === null ? [{ id: null, name: "Unfiled" }] : []),
+		...orderedFolders.map(folder => ({ id: folder.id, name: folder.name })),
+		...(currentFolderId !== null ? [{ id: null, name: "Unfiled" }] : [])
+	];
+
+	useEffect(() => {
+		setMoveOpen(false);
+	}, [state?.captureId]);
+
+	useLayoutEffect(() => {
+		if (!state || !menuRef.current) return;
+		const edge = 10;
+		const bounds = menuRef.current.getBoundingClientRect();
+		const next = {
+			left: Math.max(edge, Math.min(state.clientX, window.innerWidth - bounds.width - edge)),
+			top: Math.max(edge, Math.min(state.clientY, window.innerHeight - bounds.height - edge))
+		};
+		if (next.left !== positionRef.current.left || next.top !== positionRef.current.top) setPosition(next);
+	}, [moveOpen, state]);
+
+	useEffect(() => {
+		if (!state) return;
+		const closeOnOutsideClick = (event: MouseEvent) => {
+			if (!menuRef.current?.contains(event.target as Node)) onClose();
+		};
+		const closeOnEscape = (event: KeyboardEvent) => {
+			if (event.key === "Escape") onClose(true);
+		};
+		const closeOnOutsideContextMenu = (event: MouseEvent) => {
+			const target = event.target instanceof Element ? event.target : null;
+			if (!target?.closest("#captureContextMenu, #captureList")) onClose();
+		};
+		const closeOnResize = () => onClose();
+		document.addEventListener("click", closeOnOutsideClick);
+		document.addEventListener("contextmenu", closeOnOutsideContextMenu);
+		document.addEventListener("keydown", closeOnEscape);
+		window.addEventListener("resize", closeOnResize);
+		return () => {
+			document.removeEventListener("click", closeOnOutsideClick);
+			document.removeEventListener("contextmenu", closeOnOutsideContextMenu);
+			document.removeEventListener("keydown", closeOnEscape);
+			window.removeEventListener("resize", closeOnResize);
+		};
+	}, [onClose, state]);
+
+	const handleMove = (folderId: string | null) => {
+		if (!state) return;
+		onClose();
+		actions.moveCapture(state.captureId, folderId);
+	};
+
+	return (
+		<div
+			id="captureContextMenu"
+			ref={menuRef}
+			onContextMenu={event => event.preventDefault()}
+			className={`message-context-menu capture-context-menu ${state && capture ? "" : "hidden"}`.trim()}
+			data-capture-id={state?.captureId}
+			style={{ left: position.left, top: position.top }}
+			role="menu"
+			aria-label="Capture actions"
+			aria-hidden={state && capture ? "false" : "true"}
+		>
+			<button
+				type="button"
+				role="menuitem"
+				data-context-action="move"
+				aria-haspopup="menu"
+				aria-expanded={moveOpen}
+				onClick={() => setMoveOpen(open => !open)}
+			>
+				<span className="capture-context-icon">{FOLDER_ICON}</span>
+				<span>Move to</span>
+				<span className="capture-context-chevron" aria-hidden="true">›</span>
+			</button>
+			{moveOpen ? (
+				<div className="capture-context-submenu" role="menu" aria-label="Move capture to folder">
+					{moveDestinations.map(destination => (
+						<button
+							key={destination.id || "unfiled"}
+							type="button"
+							role="menuitem"
+							data-context-action="move-to"
+							data-folder-option={destination.id || "unfiled"}
+							disabled={currentFolderId === destination.id}
+							onClick={() => handleMove(destination.id)}
+						>
+							<span>{destination.name}</span>
+							{currentFolderId === destination.id ? <span aria-hidden="true">✓</span> : null}
+						</button>
+					))}
+				</div>
+			) : null}
+			<button
+				type="button"
+				role="menuitem"
+				className="context-delete"
+				data-context-action="delete"
+				onClick={() => {
+					if (!state) return;
+					onClose();
+					actions.deleteCapture(state.captureId);
+				}}
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M5.5 7.5h13M9.5 7.5V5h5v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5.5M14 11v5.5" />
+				</svg>
+				<span>Delete</span>
+			</button>
+		</div>
 	);
 }
 
