@@ -94,10 +94,9 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		if (excess <= 0) return false;
 		const firstRollover = !rollingCapture.rollingBuffer;
 		rollingCapture.rollingBuffer = true;
+		const firstRetainedOffset = capture.byteStream![excess]?.rawOffset ?? excess;
 		capture.byteStream!.splice(0, excess);
-		capture.frameSections = (capture.frameSections || [])
-			.filter(section => section.start! >= excess)
-			.map(section => ({ ...section, start: section.start! - excess }));
+		capture.frameSections = (capture.frameSections || []).filter(section => section.start! >= firstRetainedOffset);
 		// Message IDs are derived from stream positions, so old message-specific notes
 		// cannot safely be attached after the oldest portion rolls off.
 		capture.annotations = {};
@@ -114,8 +113,9 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			return;
 		}
 		const sessionsById = new Map((capture.captureSessions || []).map(session => [session.id, session]));
+		let nextRawOffset = capture.nextRawOffset ?? Math.max(0, ...(capture.byteStream || []).map((record, index) => (record.rawOffset ?? index) + 1));
 		for (const record of pendingLiveBytes) {
-			capture.byteStream!.push(record);
+			capture.byteStream!.push({ ...record, rawOffset: nextRawOffset++ });
 			if (record.direction !== "tx") {
 				recordReceivedByte(
 					record.sessionId ? sessionsById.get(record.sessionId) : undefined,
@@ -123,6 +123,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 				);
 			}
 		}
+		capture.nextRawOffset = nextRawOffset;
 		pendingLiveBytes = [];
 		const trimmed = trimCapture(capture);
 		rebuildPreview(capture);

@@ -93,6 +93,8 @@ export type Capture = Omit<CaptureSummaryData, "notes"> & {
 	markerPosition?: string;
 	frameTimeGap?: number;
 	frameSections?: CaptureSection[];
+	/** The next unassigned absolute raw offset. */
+	nextRawOffset?: number;
 };
 
 export type PreviewByteRecord = RawByteRecord & { rawPosition: number };
@@ -191,6 +193,33 @@ export function applySectionFramingSettings(section: CaptureSection, update: Sec
 	delete section.markerConfigured;
 }
 
+function normalizedRawOffset(value: unknown): number | undefined {
+	const offset = Number(value);
+	return Number.isInteger(offset) && offset >= 0 ? offset : undefined;
+}
+
+function firstRawOffset(capture: Capture): number {
+	return capture.byteStream?.[0] ? (normalizedRawOffset(capture.byteStream[0].rawOffset) ?? 0) : 0;
+}
+
+function lastRawOffset(capture: Capture): number {
+	const record = capture.byteStream?.at(-1);
+	return record ? (normalizedRawOffset(record.rawOffset) ?? Math.max(0, (capture.byteStream?.length || 1) - 1)) : 0;
+}
+
+function normalizeRawOffsets(capture: Capture): void {
+	const stream = capture.byteStream || [];
+	let next = normalizedRawOffset(capture.nextRawOffset) ?? 0;
+	stream.forEach(record => {
+		const offset = normalizedRawOffset(record.rawOffset);
+		if (offset !== undefined) next = Math.max(next, offset + 1);
+	});
+	stream.forEach(record => {
+		if (normalizedRawOffset(record.rawOffset) === undefined) record.rawOffset = next++;
+	});
+	capture.nextRawOffset = Math.max(next, ...(stream.map(record => (record.rawOffset || 0) + 1)), 0);
+}
+
 export function normalizeCapture(capture: Capture, generateId = createId): Capture {
 	const legacyPreviewMode = normalizeFramingMode(capture.previewMode);
 	const hasPersistedSections = Array.isArray(capture.frameSections) && capture.frameSections.length > 0;
@@ -227,13 +256,15 @@ export function normalizeCapture(capture: Capture, generateId = createId): Captu
 		record.direction ||= "rx";
 		record.hidden = Boolean(record.hidden);
 	});
+	normalizeRawOffsets(capture);
 	// Older exports stored byte visibility on framed messages rather than raw
 	// byte records. Copy it across before the preview is rebuilt.
 	capture.messages.forEach(message => {
 		if (!Number.isInteger(message._byteStart) && !Array.isArray(message.rawOffsets) && !Array.isArray(message._rawPositions)) return;
 		message.hiddenBytes?.forEach((hidden, index) => {
 			const rawPosition = message.rawOffsets?.[index] ?? message._rawPositions?.[index] ?? (message._byteStart as number) + index;
-			if (hidden && capture.byteStream?.[rawPosition]) capture.byteStream[rawPosition].hidden = true;
+			const rawByte = capture.byteStream?.find(record => record.rawOffset === rawPosition);
+				if (hidden && rawByte) rawByte.hidden = true;
 		});
 	});
 	if (!hasPersistedSections) {
@@ -261,7 +292,7 @@ function migrateLegacySections(
 	return [
 		{
 			id: generateId(),
-			start: 0,
+			start: firstRawOffset(capture),
 			framingMode: legacyPreviewMode,
 			frameSize: normalizeFrameSize(capture.frameSize),
 			frameMarker: normalizeMarker(capture.frameMarker, markerConfigured),
@@ -274,12 +305,13 @@ function migrateLegacySections(
 }
 
 export function normalizeSections(capture: Capture, generateId = createId): void {
-	const streamLength = capture.byteStream?.length || 0;
+	const firstOffset = firstRawOffset(capture);
+	const lastOffset = lastRawOffset(capture);
 	const byStart = new Map<number, CaptureSection>();
 	(Array.isArray(capture.frameSections) ? capture.frameSections : [])
 		.filter(section => Boolean(section && typeof section === "object"))
 		.forEach(section => {
-			const start = Math.max(0, Math.min(Math.max(0, streamLength - 1), Math.floor(+section.start! || 0)));
+			const start = Math.max(firstOffset, Math.min(lastOffset, Math.floor(+section.start! || firstOffset)));
 			const settings = normalizeSectionFramingSettings(section, DEFAULT_FRAME_SIZE);
 			byStart.set(start, {
 				id: section.id || generateId(),
@@ -289,10 +321,10 @@ export function normalizeSections(capture: Capture, generateId = createId): void
 				collapsed: Boolean(section.collapsed)
 			});
 		});
-	if (!byStart.has(0)) {
-		byStart.set(0, {
+	if (!byStart.has(firstOffset)) {
+		byStart.set(firstOffset, {
 			id: generateId(),
-			start: 0,
+			start: firstOffset,
 			framingMode: "length",
 			frameSize: normalizeFrameSize(capture.frameSize),
 			frameMarker: "",
@@ -337,7 +369,7 @@ export function rebuildPreview(capture: Capture, generateId = createId): void {
 	// rendering. This makes every framing mode behave exactly as though the byte
 	// was never captured, while byteStream remains available for export/history.
 	const stream = capture.byteStream!
-		.map((record, rawPosition) => ({ ...record, rawPosition }))
+		.map((record, retainedIndex) => ({ ...record, rawPosition: record.rawOffset ?? retainedIndex }))
 		.filter(record => !record.hidden);
 	const ranges: Array<[number, number, string?]> = [];
 	normalizeSections(capture, generateId);

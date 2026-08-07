@@ -89,12 +89,25 @@ export type SequenceNoteTarget = {
 	endOffset: RawOffset;
 };
 
+/** The v1 capture document stores one-based framed row ranges, not raw offsets. */
+export type LegacySequenceNoteTarget = {
+	kind: "legacy-sequence";
+	startRow: number;
+	endRow: number;
+};
+
 export type PatternNoteTarget = {
 	kind: "pattern";
 	sequenceKey: string;
 };
 
-export type NoteTarget = CaptureNoteTarget | ByteNoteTarget | FrameNoteTarget | SequenceNoteTarget | PatternNoteTarget;
+export type NoteTarget =
+	| CaptureNoteTarget
+	| ByteNoteTarget
+	| FrameNoteTarget
+	| SequenceNoteTarget
+	| LegacySequenceNoteTarget
+	| PatternNoteTarget;
 
 export type CaptureNoteModel = {
 	id: NoteId;

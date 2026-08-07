@@ -290,8 +290,8 @@ test("normalizes legacy message-only captures without losing timestamps or hidde
 	normalizeCapture(current);
 
 	assert.deepEqual(current.byteStream, [
-		{ value: 0x10, timestamp: 100, hidden: false, direction: "rx" },
-		{ value: 0x20, timestamp: 125, hidden: true, direction: "rx" }
+		{ rawOffset: 0, value: 0x10, timestamp: 100, hidden: false, direction: "rx" },
+		{ rawOffset: 1, value: 0x20, timestamp: 125, hidden: true, direction: "rx" }
 	]);
 	assert.equal(current.description, "Legacy observation");
 	assert.equal(current.previewMode, "sections");

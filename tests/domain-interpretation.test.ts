@@ -97,3 +97,27 @@ test("characterizes run cadence, deltas, and repeated sequence groups", () => {
 		_intervals: [10, 11]
 	});
 });
+
+test("retains absolute raw offsets after earlier stream bytes are no longer retained", () => {
+	const current: Capture = {
+		id: "retained-offsets",
+		byteStream: [
+			{ rawOffset: 50_000, value: 0xaa, timestamp: 0 },
+			{ rawOffset: 50_001, value: 0x01, timestamp: 1 },
+			{ rawOffset: 50_002, value: 0xaa, timestamp: 5 },
+			{ rawOffset: 50_003, value: 0x03, timestamp: 6 }
+		],
+		nextRawOffset: 50_004,
+		frameSections: [{ id: "retained", start: 50_000, framingMode: "length", frameSize: 2 }],
+		messages: [],
+		notes: [],
+		annotations: {}
+	};
+	rebuildPreview(current, fixtureIdFactory());
+	assert.deepEqual(current.messages?.map(message => message.rawOffsets), [
+		[50_000, 50_001],
+		[50_002, 50_003]
+	]);
+	assert.deepEqual(current.frameSections?.map(section => section.start), [50_000]);
+	assert.equal(current.nextRawOffset, 50_004);
+});
