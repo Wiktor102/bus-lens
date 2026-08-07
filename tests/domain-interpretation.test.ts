@@ -24,7 +24,7 @@ function fixtureIdFactory(): () => string {
 function frameProjection(capture: Capture) {
 	return capture.messages!.map(message => ({
 		bytes: message.bytes,
-		rawOffsets: message._rawPositions,
+		rawOffsets: message.rawOffsets,
 		sectionId: message.sectionId,
 		directions: message.directions,
 		timestamps: message.byteTimestamps

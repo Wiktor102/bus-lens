@@ -33,6 +33,9 @@ export type CaptureMessage = FramedMessage & {
 	sectionId?: string;
 	_byteStart?: number;
 	_byteEnd?: number;
+	/** Absolute positions in byteStream, retained when hidden bytes make a frame non-contiguous. */
+	rawOffsets?: number[];
+	/** @deprecated Use rawOffsets. Retained for persisted capture compatibility. */
 	_rawPositions?: number[];
 };
 
@@ -227,9 +230,9 @@ export function normalizeCapture(capture: Capture, generateId = createId): Captu
 	// Older exports stored byte visibility on framed messages rather than raw
 	// byte records. Copy it across before the preview is rebuilt.
 	capture.messages.forEach(message => {
-		if (!Number.isInteger(message._byteStart) && !Array.isArray(message._rawPositions)) return;
+		if (!Number.isInteger(message._byteStart) && !Array.isArray(message.rawOffsets) && !Array.isArray(message._rawPositions)) return;
 		message.hiddenBytes?.forEach((hidden, index) => {
-			const rawPosition = message._rawPositions?.[index] ?? (message._byteStart as number) + index;
+			const rawPosition = message.rawOffsets?.[index] ?? message._rawPositions?.[index] ?? (message._byteStart as number) + index;
 			if (hidden && capture.byteStream?.[rawPosition]) capture.byteStream[rawPosition].hidden = true;
 		});
 	});
@@ -354,6 +357,7 @@ export function rebuildPreview(capture: Capture, generateId = createId): void {
 	const oldMessagesByRange = new Map<string, ExistingMessage>(
 		(capture.messages || []).map(message => {
 			const rawPositions =
+				message.rawOffsets ||
 				message._rawPositions ||
 				(Number.isInteger(message._byteStart) ? message.bytes.map((_, index) => message._byteStart! + index) : []);
 			return [rawPositions.join(","), { id: message.id, hidden: Boolean(message.hidden) }];
@@ -377,6 +381,7 @@ export function rebuildPreview(capture: Capture, generateId = createId): void {
 				sectionId,
 				_byteStart: start,
 				_byteEnd: end,
+				rawOffsets: rawPositions,
 				_rawPositions: rawPositions
 			};
 		});
