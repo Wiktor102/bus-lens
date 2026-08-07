@@ -1,9 +1,19 @@
 import {
+	interpretSectionRanges,
+	markerAt as interpretMarkerAt,
+	markerBytes as parseMarkerBytes,
+	type MarkerPosition,
+	type SectionFramingMode,
+	type SectionFramingSettings
+} from "../../domain/framing.ts";
+import {
 	normalizeCaptureSummaryData,
 	type CaptureSummaryData,
 	type FramedMessage,
 	type RawByteRecord
 } from "./capture-summary.ts";
+
+export type { MarkerPosition, SectionFramingMode, SectionFramingSettings } from "../../domain/framing.ts";
 
 export type CaptureNote = {
 	id?: string;
@@ -39,17 +49,6 @@ export type CaptureSection = {
 	frameTimeGap?: number;
 	collapseRuns?: boolean;
 	collapsed?: boolean;
-};
-
-export type SectionFramingMode = "length" | "marker" | "time";
-export type MarkerPosition = "start" | "end";
-
-export type SectionFramingSettings = {
-	framingMode: SectionFramingMode;
-	frameSize: number;
-	frameMarker: string;
-	markerPosition: MarkerPosition;
-	frameTimeGap: number;
 };
 
 export type NormalizedCaptureSection = SectionFramingSettings & {
@@ -308,11 +307,11 @@ export function frameWidth(capture: Capture): number {
 }
 
 export function markerBytes(value: unknown): number[] {
-	return (value === undefined || value === null ? "" : String(value)).match(/[0-9a-f]{2}/gi)?.map(byte => parseInt(byte, 16)) || [];
+	return parseMarkerBytes(value);
 }
 
 export function markerAt(stream: PreviewByteRecord[], index: number, marker: number[]): boolean {
-	return marker.length > 0 && marker.every((value, offset) => stream[index + offset]?.value === value);
+	return interpretMarkerAt(stream, index, marker);
 }
 
 export function frameSectionRanges(
@@ -321,62 +320,12 @@ export function frameSectionRanges(
 	sectionEnd: number,
 	section: CaptureSection | SectionFramingSettings
 ): Array<[number, number]> {
-	const settings = normalizeSectionFramingSettings(section, DEFAULT_FRAME_SIZE);
-	const start = Math.max(0, sectionStart);
-	const end = Math.max(start, Math.min(stream.length, sectionEnd));
-	if (start >= end) return [];
-
-	if (settings.framingMode === "length") {
-		const ranges: Array<[number, number]> = [];
-		for (let offset = start; offset < end; offset += settings.frameSize) {
-			ranges.push([offset, Math.min(offset + settings.frameSize, end)]);
-		}
-		return ranges;
-	}
-
-	if (settings.framingMode === "time") {
-		const ranges: Array<[number, number]> = [];
-		let frameStart = start;
-		for (let index = start + 1; index < end; index++) {
-			if (stream[index].timestamp - stream[index - 1].timestamp < settings.frameTimeGap) continue;
-			ranges.push([frameStart, index]);
-			frameStart = index;
-		}
-		ranges.push([frameStart, end]);
-		return ranges;
-	}
-
-	const marker = markerBytes(settings.frameMarker);
-	if (!marker.length) return [];
-	const markerMatchesAt = (index: number) => index + marker.length <= end && markerAt(stream, index, marker);
-	const ranges: Array<[number, number]> = [];
-	if (settings.markerPosition === "end") {
-		let frameStart = start;
-		let foundMarker = false;
-		for (let index = start; index < end; index++) {
-			if (!markerMatchesAt(index)) continue;
-			foundMarker = true;
-			const markerEnd = index + marker.length;
-			ranges.push([frameStart, markerEnd]);
-			frameStart = markerEnd;
-			index = markerEnd - 1;
-		}
-		if (foundMarker && frameStart < end) ranges.push([frameStart, end]);
-		return ranges;
-	}
-
-	let frameStart = -1;
-	for (let index = start; index < end; index++) {
-		if (!markerMatchesAt(index)) continue;
-		if (frameStart >= 0 && index > frameStart) ranges.push([frameStart, index]);
-		frameStart = index;
-		index += marker.length - 1;
-	}
-	// A section can begin between marker-delimited messages. Until its marker
-	// appears, keep its bytes in one frame instead of dropping the whole section.
-	if (frameStart < 0) return [[start, end]];
-	if (frameStart >= 0 && frameStart < end) ranges.push([frameStart, end]);
-	return ranges;
+	return interpretSectionRanges({
+		stream,
+		start: sectionStart,
+		end: sectionEnd,
+		settings: normalizeSectionFramingSettings(section, DEFAULT_FRAME_SIZE)
+	});
 }
 
 export function rebuildPreview(capture: Capture, generateId = createId): void {
