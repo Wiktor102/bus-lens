@@ -139,6 +139,61 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 					return send(response, 201, repository.migrateLegacyArchive(String(body.fingerprint ?? ""), archive, body.report));
 				}
 			}
+			// PR4: canonical migration and reframing
+			if (segments[1] === "migrations" && segments[2] === "canonical") {
+				if (request.method === "POST") {
+					const results = repository.convertAllCaptures();
+					return send(response, 200, { results, verified: results.every(r => r.verified) });
+				}
+				if (request.method === "GET") {
+					const captures = repository.listCaptures();
+					const converted = captures.filter(c => repository.isCaptureConverted(String(c.id))).length;
+					return send(response, 200, { total: captures.length, converted, unconverted: captures.length - converted, backups: repository.listCaptureBackups() });
+				}
+			}
+			if (segments[1] === "captures" && segments[2] && segments[3] === "convert" && request.method === "POST") {
+				const captureId = segments[2];
+				const result = repository.convertCaptureToCanonical(captureId);
+				return send(response, result.verified ? 200 : 422, result);
+			}
+			if (segments[1] === "captures" && segments[2] && segments[3] === "reframe" && request.method === "POST") {
+				const captureId = segments[2];
+				const body = documentFrom(await jsonBody(request, maxBodyBytes)) as { sections: Array<Record<string, unknown>> };
+				if (!Array.isArray(body.sections)) throw new RepositoryValidationError("sections array is required");
+				// Atomic reframing: materialize new revision completely before activating
+				const revision = repository.createFramingRevision(captureId, body.sections as Array<{ id?: string; start: number; framingMode: string; frameSize?: number; frameMarker?: string; markerPosition?: string; frameTimeGap?: number; collapseRuns?: boolean; collapsed?: boolean }>);
+				return send(response, 200, revision);
+			}
+			if (segments[1] === "captures" && segments[2] && segments[3] === "profiles" && request.method === "GET") {
+				const captureId = segments[2];
+				return send(response, 200, repository.listFramingProfiles(captureId));
+			}
+			if (segments[1] === "captures" && segments[2] && segments[3] === "analysis" && request.method === "GET") {
+				const captureId = segments[2];
+				const active = repository.getActiveFramingProfile(captureId);
+				if (!active) return send(response, 404, { error: "no active framing profile" });
+				return send(response, 200, {
+					profile: active,
+					signatures: repository.getFrameSignatures(active.id),
+					transitions: repository.getFrameTransitions(active.id),
+					byteStatistics: repository.getByteStatistics(active.id),
+					bitStatistics: repository.getBitStatistics(active.id),
+					sequenceGroups: repository.getSequenceGroups(active.id).map(g => ({
+						...g,
+						occurrences: repository.getSequenceOccurrences(g.id)
+					}))
+				});
+			}
+			if (segments[1] === "captures" && segments[2] && segments[3] === "notes" && request.method === "GET") {
+				return send(response, 200, repository.getStableNotes(segments[2]));
+			}
+			if (segments[1] === "captures" && segments[2] && segments[3] === "backup" && request.method === "GET") {
+				const backup = repository.getCaptureBackup(segments[2]);
+				return backup ? send(response, 200, backup) : send(response, 404, { error: "no backup" });
+			}
+			if (segments[1] === "captures" && segments[2] && segments[3] === "finalization" && request.method === "GET") {
+				return send(response, 200, repository.getFinalizationJobs(segments[2]));
+			}
 			if (segments[1] === "settings") {
 				const key = segments[2];
 				if (!key && request.method === "GET") return send(response, 200, repository.getSettings());

@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 
 export type SqliteDatabase = InstanceType<typeof Database>;
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 type Migration = {
 	version: number;
@@ -90,6 +90,192 @@ const migrations: Migration[] = [
 					created_at TEXT NOT NULL,
 					completed_at TEXT
 				);
+			`);
+		}
+	},
+	{
+		version: 2,
+		up: database => {
+			database.exec(`
+				-- Canonical captures: durable lifecycle and byte counts
+				CREATE TABLE IF NOT EXISTS captures (
+					id TEXT PRIMARY KEY NOT NULL,
+					name TEXT NOT NULL DEFAULT 'Untitled capture',
+					lifecycle TEXT NOT NULL DEFAULT 'finalized' CHECK (lifecycle IN ('recording','stopped','finalized','failed')),
+					byte_count INTEGER NOT NULL DEFAULT 0 CHECK (byte_count >= 0),
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL,
+					folder_id TEXT,
+					active_framing_profile_id TEXT
+				);
+				CREATE INDEX IF NOT EXISTS captures_lifecycle ON captures (lifecycle);
+				CREATE INDEX IF NOT EXISTS captures_updated_at ON captures (updated_at DESC);
+
+				-- Immutable raw chunks: absolute raw offsets never change
+				CREATE TABLE IF NOT EXISTS raw_chunks (
+					capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+					chunk_index INTEGER NOT NULL,
+					start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
+					byte_count INTEGER NOT NULL CHECK (byte_count >= 0),
+					bytes BLOB NOT NULL,
+					timestamps_json TEXT NOT NULL CHECK (json_valid(timestamps_json)),
+					directions_json TEXT NOT NULL CHECK (json_valid(directions_json)),
+					hidden_json TEXT NOT NULL CHECK (json_valid(hidden_json)),
+					session_id TEXT,
+					PRIMARY KEY (capture_id, chunk_index)
+				);
+				CREATE INDEX IF NOT EXISTS raw_chunks_capture_offset ON raw_chunks (capture_id, start_offset);
+
+				-- Versioned framing profiles (algorithmVersion tracks domain engine)
+				CREATE TABLE IF NOT EXISTS framing_profiles (
+					id TEXT PRIMARY KEY NOT NULL,
+					capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+					version INTEGER NOT NULL CHECK (version > 0),
+					algorithm_version INTEGER NOT NULL DEFAULT 1,
+					is_active INTEGER NOT NULL DEFAULT 0 CHECK (is_active IN (0,1)),
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL,
+					UNIQUE (capture_id, version)
+				);
+				CREATE INDEX IF NOT EXISTS framing_profiles_capture_active ON framing_profiles (capture_id, is_active);
+
+				-- Frame-length / marker / time sections per profile
+				CREATE TABLE IF NOT EXISTS framing_sections (
+					id TEXT PRIMARY KEY NOT NULL,
+					profile_id TEXT NOT NULL REFERENCES framing_profiles(id) ON DELETE CASCADE,
+					capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+					start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
+					position INTEGER NOT NULL CHECK (position >= 0),
+					framing_mode TEXT NOT NULL CHECK (framing_mode IN ('length','marker','time')),
+					frame_length INTEGER CHECK (frame_length > 0),
+					marker_bytes TEXT CHECK (json_valid(marker_bytes)),
+					marker_position TEXT CHECK (marker_position IN ('start','end')),
+					time_gap_ms REAL CHECK (time_gap_ms >= 0),
+					collapse_runs INTEGER NOT NULL DEFAULT 0 CHECK (collapse_runs IN (0,1)),
+					collapsed INTEGER NOT NULL DEFAULT 0 CHECK (collapsed IN (0,1))
+				);
+				CREATE INDEX IF NOT EXISTS framing_sections_profile_position ON framing_sections (profile_id, position);
+
+				-- Materialized frames for the active profile version
+				CREATE TABLE IF NOT EXISTS materialized_frames (
+					id TEXT PRIMARY KEY NOT NULL,
+					capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+					profile_id TEXT NOT NULL REFERENCES framing_profiles(id) ON DELETE CASCADE,
+					profile_version INTEGER NOT NULL,
+					ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+					section_id TEXT NOT NULL,
+					raw_offsets_json TEXT NOT NULL CHECK (json_valid(raw_offsets_json)),
+					bytes_json TEXT NOT NULL CHECK (json_valid(bytes_json)),
+					timestamps_json TEXT NOT NULL CHECK (json_valid(timestamps_json)),
+					directions_json TEXT NOT NULL CHECK (json_valid(directions_json)),
+					hidden INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0,1)),
+					signature TEXT NOT NULL,
+					UNIQUE (profile_id, ordinal)
+				);
+				CREATE INDEX IF NOT EXISTS materialized_frames_capture_profile ON materialized_frames (capture_id, profile_version);
+
+				-- Signatures per profile
+				CREATE TABLE IF NOT EXISTS frame_signatures (
+					profile_id TEXT NOT NULL REFERENCES framing_profiles(id) ON DELETE CASCADE,
+					signature TEXT NOT NULL,
+					count INTEGER NOT NULL CHECK (count > 0),
+					PRIMARY KEY (profile_id, signature)
+				);
+
+				-- Transitions per profile
+				CREATE TABLE IF NOT EXISTS frame_transitions (
+					profile_id TEXT NOT NULL REFERENCES framing_profiles(id) ON DELETE CASCADE,
+					from_signature TEXT NOT NULL,
+					to_signature TEXT NOT NULL,
+					count INTEGER NOT NULL CHECK (count > 0),
+					diffs INTEGER NOT NULL CHECK (diffs >= 0),
+					PRIMARY KEY (profile_id, from_signature, to_signature)
+				);
+
+				-- Byte vocabulary statistics per frame position
+				CREATE TABLE IF NOT EXISTS byte_statistics (
+					profile_id TEXT NOT NULL REFERENCES framing_profiles(id) ON DELETE CASCADE,
+					position INTEGER NOT NULL CHECK (position >= 0),
+					value INTEGER NOT NULL CHECK (value >= 0 AND value <= 255),
+					count INTEGER NOT NULL CHECK (count > 0),
+					PRIMARY KEY (profile_id, position, value)
+				);
+
+				-- Bit variance statistics per byte position
+				CREATE TABLE IF NOT EXISTS bit_statistics (
+					profile_id TEXT NOT NULL REFERENCES framing_profiles(id) ON DELETE CASCADE,
+					position INTEGER NOT NULL CHECK (position >= 0),
+					bit INTEGER NOT NULL CHECK (bit >= 0 AND bit <= 7),
+					percentage INTEGER NOT NULL CHECK (percentage >= 0 AND percentage <= 100),
+					variance TEXT NOT NULL,
+					PRIMARY KEY (profile_id, position, bit)
+				);
+
+				-- Sequence groups (repeated patterns) per profile
+				CREATE TABLE IF NOT EXISTS sequence_groups (
+					id TEXT PRIMARY KEY NOT NULL,
+					capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+					profile_id TEXT NOT NULL REFERENCES framing_profiles(id) ON DELETE CASCADE,
+					key_text TEXT NOT NULL,
+					signatures_json TEXT NOT NULL CHECK (json_valid(signatures_json)),
+					score INTEGER NOT NULL CHECK (score > 0),
+					length INTEGER NOT NULL CHECK (length > 0)
+				);
+				CREATE INDEX IF NOT EXISTS sequence_groups_profile ON sequence_groups (profile_id);
+
+				-- Sequence occurrences per group
+				CREATE TABLE IF NOT EXISTS sequence_occurrences (
+					group_id TEXT NOT NULL REFERENCES sequence_groups(id) ON DELETE CASCADE,
+					occurrence_index INTEGER NOT NULL CHECK (occurrence_index >= 0),
+					offset INTEGER NOT NULL CHECK (offset >= 0),
+					start_frame_ordinal INTEGER NOT NULL CHECK (start_frame_ordinal >= 0),
+					start_raw_offset INTEGER NOT NULL CHECK (start_raw_offset >= 0),
+					end_raw_offset INTEGER NOT NULL CHECK (end_raw_offset >= 0),
+					length INTEGER NOT NULL CHECK (length > 0),
+					PRIMARY KEY (group_id, occurrence_index, offset)
+				);
+
+				-- Stable note targets: byte notes at absolute offsets, frame notes at profile+span
+				CREATE TABLE IF NOT EXISTS stable_notes (
+					id TEXT PRIMARY KEY NOT NULL,
+					capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+					text TEXT NOT NULL,
+					created_at TEXT NOT NULL,
+					updated_at TEXT,
+					target_kind TEXT NOT NULL CHECK (target_kind IN ('capture','byte','frame','sequence','pattern','legacy-sequence')),
+					raw_offset INTEGER CHECK (raw_offset >= 0),
+					profile_id TEXT REFERENCES framing_profiles(id) ON DELETE SET NULL,
+					raw_offsets_json TEXT CHECK (raw_offsets_json IS NULL OR json_valid(raw_offsets_json)),
+					start_offset INTEGER CHECK (start_offset >= 0),
+					end_offset INTEGER CHECK (end_offset >= 0),
+					sequence_key TEXT,
+					start_row INTEGER,
+					end_row INTEGER
+				);
+				CREATE INDEX IF NOT EXISTS stable_notes_capture_kind ON stable_notes (capture_id, target_kind);
+
+				-- Finalization / conversion job status per capture
+				CREATE TABLE IF NOT EXISTS finalization_jobs (
+					id TEXT PRIMARY KEY NOT NULL,
+					capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+					status TEXT NOT NULL CHECK (status IN ('pending','running','completed','failed')),
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL,
+					error TEXT,
+					verified INTEGER NOT NULL DEFAULT 0 CHECK (verified IN (0,1))
+				);
+				CREATE INDEX IF NOT EXISTS finalization_jobs_capture_status ON finalization_jobs (capture_id, status);
+
+				-- Migration backup: original JSON retained until verification succeeds
+				CREATE TABLE IF NOT EXISTS capture_backups (
+					capture_id TEXT PRIMARY KEY NOT NULL,
+					document_json TEXT NOT NULL CHECK (json_valid(document_json)),
+					migrated_at TEXT NOT NULL,
+					verified INTEGER NOT NULL DEFAULT 0 CHECK (verified IN (0,1)),
+					verification_report_json TEXT CHECK (verification_report_json IS NULL OR json_valid(verification_report_json))
+				);
+
+				-- Legacy fallback view helpers (via code, not SQLite views)
 			`);
 		}
 	}

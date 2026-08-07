@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { SqliteDatabase } from "./database.ts";
+import {
+	convertCaptureDocumentToCanonical as convertDocumentCanonical,
+	createFramingRevision as createCanonicalRevision,
+	getActiveProfile as getCanonicalActiveProfile,
+	getPreviousProfiles as listCanonicalPreviousProfiles,
+	isCaptureConverted as isCanonicalCaptureConverted
+} from "./canonical.ts";
 
 export type JsonDocument = Record<string, unknown>;
 
@@ -247,11 +254,215 @@ export class ArchiveRepository {
 	}
 
 	getCapture(id: string): DocumentRecord | undefined {
+		// Mixed state: prefer canonical synthesis if converted, fallback to JSON document
+		const canonical = this.getCanonicalCapture(id);
+		if (canonical) return canonical;
 		return this.getDocument("capture_documents", id);
 	}
 
 	listCaptures(): DocumentRecord[] {
-		return this.listDocuments("capture_documents", "updated_at DESC, id ASC");
+		// Mixed state: merge canonical captures (synthesized) and unconverted JSON documents.
+		// Converted captures must remain readable alongside unconverted ones during rollout.
+		const canonicalRows = this.database
+			.prepare("SELECT id, updated_at, created_at FROM captures ORDER BY updated_at DESC, id ASC")
+			.all() as Array<{ id: string; updated_at: string; created_at: string }>;
+		const hasCanonical = canonicalRows.length > 0;
+		const jsonRows = this.listDocuments("capture_documents", "updated_at DESC, id ASC");
+		if (!hasCanonical) return jsonRows;
+		const canonicalIds = new Set(canonicalRows.map(r => r.id));
+		const synthesized: DocumentRecord[] = canonicalRows
+			.map(row => this.getCanonicalCapture(row.id))
+			.filter((r): r is DocumentRecord => Boolean(r));
+		const unconverted = jsonRows.filter(r => !canonicalIds.has(r.id));
+		// Preserve archive_order ordering as primary sort if available, else fall back to synthesized+unconverted by updated_at
+		const order = this.database
+			.prepare("SELECT entity_id, position FROM archive_order WHERE entity_type='capture' ORDER BY position, entity_id")
+			.all() as Array<{ entity_id: string; position: number }>;
+		if (order.length) {
+			const pos = new Map(order.map(o => [o.entity_id, o.position]));
+			const all = [...synthesized, ...unconverted];
+			all.sort((a, b) => {
+				const pa = pos.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+				const pb = pos.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+				return pa - pb || b.updatedAt.localeCompare(a.updatedAt);
+			});
+			return all;
+		}
+		return [...synthesized, ...unconverted];
+	}
+
+	/** Returns synthesized DocumentRecord from canonical tables if converted, otherwise undefined */
+	getCanonicalCapture(id: string): DocumentRecord | undefined {
+		const cap = this.database.prepare("SELECT id, name, lifecycle, byte_count, created_at, updated_at, folder_id FROM captures WHERE id = @id").get({ id }) as
+			| { id: string; name: string; lifecycle: string; byte_count: number; created_at: string; updated_at: string; folder_id: string | null }
+			| undefined;
+		if (!cap) return undefined;
+		// Reassemble byteStream from raw_chunks
+		const chunks = this.database
+			.prepare("SELECT bytes, timestamps_json, directions_json, hidden_json, start_offset, session_id FROM raw_chunks WHERE capture_id = @captureId ORDER BY chunk_index")
+			.all({ captureId: id }) as Array<{
+			bytes: Buffer;
+			timestamps_json: string;
+			directions_json: string;
+			hidden_json: string;
+			start_offset: number;
+			session_id: string | null;
+		}>;
+		const byteStream: JsonDocument[] = [];
+		for (const ch of chunks) {
+			const timestamps: number[] = JSON.parse(ch.timestamps_json) as number[];
+			const directions: string[] = JSON.parse(ch.directions_json) as string[];
+			const hidden: boolean[] = JSON.parse(ch.hidden_json) as boolean[];
+			const bytes = ch.bytes instanceof Buffer ? [...ch.bytes] : Array.from(new Uint8Array(ch.bytes as unknown as Uint8Array));
+			for (let i = 0; i < bytes.length; i++) {
+				byteStream.push({
+					rawOffset: ch.start_offset + i,
+					value: bytes[i],
+					timestamp: timestamps[i] ?? 0,
+					direction: directions[i] || "rx",
+					hidden: Boolean(hidden[i]),
+					...(ch.session_id ? { sessionId: ch.session_id } : {})
+				});
+			}
+		}
+		// Active framing profile
+		const activeProfile = this.database
+			.prepare("SELECT id, version, algorithm_version FROM framing_profiles WHERE capture_id = @captureId AND is_active = 1 LIMIT 1")
+			.get({ captureId: id }) as { id: string; version: number; algorithm_version: number } | undefined;
+		let frameSections: JsonDocument[] = [];
+		let messages: JsonDocument[] = [];
+		if (activeProfile) {
+			const sections = this.database
+				.prepare(
+					"SELECT id, start_offset, framing_mode, frame_length, marker_bytes, marker_position, time_gap_ms, collapse_runs, collapsed FROM framing_sections WHERE profile_id = @profileId ORDER BY position"
+				)
+				.all({ profileId: activeProfile.id }) as Array<{
+				id: string;
+				start_offset: number;
+				framing_mode: string;
+				frame_length: number | null;
+				marker_bytes: string | null;
+				marker_position: string | null;
+				time_gap_ms: number | null;
+				collapse_runs: number;
+				collapsed: number;
+			}>;
+			frameSections = sections.map(s => {
+				let marker = "";
+				if (s.marker_bytes) {
+					try {
+						const arr: number[] = JSON.parse(s.marker_bytes) as number[];
+						marker = arr.map(b => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+					} catch {}
+				}
+				return {
+					id: s.id,
+					start: s.start_offset,
+					framingMode: s.framing_mode,
+					frameSize: s.frame_length ?? 3,
+					frameMarker: marker,
+					markerPosition: s.marker_position ?? "start",
+					frameTimeGap: s.time_gap_ms ?? 5,
+					collapseRuns: Boolean(s.collapse_runs),
+					collapsed: Boolean(s.collapsed)
+				};
+			});
+			const frames = this.database
+				.prepare(
+					"SELECT id, ordinal, section_id, raw_offsets_json, bytes_json, timestamps_json, directions_json, hidden, signature FROM materialized_frames WHERE profile_id = @profileId ORDER BY ordinal"
+				)
+				.all({ profileId: activeProfile.id }) as Array<{
+				id: string;
+				ordinal: number;
+				section_id: string;
+				raw_offsets_json: string;
+				bytes_json: string;
+				timestamps_json: string;
+				directions_json: string;
+				hidden: number;
+				signature: string;
+			}>;
+			messages = frames.map(f => {
+				const rawOffsets: number[] = JSON.parse(f.raw_offsets_json) as number[];
+				const bytes: number[] = JSON.parse(f.bytes_json) as number[];
+				const timestamps: number[] = JSON.parse(f.timestamps_json) as number[];
+				return {
+					id: f.id,
+					timestamp: timestamps[0] ?? 0,
+					byteTimestamps: timestamps,
+					bytes,
+					directions: JSON.parse(f.directions_json) as string[],
+					hidden: Boolean(f.hidden),
+					hiddenBytes: bytes.map(() => false),
+					sourceIndex: f.ordinal,
+					sectionId: f.section_id,
+					_byteStart: 0,
+					_byteEnd: bytes.length,
+					rawOffsets,
+					_rawPositions: rawOffsets
+				};
+			});
+		}
+		// Notes: stable_notes
+		const notesRows = this.database.prepare("SELECT id, text, created_at, target_kind, start_row, end_row, raw_offset, raw_offsets_json, start_offset, end_offset, sequence_key FROM stable_notes WHERE capture_id = @captureId").all({ captureId: id }) as Array<{
+			id: string;
+			text: string;
+			created_at: string;
+			target_kind: string;
+			start_row: number | null;
+			end_row: number | null;
+			raw_offset: number | null;
+			raw_offsets_json: string | null;
+			start_offset: number | null;
+			end_offset: number | null;
+			sequence_key: string | null;
+		}>;
+		const captureNotes: JsonDocument[] = [];
+		const annotations: Record<string, JsonDocument> = {};
+		for (const row of notesRows) {
+			if (row.target_kind === "legacy-sequence") {
+				captureNotes.push({ id: row.id, type: "sequence", text: row.text, createdAt: new Date(row.created_at).getTime(), start: row.start_row, end: row.end_row, targetLabel: `rows ${row.start_row}–${row.end_row}` });
+			} else if (row.target_kind === "capture") {
+				captureNotes.push({ id: row.id, type: "capture", text: row.text, createdAt: new Date(row.created_at).getTime() });
+			} else if (row.target_kind === "byte") {
+				annotations[row.id] = { text: row.text, createdAt: new Date(row.created_at).getTime(), type: "byte", targetLabel: `raw ${row.raw_offset}` };
+			} else if (row.target_kind === "frame") {
+				annotations[row.id] = { text: row.text, createdAt: new Date(row.created_at).getTime(), type: "message", targetLabel: row.raw_offsets_json || "" };
+			} else if (row.target_kind === "pattern") {
+				// patternRemarks not reconstructed here; stored separately but we omit for brevity
+			}
+		}
+		// Retrieve patternRemarks from stable_notes where target_kind='pattern' to reconstitute
+		const patternRemarks: Record<string, JsonDocument> = {};
+		for (const row of notesRows) {
+			if (row.target_kind === "pattern" && row.sequence_key) patternRemarks[row.sequence_key] = { text: row.text, updatedAt: new Date(row.created_at).getTime() };
+		}
+
+		const document: JsonDocument = {
+			id: cap.id,
+			name: cap.name,
+			createdAt: cap.created_at,
+			lifecycle: cap.lifecycle,
+			byteCount: cap.byte_count,
+			folderId: cap.folder_id,
+			byteStream,
+			frameSections,
+			messages,
+			notes: captureNotes,
+			annotations,
+			patternRemarks,
+			nextRawOffset: byteStream.length ? Math.max(...byteStream.map(b => (b.rawOffset as number) + 1)) : 0,
+			captureSessions: []
+		};
+		// Try to preserve version from capture_documents if exists? But canonical is now authoritative.
+		const existingDoc = this.database.prepare("SELECT document_version FROM capture_documents WHERE id = @id").get({ id }) as { document_version: number } | undefined;
+		return {
+			id: cap.id,
+			version: existingDoc?.document_version ?? 1,
+			document,
+			createdAt: cap.created_at,
+			updatedAt: cap.updated_at
+		};
 	}
 
 	putCapture(id: string, document: JsonDocument, expectedVersion?: number): DocumentRecord {
@@ -273,8 +484,16 @@ export class ArchiveRepository {
 
 	deleteCapture(id: string): boolean {
 		const transaction = this.database.transaction(() => {
+			this.database.prepare("DELETE FROM raw_chunks WHERE capture_id = @id").run({ id });
+			this.database.prepare("DELETE FROM stable_notes WHERE capture_id = @id").run({ id });
+			this.database.prepare("DELETE FROM finalization_jobs WHERE capture_id = @id").run({ id });
+			this.database.prepare("DELETE FROM capture_backups WHERE capture_id = @id").run({ id });
+			// Cascading deletes from captures will clear profiles/frames; do explicit for safety
+			this.database.prepare("DELETE FROM framing_profiles WHERE capture_id = @id").run({ id });
+			this.database.prepare("DELETE FROM captures WHERE id = @id").run({ id });
 			this.database.prepare("DELETE FROM archive_order WHERE entity_type = 'capture' AND entity_id = @id").run({ id });
-			return this.database.prepare("DELETE FROM capture_documents WHERE id = @id").run({ id }).changes > 0;
+			const docDeleted = this.database.prepare("DELETE FROM capture_documents WHERE id = @id").run({ id }).changes > 0;
+			return docDeleted || true;
 		});
 		return transaction();
 	}
@@ -587,6 +806,163 @@ export class ArchiveRepository {
 			createdAt: row.created_at,
 			completedAt: row.completed_at
 		};
+	}
+
+	// -----------------------------------------------------------------------
+	// Canonical raw chunks / framing / analysis — PR 4
+	// -----------------------------------------------------------------------
+
+	/** Convert a single JSON capture document into canonical chunks+frames+analysis. Retains backup until verification succeeds. */
+	convertCaptureToCanonical(id: string): ReturnType<typeof convertDocumentCanonical> {
+		return convertDocumentCanonical(this.database, id, { nowIso: () => this.nowIso(), generateId: () => this.generateId() });
+	}
+
+	/** Migrate all unconverted capture documents. Supports mixed state: converted remain readable. */
+	convertAllCaptures(): Array<ReturnType<typeof convertDocumentCanonical>> {
+		const ids = (this.database.prepare("SELECT id FROM capture_documents").all() as Array<{ id: string }>).map(r => r.id);
+		const results: Array<ReturnType<typeof convertDocumentCanonical>> = [];
+		for (const id of ids) {
+			if (isCanonicalCaptureConverted(this.database, id)) continue;
+			results.push(this.convertCaptureToCanonical(id));
+		}
+		return results;
+	}
+
+	isCaptureConverted(id: string): boolean {
+		return isCanonicalCaptureConverted(this.database, id);
+	}
+
+	getCaptureBackup(id: string): { document_json: string; verified: number; verification_report_json: string | null } | undefined {
+		return this.database.prepare("SELECT document_json, verified, verification_report_json FROM capture_backups WHERE capture_id = @id").get({ id }) as
+			| { document_json: string; verified: number; verification_report_json: string | null }
+			| undefined;
+	}
+
+	listCaptureBackups(): Array<{ capture_id: string; verified: number }> {
+		return this.database.prepare("SELECT capture_id, verified FROM capture_backups").all() as Array<{ capture_id: string; verified: number }>;
+	}
+
+	getActiveFramingProfile(captureId: string): { id: string; version: number } | undefined {
+		return getCanonicalActiveProfile(this.database, captureId);
+	}
+
+	listFramingProfiles(captureId: string): Array<{ id: string; version: number; is_active: number; algorithm_version: number }> {
+		return this.database
+			.prepare("SELECT id, version, is_active, algorithm_version FROM framing_profiles WHERE capture_id = @captureId ORDER BY version")
+			.all({ captureId }) as Array<{ id: string; version: number; is_active: number; algorithm_version: number }>;
+	}
+
+	getPreviousFramingProfiles(captureId: string): Array<{ id: string; version: number; is_active: number }> {
+		return listCanonicalPreviousProfiles(this.database, captureId);
+	}
+
+	createFramingRevision(
+		captureId: string,
+		sections: Array<{ id?: string; start: number; framingMode: string; frameSize?: number; frameMarker?: string; markerPosition?: string; frameTimeGap?: number; collapseRuns?: boolean; collapsed?: boolean }>
+	): ReturnType<typeof createCanonicalRevision> {
+		// Normalize to expected input shape
+		const normalized = sections.map(s => ({
+			id: s.id,
+			start: Number(s.start) || 0,
+			framingMode: (["length", "marker", "time"].includes(String(s.framingMode)) ? s.framingMode : "length") as "length" | "marker" | "time",
+			frameSize: s.frameSize,
+			frameMarker: s.frameMarker,
+			markerPosition: s.markerPosition as "start" | "end" | undefined,
+			frameTimeGap: s.frameTimeGap,
+			collapseRuns: Boolean(s.collapseRuns),
+			collapsed: Boolean(s.collapsed)
+		}));
+		return createCanonicalRevision(this.database, captureId, normalized, {
+			nowIso: () => this.nowIso(),
+			generateId: () => this.generateId()
+		});
+	}
+
+	getFinalizationJobs(captureId: string): Array<{ id: string; status: string; verified: number; error: string | null }> {
+		return this.database
+			.prepare("SELECT id, status, verified, error FROM finalization_jobs WHERE capture_id = @captureId ORDER BY updated_at DESC")
+			.all({ captureId }) as Array<{ id: string; status: string; verified: number; error: string | null }>;
+	}
+
+	getFrameSignatures(profileId: string): Array<{ signature: string; count: number }> {
+		return this.database.prepare("SELECT signature, count FROM frame_signatures WHERE profile_id = @profileId ORDER BY count DESC").all({ profileId }) as Array<{
+			signature: string;
+			count: number;
+		}>;
+	}
+
+	getFrameTransitions(profileId: string): Array<{ from_signature: string; to_signature: string; count: number; diffs: number }> {
+		return this.database
+			.prepare("SELECT from_signature, to_signature, count, diffs FROM frame_transitions WHERE profile_id = @profileId ORDER BY count DESC")
+			.all({ profileId }) as Array<{ from_signature: string; to_signature: string; count: number; diffs: number }>;
+	}
+
+	getByteStatistics(profileId: string): Array<{ position: number; value: number; count: number }> {
+		return this.database.prepare("SELECT position, value, count FROM byte_statistics WHERE profile_id = @profileId ORDER BY position, count DESC").all({ profileId }) as Array<{
+			position: number;
+			value: number;
+			count: number;
+		}>;
+	}
+
+	getBitStatistics(profileId: string): Array<{ position: number; bit: number; percentage: number; variance: string }> {
+		return this.database.prepare("SELECT position, bit, percentage, variance FROM bit_statistics WHERE profile_id = @profileId ORDER BY position, bit DESC").all({ profileId }) as Array<{
+			position: number;
+			bit: number;
+			percentage: number;
+			variance: string;
+		}>;
+	}
+
+	getSequenceGroups(profileId: string): Array<{ id: string; key_text: string; signatures_json: string; score: number; length: number }> {
+		return this.database.prepare("SELECT id, key_text, signatures_json, score, length FROM sequence_groups WHERE profile_id = @profileId ORDER BY score DESC").all({ profileId }) as Array<{
+			id: string;
+			key_text: string;
+			signatures_json: string;
+			score: number;
+			length: number;
+		}>;
+	}
+
+	getSequenceOccurrences(groupId: string): Array<{ occurrence_index: number; offset: number; start_frame_ordinal: number; start_raw_offset: number; end_raw_offset: number; length: number }> {
+		return this.database
+			.prepare("SELECT occurrence_index, offset, start_frame_ordinal, start_raw_offset, end_raw_offset, length FROM sequence_occurrences WHERE group_id = @groupId ORDER BY occurrence_index, offset")
+			.all({ groupId }) as Array<{ occurrence_index: number; offset: number; start_frame_ordinal: number; start_raw_offset: number; end_raw_offset: number; length: number }>;
+	}
+
+	getStableNotes(captureId: string): Array<{
+		id: string;
+		text: string;
+		created_at: string;
+		target_kind: string;
+		raw_offset: number | null;
+		raw_offsets_json: string | null;
+		profile_id: string | null;
+		start_offset: number | null;
+		end_offset: number | null;
+		sequence_key: string | null;
+		start_row: number | null;
+		end_row: number | null;
+	}> {
+		return this.database
+			.prepare(
+				`SELECT id, text, created_at, target_kind, raw_offset, raw_offsets_json, profile_id, start_offset, end_offset, sequence_key, start_row, end_row
+				 FROM stable_notes WHERE capture_id = @captureId ORDER BY created_at DESC`
+			)
+			.all({ captureId }) as Array<{
+			id: string;
+			text: string;
+			created_at: string;
+			target_kind: string;
+			raw_offset: number | null;
+			raw_offsets_json: string | null;
+			profile_id: string | null;
+			start_offset: number | null;
+			end_offset: number | null;
+			sequence_key: string | null;
+			start_row: number | null;
+			end_row: number | null;
+		}>;
 	}
 
 	close(): void {
