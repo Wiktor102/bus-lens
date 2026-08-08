@@ -477,6 +477,181 @@ function normalizeDocumentForConversion(doc: CaptureDocument, generateId: () => 
 	return cloned;
 }
 
+type MaterializedFrame = ReturnType<typeof materializeFramesFromStream>[number];
+type SectionBoundary = { id: string; start: number; mode: string };
+
+type PersistedConversion = {
+	byteCount: number;
+	byteStream: Array<RawByteRecord & { rawOffset: number }>;
+	sections: SectionBoundary[];
+	frames: MaterializedFrame[];
+	signatures: ReturnType<typeof countSignatures>;
+	stats: ReturnType<typeof deriveAnalysisStatistics>;
+	patterns: ReturnType<typeof recognizeRepeatedPatterns>;
+};
+
+function readPersistedConversion(database: SqliteDatabase, captureId: string, profileId: string): PersistedConversion {
+	const capture = database.prepare("SELECT byte_count FROM captures WHERE id = @captureId").get({ captureId }) as
+		| { byte_count: number }
+		| undefined;
+	if (!capture) throw new Error(`canonical capture ${captureId} was not persisted`);
+
+	const chunks = database
+		.prepare("SELECT bytes, timestamps_json, directions_json, hidden_json, start_offset FROM raw_chunks WHERE capture_id = @captureId ORDER BY chunk_index")
+		.all({ captureId }) as Array<{
+		bytes: Buffer;
+		timestamps_json: string;
+		directions_json: string;
+		hidden_json: string;
+		start_offset: number;
+	}>;
+	const byteStream: Array<RawByteRecord & { rawOffset: number }> = [];
+	for (const chunk of chunks) {
+		const timestamps: number[] = JSON.parse(chunk.timestamps_json) as number[];
+		const directions: string[] = JSON.parse(chunk.directions_json) as string[];
+		const hidden: boolean[] = JSON.parse(chunk.hidden_json) as boolean[];
+		const bytes = chunk.bytes instanceof Buffer ? [...chunk.bytes] : Array.from(new Uint8Array(chunk.bytes as unknown as Uint8Array));
+		for (let index = 0; index < bytes.length; index++) {
+			byteStream.push({
+				rawOffset: chunk.start_offset + index,
+				value: bytes[index],
+				timestamp: timestamps[index] ?? 0,
+				direction: directions[index] || "rx",
+				hidden: Boolean(hidden[index])
+			});
+		}
+	}
+
+	const sections = database
+		.prepare("SELECT id, start_offset, framing_mode FROM framing_sections WHERE profile_id = @profileId ORDER BY position")
+		.all({ profileId }) as Array<{ id: string; start_offset: number; framing_mode: string }>;
+
+	const frameRows = database
+		.prepare(
+			"SELECT id, ordinal, section_id, raw_offsets_json, bytes_json, timestamps_json, directions_json, hidden, signature FROM materialized_frames WHERE profile_id = @profileId ORDER BY ordinal"
+		)
+		.all({ profileId }) as Array<{
+		id: string;
+		ordinal: number;
+		section_id: string;
+		raw_offsets_json: string;
+		bytes_json: string;
+		timestamps_json: string;
+		directions_json: string;
+		hidden: number;
+		signature: string;
+	}>;
+	const frames: MaterializedFrame[] = frameRows.map(frame => ({
+		id: frame.id,
+		ordinal: frame.ordinal,
+		sectionId: frame.section_id,
+		rawOffsets: JSON.parse(frame.raw_offsets_json) as number[],
+		bytes: JSON.parse(frame.bytes_json) as number[],
+		timestamps: JSON.parse(frame.timestamps_json) as number[],
+		directions: JSON.parse(frame.directions_json) as string[],
+		hidden: Boolean(frame.hidden),
+		signature: frame.signature
+	}));
+
+	const signatureRows = database
+		.prepare("SELECT signature, count FROM frame_signatures WHERE profile_id = @profileId ORDER BY rowid")
+		.all({ profileId }) as Array<{ signature: string; count: number }>;
+	const signatures = new Map(signatureRows.map(row => [row.signature, row.count]));
+
+	const transitionRows = database
+		.prepare("SELECT from_signature, to_signature, count, diffs FROM frame_transitions WHERE profile_id = @profileId ORDER BY rowid")
+		.all({ profileId }) as Array<{ from_signature: string; to_signature: string; count: number; diffs: number }>;
+
+	const vocabularyRows = database
+		.prepare("SELECT position, value, count FROM byte_statistics WHERE profile_id = @profileId ORDER BY position, rowid")
+		.all({ profileId }) as Array<{ position: number; value: number; count: number }>;
+	const vocabularyByPosition = new Map<number, Array<{ value: number; count: number }>>();
+	for (const row of vocabularyRows) {
+		const values = vocabularyByPosition.get(row.position) || [];
+		values.push({ value: row.value, count: row.count });
+		vocabularyByPosition.set(row.position, values);
+	}
+	const vocabularyWidth = Math.max(-1, ...vocabularyRows.map(row => row.position));
+	const vocabulary = Array.from({ length: vocabularyWidth + 1 }, (_, position) => vocabularyByPosition.get(position) || []);
+
+	const bitRows = database
+		.prepare("SELECT position, bit, percentage, variance FROM bit_statistics WHERE profile_id = @profileId ORDER BY position, rowid")
+		.all({ profileId }) as Array<{ position: number; bit: number; percentage: number; variance: string }>;
+	const bitsByPosition = new Map<number, Array<{ bit: number; percentage: number; variance: string }>>();
+	for (const row of bitRows) {
+		const bits = bitsByPosition.get(row.position) || [];
+		bits.push({ bit: row.bit, percentage: row.percentage, variance: row.variance });
+		bitsByPosition.set(row.position, bits);
+	}
+	const bitWidth = Math.max(-1, ...bitRows.map(row => row.position));
+	const bitVariance = Array.from({ length: bitWidth + 1 }, (_, position) => bitsByPosition.get(position) || []);
+
+	const groupRows = database
+		.prepare("SELECT id, key_text, signatures_json, score, length FROM sequence_groups WHERE profile_id = @profileId ORDER BY rowid")
+		.all({ profileId }) as Array<{ id: string; key_text: string; signatures_json: string; score: number; length: number }>;
+	const groupIndexById = new Map(groupRows.map((group, index) => [group.id, index]));
+	const occurrenceRows = database
+		.prepare(
+			`SELECT group_id, occurrence_index, offset, start_frame_ordinal
+			 FROM sequence_occurrences
+			 WHERE group_id IN (SELECT id FROM sequence_groups WHERE profile_id = @profileId)
+			 ORDER BY rowid`
+		)
+		.all({ profileId }) as Array<{
+		group_id: string;
+		occurrence_index: number;
+		offset: number;
+		start_frame_ordinal: number;
+	}>;
+	const startsByGroup = new Map<string, Map<number, number>>();
+	const orderedOccurrences = [...occurrenceRows].sort((a, b) => {
+		const groupA = groupIndexById.get(a.group_id) ?? Number.MAX_SAFE_INTEGER;
+		const groupB = groupIndexById.get(b.group_id) ?? Number.MAX_SAFE_INTEGER;
+		return groupA - groupB || a.occurrence_index - b.occurrence_index || a.offset - b.offset;
+	});
+	const membership: Array<{ groupIndex: number; originalIndex: number; occurrenceIndex: number; offset: number }> = [];
+	for (const row of orderedOccurrences) {
+		const groupIndex = groupIndexById.get(row.group_id);
+		if (groupIndex === undefined) throw new Error(`sequence occurrence ${row.group_id} has no group`);
+		const starts = startsByGroup.get(row.group_id) || new Map<number, number>();
+		starts.set(row.occurrence_index, row.start_frame_ordinal);
+		startsByGroup.set(row.group_id, starts);
+		membership.push({
+			groupIndex,
+			originalIndex: row.start_frame_ordinal + row.offset,
+			occurrenceIndex: row.occurrence_index,
+			offset: row.offset
+		});
+	}
+	const patterns = {
+		groups: groupRows.map(group => ({
+			key: group.key_text,
+			length: group.length,
+			starts: [...(startsByGroup.get(group.id) || new Map()).entries()]
+				.sort(([left], [right]) => left - right)
+				.map(([, start]) => start),
+			signatures: JSON.parse(group.signatures_json) as string[],
+			score: group.score
+		})),
+		membership
+	};
+
+	return {
+		byteCount: capture.byte_count,
+		byteStream,
+		sections: sections.map(section => ({ id: section.id, start: section.start_offset, mode: section.framing_mode })),
+		frames,
+		signatures,
+		stats: {
+			signatures: signatureRows.map(row => ({ signature: row.signature, count: row.count })),
+			vocabulary,
+			bitVariance,
+			transitions: transitionRows.map(row => ({ from: row.from_signature, to: row.to_signature, count: row.count, diffs: row.diffs }))
+		},
+		patterns,
+	};
+}
+
 export type VerificationReport = {
 	messageCount: { expected: number; actual: number; ok: boolean };
 	rawByteCount: { expected: number; actual: number; ok: boolean };
@@ -527,69 +702,118 @@ function verifyMessageVisibility(
 function verifyConversion(
 	originalDoc: CaptureDocument,
 	normalized: CaptureDocument,
-	materialized: {
-		frames: ReturnType<typeof materializeFramesFromStream>;
-		signatures: ReturnType<typeof countSignatures>;
-		stats: ReturnType<typeof deriveAnalysisStatistics>;
-		patterns: ReturnType<typeof recognizeRepeatedPatterns>;
-	},
-	byteCount: number
+	persisted: PersistedConversion
 ): VerificationReport {
-	const expectedMessages = (normalized.messages as Array<Record<string, unknown>>)?.length ?? 0;
-	const actualMessages = materialized.frames.length;
+	// A document with an explicit messages array gives us an independent legacy
+	// source to validate. Raw-only documents have no message source, so their
+	// normalized framing is the source representation for this comparison.
+	const sourceMessages = (Array.isArray(originalDoc.messages) ? originalDoc.messages : normalized.messages || []) as Array<
+		FramedMessage & { id?: string; sectionId?: string }
+	>;
+	const expectedMessages = sourceMessages.length;
+	const actualMessages = persisted.frames.length;
 	const expectedRawBytes = (normalized.byteStream as RawByteRecord[])?.length ?? 0;
-	const actualRawBytes = byteCount;
-	const messageVisibilityOk = verifyMessageVisibility(originalDoc, materialized.frames);
+	const actualRawBytes = persisted.byteCount;
+	const rawBytesOk =
+		expectedRawBytes === persisted.byteStream.length &&
+		(normalized.byteStream as RawByteRecord[]).every((expected, index) => {
+			const actual = persisted.byteStream[index];
+			return (
+				actual !== undefined &&
+				(expected.value & 0xff) === actual.value &&
+				(expected.timestamp ?? 0) === actual.timestamp &&
+				(expected.direction || "rx") === actual.direction &&
+				Boolean(expected.hidden) === Boolean(actual.hidden) &&
+				(expected.rawOffset ?? index) === actual.rawOffset
+			);
+		});
+	const messageVisibilityOk = verifyMessageVisibility(originalDoc, persisted.frames);
 
 	const expectedSections = ((normalized.frameSections as NormalizedSection[]) || []).map(s => ({
 		id: s.id,
 		start: s.start,
 		mode: s.framingMode
 	}));
-	// materialized sections are same as normalized for initial conversion; we compare them directly
-	const actualSections = expectedSections; // conversion preserves them; reframing will differ but initial should match
+	const actualSections = persisted.sections.map(section => ({
+		id: section.id,
+		start: section.start,
+		mode: section.mode
+	}));
+	const sectionsOk = JSON.stringify(expectedSections) === JSON.stringify(actualSections);
 
-	// Derive expected analysis from normalized messages using same domain functions
+	// Derive expected analysis from the original messages, never from the rebuilt
+	// messages on `normalized`. Rebuilding is the conversion under test.
 	const expectedStats = deriveAnalysisStatistics(
-		(normalized.messages as Array<FramedMessage & { timestamp?: number }>)?.map(m => ({
+		sourceMessages.map(m => ({
 			signature: signatureForMessage(m),
 			bytes: visibleEntries(m).map(e => e.value)
-		})) ?? []
+		}))
 	);
-	const statsOk =
-		JSON.stringify(expectedStats.signatures) === JSON.stringify(materialized.stats.signatures) &&
-		JSON.stringify(expectedStats.vocabulary) === JSON.stringify(materialized.stats.vocabulary) &&
-		JSON.stringify(expectedStats.bitVariance) === JSON.stringify(materialized.stats.bitVariance) &&
-		JSON.stringify(expectedStats.transitions) === JSON.stringify(materialized.stats.transitions);
+	const sortedStats = (stats: ReturnType<typeof deriveAnalysisStatistics>) => ({
+		signatures: [...stats.signatures].sort((a, b) => a.signature.localeCompare(b.signature)),
+		vocabulary: stats.vocabulary.map(values => [...values].sort((a, b) => a.value - b.value)),
+		bitVariance: stats.bitVariance.map(values =>
+			values
+				.map(cell => ({ bit: cell.bit, variance: cell.variance, percentage: cell.percentage }))
+				.sort((a, b) => a.bit - b.bit)
+		),
+		transitions: [...stats.transitions].sort((a, b) => `${a.from}|${a.to}`.localeCompare(`${b.from}|${b.to}`))
+	});
+	const expectedSortedStats = sortedStats(expectedStats);
+	const actualSortedStats = sortedStats(persisted.stats);
+	const statsOk = JSON.stringify(expectedSortedStats) === JSON.stringify(actualSortedStats);
 
-	const expectedSignatures = expectedStats.signatures;
-	const actualSignatures = materialized.stats.signatures;
-	const signaturesOk = JSON.stringify(expectedSignatures) === JSON.stringify(actualSignatures);
+	const expectedFrameSignatures = sourceMessages.map(signatureForMessage);
+	const actualFrameSignatures = persisted.frames.map(frame => frame.signature);
+	const persistedSignatureCounts = [...countSignatures(actualFrameSignatures).entries()].sort(([a], [b]) => a.localeCompare(b));
+	const storedSignatureCounts = [...persisted.signatures.entries()].sort(([a], [b]) => a.localeCompare(b));
+	const frameSignaturesOk = JSON.stringify(expectedFrameSignatures) === JSON.stringify(actualFrameSignatures);
+	const frameDataOk =
+		sourceMessages.length === persisted.frames.length &&
+		sourceMessages.every((message, index) => {
+			const frame = persisted.frames[index];
+			const expectedBytes = visibleEntries(message).map(entry => entry.value);
+			const sourceRawOffsets = (message as Record<string, unknown>).rawOffsets || (message as Record<string, unknown>)._rawPositions;
+			const expectedRawOffsets = Array.isArray(sourceRawOffsets)
+				? visibleEntries(message).map(entry => sourceRawOffsets[entry.rawPosition])
+				: undefined;
+			return (
+				JSON.stringify(expectedBytes) === JSON.stringify(frame?.bytes) &&
+				(expectedRawOffsets === undefined || JSON.stringify(expectedRawOffsets) === JSON.stringify(frame?.rawOffsets))
+			);
+		});
+	const signaturesOk =
+		frameSignaturesOk &&
+		frameDataOk &&
+		JSON.stringify(persistedSignatureCounts) === JSON.stringify(storedSignatureCounts) &&
+		JSON.stringify(expectedSortedStats.signatures) === JSON.stringify(actualSortedStats.signatures);
 
-	const transitionsOk = JSON.stringify(expectedStats.transitions) === JSON.stringify(materialized.stats.transitions);
-	const byteStatsOk = JSON.stringify(expectedStats.vocabulary) === JSON.stringify(materialized.stats.vocabulary);
-	const bitStatsOk = JSON.stringify(expectedStats.bitVariance) === JSON.stringify(materialized.stats.bitVariance);
+	const transitionsOk = JSON.stringify(expectedSortedStats.transitions) === JSON.stringify(actualSortedStats.transitions);
+	const byteStatsOk = JSON.stringify(expectedSortedStats.vocabulary) === JSON.stringify(actualSortedStats.vocabulary);
+	const bitStatsOk = JSON.stringify(expectedSortedStats.bitVariance) === JSON.stringify(actualSortedStats.bitVariance);
 
-	// Sequence groups: compare via recognizeRepeatedPatterns input derived from messages
+	// Sequence groups are also compared with the original message stream and the
+	// rows read back from canonical storage.
 	const expectedPatterns = recognizeRepeatedPatterns(
-		(normalized.messages as Array<FramedMessage & { id?: string; sectionId?: string }>)?.map((m, idx) => ({
+		sourceMessages.map((m, idx) => ({
 			signature: signatureForMessage(m),
 			originalIndex: idx,
 			sectionId: (m as Record<string, unknown>).sectionId
-		})) ?? []
+		}))
 	);
-	const seqOk = JSON.stringify(expectedPatterns) === JSON.stringify(materialized.patterns);
+	const seqOk = JSON.stringify(expectedPatterns) === JSON.stringify(persisted.patterns);
 
 	const overallOk =
 		expectedMessages === actualMessages &&
 		expectedRawBytes === actualRawBytes &&
-		JSON.stringify(expectedSections) === JSON.stringify(actualSections) &&
+		rawBytesOk &&
+		sectionsOk &&
 		signaturesOk && transitionsOk && byteStatsOk && bitStatsOk && seqOk && messageVisibilityOk;
 
 	return {
 		messageCount: { expected: expectedMessages, actual: actualMessages, ok: expectedMessages === actualMessages },
-		rawByteCount: { expected: expectedRawBytes, actual: actualRawBytes, ok: expectedRawBytes === actualRawBytes },
-		sectionBoundaries: { expected: expectedSections, actual: actualSections, ok: JSON.stringify(expectedSections) === JSON.stringify(actualSections) },
+		rawByteCount: { expected: expectedRawBytes, actual: actualRawBytes, ok: expectedRawBytes === actualRawBytes && rawBytesOk },
+		sectionBoundaries: { expected: expectedSections, actual: actualSections, ok: sectionsOk },
 		signaturesOk,
 		byteStatisticsOk: byteStatsOk,
 		bitStatisticsOk: bitStatsOk,
@@ -672,7 +896,15 @@ export function convertCaptureDocumentToCanonical(
 		patterns = recognizeRepeatedPatterns(
 			frames.map((f, idx) => ({ signature: f.signature, originalIndex: idx, sectionId: f.sectionId }))
 		);
-		report = verifyConversion(doc, normalized, { frames, signatures, stats, patterns }, byteCount);
+		report = verifyConversion(doc, normalized, {
+			byteCount,
+			byteStream: stream,
+			sections: sections.map(section => ({ id: section.id, start: section.start, mode: section.framingMode })),
+			frames,
+			signatures,
+			stats,
+			patterns
+		});
 	} catch (e) {
 		report = {
 			messageCount: { expected: 0, actual: 0, ok: false },
@@ -731,20 +963,6 @@ export function convertCaptureDocumentToCanonical(
 					createdAt: String(doc.createdAt || now),
 					updatedAt: now,
 					folderId: doc.folderId ? String(doc.folderId) : null
-				});
-
-			// backup original JSON
-			database
-				.prepare(
-					`INSERT INTO capture_backups (capture_id, document_json, migrated_at, verified, verification_report_json)
-					 VALUES (@captureId, @documentJson, @migratedAt, 1, @reportJson)
-					 ON CONFLICT (capture_id) DO UPDATE SET verified=1, verification_report_json=excluded.verification_report_json`
-				)
-				.run({
-					captureId,
-					documentJson: row.document_json,
-					migratedAt: now,
-					reportJson: JSON.stringify(report)
 				});
 
 			// raw chunks
@@ -937,6 +1155,26 @@ export function convertCaptureDocumentToCanonical(
 					}
 				}
 			}
+
+			// Verify the rows that will become authoritative, rather than only the
+			// in-memory materialization used to populate them.
+			report = verifyConversion(doc, normalized, readPersistedConversion(database, captureId, profileId));
+			if (!report.overallOk) throw new Error(report.details || "canonical conversion verification failed");
+
+			// Retain the original JSON only after the persisted canonical rows have
+			// been read back and verified.
+			database
+				.prepare(
+					`INSERT INTO capture_backups (capture_id, document_json, migrated_at, verified, verification_report_json)
+					 VALUES (@captureId, @documentJson, @migratedAt, 1, @reportJson)
+					 ON CONFLICT (capture_id) DO UPDATE SET verified=1, verification_report_json=excluded.verification_report_json`
+				)
+				.run({
+					captureId,
+					documentJson: row.document_json,
+					migratedAt: now,
+					reportJson: JSON.stringify(report)
+				});
 
 			// stable notes: map capture.notes and annotations
 			const notes = (doc.notes as Array<Record<string, unknown>>) || [];
