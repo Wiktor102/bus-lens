@@ -910,6 +910,302 @@ export function convertCaptureDocumentToCanonical(
 	}
 }
 
+type CanonicalRawChunkRow = {
+	bytes: Buffer;
+	timestamps_json: string;
+	directions_json: string;
+	hidden_json: string;
+	start_offset: number;
+};
+
+function canonicalRawMatches(
+	database: SqliteDatabase,
+	captureId: string,
+	stream: Array<RawByteRecord & { rawOffset: number }>
+): boolean {
+	const chunks = database
+		.prepare("SELECT bytes, timestamps_json, directions_json, hidden_json, start_offset FROM raw_chunks WHERE capture_id = @captureId ORDER BY chunk_index")
+		.all({ captureId }) as CanonicalRawChunkRow[];
+	let streamIndex = 0;
+	for (const chunk of chunks) {
+		const timestamps: number[] = JSON.parse(chunk.timestamps_json) as number[];
+		const directions: string[] = JSON.parse(chunk.directions_json) as string[];
+		const hidden: boolean[] = JSON.parse(chunk.hidden_json) as boolean[];
+		const bytes = chunk.bytes instanceof Buffer ? [...chunk.bytes] : Array.from(new Uint8Array(chunk.bytes as unknown as Uint8Array));
+		for (let index = 0; index < bytes.length; index++) {
+			const raw = stream[streamIndex++];
+			if (!raw) return false;
+			if (
+				raw.rawOffset !== chunk.start_offset + index ||
+				(Number(raw.value) & 0xff) !== bytes[index] ||
+				raw.timestamp !== (timestamps[index] ?? 0) ||
+				(raw.direction || "rx") !== (directions[index] || "rx") ||
+				Boolean(raw.hidden) !== Boolean(hidden[index])
+			) {
+				return false;
+			}
+		}
+	}
+	return streamIndex === stream.length;
+}
+
+type CanonicalSectionRow = {
+	start_offset: number;
+	framing_mode: string;
+	frame_length: number | null;
+	marker_bytes: string | null;
+	marker_position: string | null;
+	time_gap_ms: number | null;
+	collapse_runs: number;
+	collapsed: number;
+};
+
+function canonicalFramingMatches(database: SqliteDatabase, captureId: string, sections: NormalizedSection[]): boolean {
+	const activeProfile = database
+		.prepare("SELECT id FROM framing_profiles WHERE capture_id = @captureId AND is_active = 1 LIMIT 1")
+		.get({ captureId }) as { id: string } | undefined;
+	if (!activeProfile) return false;
+	const stored = database
+		.prepare(
+			"SELECT start_offset, framing_mode, frame_length, marker_bytes, marker_position, time_gap_ms, collapse_runs, collapsed FROM framing_sections WHERE profile_id = @profileId ORDER BY position"
+		)
+		.all({ profileId: activeProfile.id }) as CanonicalSectionRow[];
+	if (stored.length !== sections.length) return false;
+	return stored.every((row, index) => {
+		const section = sections[index];
+		const expectedMarker = section.framingMode === "marker" ? JSON.stringify(parseMarkerBytes(section.frameMarker)) : null;
+		return (
+			row.start_offset === section.start &&
+			row.framing_mode === section.framingMode &&
+			row.frame_length === (section.framingMode === "length" ? section.frameSize : null) &&
+			row.marker_bytes === expectedMarker &&
+			row.marker_position === (section.framingMode === "marker" ? section.markerPosition : null) &&
+			row.time_gap_ms === (section.framingMode === "time" ? section.frameTimeGap : null) &&
+			Boolean(row.collapse_runs) === section.collapseRuns &&
+			Boolean(row.collapsed) === section.collapsed
+		);
+	});
+}
+
+function updateCanonicalMetadata(
+	database: SqliteDatabase,
+	captureId: string,
+	document: CaptureDocument,
+	byteCount: number,
+	updatedAt: string
+): void {
+	const existing = database.prepare("SELECT created_at FROM captures WHERE id = @id").get({ id: captureId }) as { created_at: string } | undefined;
+	if (!existing) throw new Error(`capture ${captureId} not found in canonical store`);
+	database
+		.prepare(
+			`UPDATE captures
+			 SET name = @name,
+				 lifecycle = @lifecycle,
+				 byte_count = @byteCount,
+				 created_at = @createdAt,
+				 updated_at = @updatedAt,
+				 folder_id = @folderId
+			 WHERE id = @id`
+		)
+		.run({
+			id: captureId,
+			name: String(document.name || "Untitled capture"),
+			lifecycle: lifecycleForDocument(document),
+			byteCount,
+			createdAt: String(document.createdAt || existing.created_at),
+			updatedAt,
+			folderId: document.folderId ? String(document.folderId) : null
+		});
+}
+
+function noteCreatedAt(value: unknown, fallback: string): string {
+	if (typeof value === "number" && Number.isFinite(value)) return new Date(value).toISOString();
+	if (typeof value === "string" && value.trim()) {
+		const numeric = Number(value);
+		if (Number.isFinite(numeric)) return new Date(numeric).toISOString();
+		const parsed = Date.parse(value);
+		if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+	}
+	return fallback;
+}
+
+function noteObject(value: unknown): Record<string, unknown> {
+	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function allocateNoteId(preferred: unknown, used: Set<string>, generateId: () => string): string {
+	const initial = String(preferred ?? "").trim() || String(generateId()).trim() || "note";
+	let candidate = initial;
+	let suffix = 1;
+	while (used.has(candidate)) {
+		const generated = String(generateId()).trim();
+		candidate = generated && !used.has(generated) ? generated : `${initial}-${suffix++}`;
+	}
+	used.add(candidate);
+	return candidate;
+}
+
+function messageRawOffsets(document: CaptureDocument, messageId: string): number[] | null {
+	const messages = Array.isArray(document.messages) ? document.messages : [];
+	const message = messages.find(candidate => String(candidate?.id || "") === messageId);
+	if (!message) return null;
+	const persistedOffsets = (value: unknown): number[] | null => {
+		if (!Array.isArray(value)) return null;
+		const offsets = value.map(Number);
+		return offsets.every(offset => Number.isSafeInteger(offset) && offset >= 0) ? offsets : null;
+	};
+	const offsets = persistedOffsets(message.rawOffsets) || persistedOffsets(message._rawPositions);
+	if (offsets) return offsets;
+	const start = Number(message._byteStart);
+	return Number.isSafeInteger(start) && start >= 0 && Array.isArray(message.bytes)
+		? message.bytes.map((_, index) => start + index)
+		: null;
+}
+
+function replaceCanonicalNotes(
+	database: SqliteDatabase,
+	captureId: string,
+	document: CaptureDocument,
+	now: string,
+	generateId: () => string
+): void {
+	database.prepare("DELETE FROM stable_notes WHERE capture_id = @captureId").run({ captureId });
+	const usedIds = new Set<string>();
+	const insertCaptureNote = database.prepare(
+		"INSERT INTO stable_notes (id, capture_id, text, created_at, target_kind, start_row, end_row) VALUES (@id, @captureId, @text, @createdAt, @targetKind, @startRow, @endRow)"
+	);
+	const insertSimpleNote = database.prepare(
+		"INSERT INTO stable_notes (id, capture_id, text, created_at, target_kind) VALUES (@id, @captureId, @text, @createdAt, @targetKind)"
+	);
+	const insertByteNote = database.prepare(
+		"INSERT INTO stable_notes (id, capture_id, text, created_at, target_kind, raw_offset) VALUES (@id, @captureId, @text, @createdAt, 'byte', @rawOffset)"
+	);
+	const insertFrameNote = database.prepare(
+		"INSERT INTO stable_notes (id, capture_id, text, created_at, target_kind, profile_id, raw_offsets_json) VALUES (@id, @captureId, @text, @createdAt, 'frame', @profileId, @rawOffsetsJson)"
+	);
+	const insertPatternNote = database.prepare(
+		"INSERT INTO stable_notes (id, capture_id, text, created_at, target_kind, sequence_key) VALUES (@id, @captureId, @text, @createdAt, 'pattern', @sequenceKey)"
+	);
+	const activeProfile = database
+		.prepare("SELECT id FROM framing_profiles WHERE capture_id = @captureId AND is_active = 1 LIMIT 1")
+		.get({ captureId }) as { id: string } | undefined;
+
+	for (const value of Array.isArray(document.notes) ? document.notes : []) {
+		const note = noteObject(value);
+		const type = String(note.type || "capture");
+		const id = allocateNoteId(note.id, usedIds, generateId);
+		const text = String(note.text || "");
+		const createdAt = noteCreatedAt(note.createdAt, now);
+		if (type === "sequence" || type === "legacy-sequence") {
+			const start = Number(note.start) || 1;
+			const end = Number(note.end) || start;
+			insertCaptureNote.run({ id, captureId, text, createdAt, targetKind: "legacy-sequence", startRow: start, endRow: end });
+		} else {
+			insertSimpleNote.run({ id, captureId, text, createdAt, targetKind: "capture" });
+		}
+	}
+
+	const annotations = noteObject(document.annotations);
+	for (const [key, rawValue] of Object.entries(annotations)) {
+		const value = noteObject(rawValue);
+		const id = allocateNoteId(key, usedIds, generateId);
+		const text = String(value.text || "");
+		const createdAt = noteCreatedAt(value.createdAt, now);
+		const separator = key.lastIndexOf(":");
+		if (separator > 0) {
+			const messageId = key.slice(0, separator);
+			const position = Number(key.slice(separator + 1));
+			const offsets = messageRawOffsets(document, messageId);
+			const rawOffset = offsets && Number.isInteger(position) ? offsets[position] : null;
+			insertByteNote.run({
+				id,
+				captureId,
+				text,
+				createdAt,
+				rawOffset: Number.isSafeInteger(rawOffset) ? rawOffset : null
+			});
+		} else {
+			const offsets = messageRawOffsets(document, key);
+			insertFrameNote.run({
+				id,
+				captureId,
+				text,
+				createdAt,
+				profileId: activeProfile?.id ?? null,
+				rawOffsetsJson: offsets ? JSON.stringify(offsets) : null
+			});
+		}
+	}
+
+	const patternRemarks = noteObject(document.patternRemarks);
+	for (const [sequenceKey, rawValue] of Object.entries(patternRemarks)) {
+		const value = noteObject(rawValue);
+		const id = allocateNoteId(`pattern:${sequenceKey}`, usedIds, generateId);
+		insertPatternNote.run({
+			id,
+			captureId,
+			text: String(value.text || ""),
+			createdAt: noteCreatedAt(value.updatedAt, now),
+			sequenceKey
+		});
+	}
+}
+
+/**
+ * Synchronize a normal document save with the canonical representation.
+ * The caller owns the surrounding transaction so the shadow JSON row and
+ * canonical tables commit or roll back together.
+ */
+export function updateCanonicalCapture(
+	database: SqliteDatabase,
+	captureId: string,
+	document: Record<string, unknown>,
+	options: { generateId?: () => string; nowIso?: () => string } = {}
+): void {
+	const generateId = (options.generateId ?? randomUUID) as unknown as () => string;
+	const now = (options.nowIso ?? (() => new Date().toISOString()))();
+	const normalized = normalizeDocumentForConversion(document as CaptureDocument, generateId);
+	const stream = normalized.byteStream as Array<RawByteRecord & { rawOffset: number }>;
+	const sections = normalized.frameSections as unknown as NormalizedSection[];
+
+	if (!canonicalRawMatches(database, captureId, stream)) {
+		// Raw chunks are immutable for a given canonical materialization. A byte
+		// edit therefore starts a fresh materialization; stale framing profiles
+		// cannot remain attached to a different byte stream.
+		database.prepare("DELETE FROM captures WHERE id = @id").run({ id: captureId });
+		const result = convertCaptureDocumentToCanonical(database, captureId, {
+			nowIso: () => now,
+			generateId
+		});
+		if (!result.verified) throw new Error(result.error || result.report?.details || `canonical update failed for capture ${captureId}`);
+		replaceCanonicalNotes(database, captureId, document as CaptureDocument, now, generateId);
+		return;
+	}
+
+	updateCanonicalMetadata(database, captureId, document as CaptureDocument, stream.length, now);
+	if (!canonicalFramingMatches(database, captureId, sections)) {
+		createFramingRevision(
+			database,
+			captureId,
+			sections.map(section => ({
+				// Section ids are scoped to the materialized profile. Generate new
+				// ids for a revision so the previous profile remains queryable.
+				id: undefined,
+				start: section.start,
+				framingMode: section.framingMode,
+				frameSize: section.frameSize,
+				frameMarker: section.frameMarker,
+				markerPosition: section.markerPosition,
+				frameTimeGap: section.frameTimeGap,
+				collapseRuns: section.collapseRuns,
+				collapsed: section.collapsed
+			})),
+			{ nowIso: () => now, generateId }
+		);
+	}
+	replaceCanonicalNotes(database, captureId, document as CaptureDocument, now, generateId);
+}
+
 // ---------------------------------------------------------------------------
 // Reframing: create new profile, materialize completely, activate atomically
 // ---------------------------------------------------------------------------

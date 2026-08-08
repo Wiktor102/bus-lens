@@ -5,7 +5,8 @@ import {
 	createFramingRevision as createCanonicalRevision,
 	getActiveProfile as getCanonicalActiveProfile,
 	getPreviousProfiles as listCanonicalPreviousProfiles,
-	isCaptureConverted as isCanonicalCaptureConverted
+	isCaptureConverted as isCanonicalCaptureConverted,
+	updateCanonicalCapture as updateDocumentCanonical
 } from "./canonical.ts";
 
 export type JsonDocument = Record<string, unknown>;
@@ -481,6 +482,15 @@ export class ArchiveRepository {
 	putCapture(id: string, document: JsonDocument, expectedVersion?: number): DocumentRecord {
 		const transaction = this.database.transaction(() => {
 			const record = this.putDocument("capture_documents", id, document, expectedVersion);
+			if (isCanonicalCaptureConverted(this.database, record.id)) {
+				// Converted captures are read from canonical tables. Keep the shadow JSON
+				// row and canonical materialization in the same transaction so a normal
+				// save cannot leave getCapture() serving stale data.
+				updateDocumentCanonical(this.database, record.id, document, {
+					nowIso: () => record.updatedAt,
+					generateId: () => this.generateId()
+				});
+			}
 			const existingOrder = this.database
 				.prepare("SELECT position FROM archive_order WHERE entity_type = 'capture' AND entity_id = @id")
 				.get({ id }) as { position: number } | undefined;
