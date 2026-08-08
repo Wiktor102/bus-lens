@@ -91,6 +91,70 @@ test("canonical capture reads preserve JSON metadata and capture sessions after 
 	});
 });
 
+test("canonical annotation notes reload under the message and byte keys used by the UI", async () => {
+	await withTemporaryArchive(async directory => {
+		const repository = new ArchiveRepository(openDatabase(join(directory, "archive.sqlite")), {
+			nowIso: () => "2026-01-01T00:00:00.000Z"
+		});
+		const legacyMessageId = "legacy-message";
+		repository.putCapture("annotated-capture", {
+			id: "annotated-capture",
+			name: "Annotated capture",
+			byteStream: [
+				{ rawOffset: 10, value: 0xa0, timestamp: 100, direction: "rx" },
+				{ rawOffset: 11, value: 0xb1, timestamp: 125, direction: "rx" }
+			],
+			frameSections: [{ id: "section-1", start: 10, framingMode: "length", frameSize: 2 }],
+			messages: [{
+				id: legacyMessageId,
+				timestamp: 100,
+				bytes: [0xa0, 0xb1],
+				byteTimestamps: [100, 125],
+				rawOffsets: [10, 11],
+				_rawPositions: [10, 11]
+			}],
+			notes: [],
+			annotations: {
+				[legacyMessageId]: { text: "message target", createdAt: 1_000, type: "message" },
+				[`${legacyMessageId}:1`]: { text: "byte target", createdAt: 2_000, type: "byte" }
+			},
+			patternRemarks: {}
+		});
+
+		const conversion = repository.convertCaptureToCanonical("annotated-capture");
+		assert.equal(conversion.ok, true);
+		assert.equal(conversion.verified, true);
+		const converted = repository.getCapture("annotated-capture")?.document as {
+			messages: Array<{ id: string }>;
+			annotations: Record<string, { text: string; type: string }>;
+		};
+		const messageId = converted.messages[0].id;
+		assert.deepEqual(Object.keys(converted.annotations).sort(), [messageId, `${messageId}:1`].sort());
+		assert.equal(converted.annotations[messageId].text, "message target");
+		assert.equal(converted.annotations[messageId].type, "message");
+		assert.equal(converted.annotations[`${messageId}:1`].text, "byte target");
+		assert.equal(converted.annotations[`${messageId}:1`].type, "byte");
+
+		const stableNotes = repository.getStableNotes("annotated-capture");
+		const messageNote = stableNotes.find(note => note.target_kind === "frame");
+		const byteNote = stableNotes.find(note => note.target_kind === "byte");
+		assert.equal(messageNote?.message_id, legacyMessageId);
+		assert.equal(messageNote?.byte_position, null);
+		assert.equal(messageNote?.raw_offsets_json, JSON.stringify([10, 11]));
+		assert.equal(byteNote?.message_id, legacyMessageId);
+		assert.equal(byteNote?.byte_position, 1);
+		assert.equal(byteNote?.raw_offset, 11);
+
+		repository.close();
+		const reopened = new ArchiveRepository(openDatabase(join(directory, "archive.sqlite")));
+		const reloaded = reopened.getCapture("annotated-capture")?.document as typeof converted;
+		assert.deepEqual(Object.keys(reloaded.annotations).sort(), [messageId, `${messageId}:1`].sort());
+		assert.equal(reloaded.annotations[messageId].text, "message target");
+		assert.equal(reloaded.annotations[`${messageId}:1`].text, "byte target");
+		reopened.close();
+	});
+});
+
 test("SQLite backup restores a complete archive", async () => {
 	await withTemporaryArchive(async directory => {
 		const sourcePath = join(directory, "source.sqlite");
