@@ -1697,6 +1697,19 @@ export function updateCanonicalCapture(
 		// Raw chunks are immutable for a given canonical materialization. A byte
 		// edit therefore starts a fresh materialization; stale framing profiles
 		// cannot remain attached to a different byte stream.
+		// Normal saves may carry a message preview from before the raw edit. The
+		// raw stream is the edited source in this path, so persist its rebuilt
+		// preview before invoking the strict source-vs-canonical verification.
+		const rebuiltDocument = {
+			...document,
+			byteStream: normalized.byteStream,
+			frameSections: normalized.frameSections,
+			messages: normalized.messages,
+			captureSessions: normalized.captureSessions
+		};
+		database
+			.prepare("UPDATE capture_documents SET document_json = @documentJson WHERE id = @id")
+			.run({ id: captureId, documentJson: JSON.stringify(rebuiltDocument) });
 		database.prepare("DELETE FROM captures WHERE id = @id").run({ id: captureId });
 		const result = convertCaptureDocumentToCanonical(database, captureId, {
 			nowIso: () => now,
