@@ -85,12 +85,26 @@ test("saves to converted captures keep canonical reads current", async () => {
 		};
 		assert.deepEqual(canonicalCapture, { name: "After", folder_id: "folder-1", byte_count: 2 });
 		assert.equal((database.prepare("SELECT bytes FROM raw_chunks WHERE capture_id = 'converted-save'").get() as { bytes: Buffer }).bytes[1], 0x2a);
+		const savedTargets = database
+			.prepare("SELECT target_kind, raw_offset, message_id, byte_position FROM stable_notes WHERE capture_id = 'converted-save' AND target_kind = 'byte'")
+			.all() as Array<{ target_kind: string; raw_offset: number | null; message_id: string | null; byte_position: number | null }>;
+		assert.deepEqual(savedTargets, [{ target_kind: "byte", raw_offset: 1, message_id: beforeMessage.id as string, byte_position: 1 }]);
+
+		const reframed = repository.putCapture(
+			"converted-save",
+			{ ...after.document, frameSections: [{ id: "section-2", start: 0, framingMode: "length", frameSize: 1 }] },
+			after.version
+		);
+		assert.equal(reframed.version, after.version + 1);
+		const reframedDocument = repository.getCapture("converted-save")?.document;
+		assert.deepEqual((reframedDocument?.messages as Array<Record<string, unknown>>).map(message => message.bytes), [[0x10], [0x2a]]);
 
 		repository.close();
 		const reopened = new ArchiveRepository(openDatabase(path));
 		const reloaded = reopened.getCapture("converted-save")?.document;
 		assert.equal(reloaded?.name, "After");
 		assert.deepEqual((reloaded?.byteStream as Array<Record<string, unknown>>).map(record => record.value), [0x10, 0x2a]);
+		assert.deepEqual((reloaded?.messages as Array<Record<string, unknown>>).map(message => message.bytes), [[0x10], [0x2a]]);
 		assert.deepEqual(reloaded?.notes, [{ id: "note-1", type: "capture", text: "after", createdAt: 2_000 }]);
 		reopened.close();
 	});
