@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 
 export type SqliteDatabase = InstanceType<typeof Database>;
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 type Migration = {
 	version: number;
@@ -285,6 +285,28 @@ const migrations: Migration[] = [
 			database.exec(`
 				ALTER TABLE stable_notes ADD COLUMN message_id TEXT;
 				ALTER TABLE stable_notes ADD COLUMN byte_position INTEGER CHECK (byte_position >= 0);
+			`);
+		}
+	},
+	{
+		version: 4,
+		up: database => {
+			database.exec(`
+				-- Session identity is per byte; the legacy session_id column remains
+				-- for compatibility with databases created before this migration.
+				ALTER TABLE raw_chunks ADD COLUMN session_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(session_ids_json));
+
+				CREATE TABLE IF NOT EXISTS capture_sessions (
+					capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+					ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+					id TEXT NOT NULL,
+					first_received_at REAL,
+					last_received_at REAL,
+					PRIMARY KEY (capture_id, ordinal),
+					UNIQUE (capture_id, id)
+				);
+				CREATE INDEX IF NOT EXISTS capture_sessions_capture_ordinal
+					ON capture_sessions (capture_id, ordinal);
 			`);
 		}
 	}
