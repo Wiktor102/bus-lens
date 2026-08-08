@@ -297,6 +297,18 @@ export class ArchiveRepository {
 			| { id: string; name: string; lifecycle: string; byte_count: number; created_at: string; updated_at: string; folder_id: string | null }
 			| undefined;
 		if (!cap) return undefined;
+		// Canonical tables currently model capture data, but not every JSON metadata
+		// field. Keep the retained document as the metadata source while canonical
+		// values below remain authoritative for reconstructed data.
+		const existingDoc = this.getDocument("capture_documents", id);
+		const originalByteStream = Array.isArray(existingDoc?.document.byteStream) ? existingDoc.document.byteStream : [];
+		const sessionIdsByRawOffset = new Map<number, string>();
+		for (const record of originalByteStream) {
+			if (!isJsonDocument(record)) continue;
+			const rawOffset = Number(record.rawOffset);
+			if (!Number.isSafeInteger(rawOffset) || rawOffset < 0 || typeof record.sessionId !== "string" || !record.sessionId) continue;
+			sessionIdsByRawOffset.set(rawOffset, record.sessionId);
+		}
 		// Reassemble byteStream from raw_chunks
 		const chunks = this.database
 			.prepare("SELECT bytes, timestamps_json, directions_json, hidden_json, start_offset, session_id FROM raw_chunks WHERE capture_id = @captureId ORDER BY chunk_index")
@@ -315,13 +327,15 @@ export class ArchiveRepository {
 			const hidden: boolean[] = JSON.parse(ch.hidden_json) as boolean[];
 			const bytes = ch.bytes instanceof Buffer ? [...ch.bytes] : Array.from(new Uint8Array(ch.bytes as unknown as Uint8Array));
 			for (let i = 0; i < bytes.length; i++) {
+				const rawOffset = ch.start_offset + i;
+				const sessionId = sessionIdsByRawOffset.get(rawOffset) ?? ch.session_id;
 				byteStream.push({
-					rawOffset: ch.start_offset + i,
+					rawOffset,
 					value: bytes[i],
 					timestamp: timestamps[i] ?? 0,
 					direction: directions[i] || "rx",
 					hidden: Boolean(hidden[i]),
-					...(ch.session_id ? { sessionId: ch.session_id } : {})
+					...(sessionId ? { sessionId } : {})
 				});
 			}
 		}
@@ -439,6 +453,7 @@ export class ArchiveRepository {
 		}
 
 		const document: JsonDocument = {
+			...(existingDoc?.document ?? {}),
 			id: cap.id,
 			name: cap.name,
 			createdAt: cap.created_at,
@@ -452,13 +467,11 @@ export class ArchiveRepository {
 			annotations,
 			patternRemarks,
 			nextRawOffset: byteStream.length ? Math.max(...byteStream.map(b => (b.rawOffset as number) + 1)) : 0,
-			captureSessions: []
+			captureSessions: Array.isArray(existingDoc?.document.captureSessions) ? existingDoc.document.captureSessions : []
 		};
-		// Try to preserve version from capture_documents if exists? But canonical is now authoritative.
-		const existingDoc = this.database.prepare("SELECT document_version FROM capture_documents WHERE id = @id").get({ id }) as { document_version: number } | undefined;
 		return {
 			id: cap.id,
-			version: existingDoc?.document_version ?? 1,
+			version: existingDoc?.version ?? 1,
 			document,
 			createdAt: cap.created_at,
 			updatedAt: cap.updated_at

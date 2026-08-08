@@ -38,6 +38,59 @@ test("migrations are idempotent and durable document writes do not rewrite other
 	});
 });
 
+test("canonical capture reads preserve JSON metadata and capture sessions after reload", async () => {
+	await withTemporaryArchive(async directory => {
+		const path = join(directory, "archive.sqlite");
+		const database = openDatabase(path);
+		const repository = new ArchiveRepository(database, { nowIso: () => "2026-01-01T00:00:00.000Z" });
+		repository.putCapture("capture-metadata", {
+			id: "capture-metadata",
+			name: "Metadata capture",
+			description: "Retain this description",
+			view: "Overview",
+			baudRate: 9600,
+			inputFormat: "text",
+			params: [{ key: "Mode", value: "safe" }],
+			customMetadata: { operator: "test" },
+			captureSessions: [{ id: "session-1", firstReceivedAt: 100, lastReceivedAt: 200 }],
+			byteStream: [
+				{ rawOffset: 0, value: 0xc2, timestamp: 100, direction: "rx", sessionId: "session-1" },
+				{ rawOffset: 1, value: 0x08, timestamp: 100, direction: "rx", sessionId: "session-1" }
+			],
+			frameSections: [{ id: "section-1", start: 0, framingMode: "length", frameSize: 2, frameMarker: "", markerPosition: "start", frameTimeGap: 5, collapseRuns: false, collapsed: false }],
+			notes: [],
+			annotations: {},
+			patternRemarks: {}
+		});
+
+		const conversion = repository.convertCaptureToCanonical("capture-metadata");
+		assert.equal(conversion.ok, true);
+		assert.equal(conversion.verified, true);
+		const converted = repository.getCapture("capture-metadata")?.document;
+		assert.equal(converted?.description, "Retain this description");
+		assert.equal(converted?.view, "Overview");
+		assert.equal(converted?.baudRate, 9600);
+		assert.equal(converted?.inputFormat, "text");
+		assert.deepEqual(converted?.params, [{ key: "Mode", value: "safe" }]);
+		assert.deepEqual(converted?.customMetadata, { operator: "test" });
+		assert.deepEqual(converted?.captureSessions, [{ id: "session-1", firstReceivedAt: 100, lastReceivedAt: 200 }]);
+		assert.equal(converted?.byteStream && (converted.byteStream[0] as { sessionId?: string }).sessionId, "session-1");
+
+		repository.close();
+		const reopened = new ArchiveRepository(openDatabase(path));
+		const reloaded = reopened.getCapture("capture-metadata")?.document;
+		assert.equal(reloaded?.description, "Retain this description");
+		assert.equal(reloaded?.view, "Overview");
+		assert.equal(reloaded?.baudRate, 9600);
+		assert.equal(reloaded?.inputFormat, "text");
+		assert.deepEqual(reloaded?.params, [{ key: "Mode", value: "safe" }]);
+		assert.deepEqual(reloaded?.customMetadata, { operator: "test" });
+		assert.deepEqual(reloaded?.captureSessions, [{ id: "session-1", firstReceivedAt: 100, lastReceivedAt: 200 }]);
+		assert.equal(reloaded?.byteStream && (reloaded.byteStream[0] as { sessionId?: string }).sessionId, "session-1");
+		reopened.close();
+	});
+});
+
 test("SQLite backup restores a complete archive", async () => {
 	await withTemporaryArchive(async directory => {
 		const sourcePath = join(directory, "source.sqlite");
