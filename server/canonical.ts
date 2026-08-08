@@ -1602,10 +1602,10 @@ function replaceCanonicalNotes(
 		"INSERT INTO stable_notes (id, capture_id, text, created_at, target_kind) VALUES (@id, @captureId, @text, @createdAt, @targetKind)"
 	);
 	const insertByteNote = database.prepare(
-		"INSERT INTO stable_notes (id, capture_id, text, created_at, target_kind, raw_offset) VALUES (@id, @captureId, @text, @createdAt, 'byte', @rawOffset)"
+		"INSERT INTO stable_notes (id, capture_id, text, created_at, target_kind, raw_offset, message_id, byte_position) VALUES (@id, @captureId, @text, @createdAt, 'byte', @rawOffset, @messageId, @bytePosition)"
 	);
 	const insertFrameNote = database.prepare(
-		"INSERT INTO stable_notes (id, capture_id, text, created_at, target_kind, profile_id, raw_offsets_json) VALUES (@id, @captureId, @text, @createdAt, 'frame', @profileId, @rawOffsetsJson)"
+		"INSERT INTO stable_notes (id, capture_id, text, created_at, target_kind, profile_id, raw_offsets_json, message_id) VALUES (@id, @captureId, @text, @createdAt, 'frame', @profileId, @rawOffsetsJson, @messageId)"
 	);
 	const insertPatternNote = database.prepare(
 		"INSERT INTO stable_notes (id, capture_id, text, created_at, target_kind, sequence_key) VALUES (@id, @captureId, @text, @createdAt, 'pattern', @sequenceKey)"
@@ -1635,10 +1635,10 @@ function replaceCanonicalNotes(
 		const id = allocateNoteId(key, usedIds, generateId);
 		const text = String(value.text || "");
 		const createdAt = noteCreatedAt(value.createdAt, now);
-		const separator = key.lastIndexOf(":");
-		if (separator > 0) {
-			const messageId = key.slice(0, separator);
-			const position = Number(key.slice(separator + 1));
+		const target = legacyAnnotationTarget(key);
+		if (target.bytePosition !== null) {
+			const messageId = target.messageId;
+			const position = target.bytePosition;
 			const offsets = messageRawOffsets(document, messageId);
 			const rawOffset = offsets && Number.isInteger(position) ? offsets[position] : null;
 			insertByteNote.run({
@@ -1646,9 +1646,12 @@ function replaceCanonicalNotes(
 				captureId,
 				text,
 				createdAt,
-				rawOffset: Number.isSafeInteger(rawOffset) ? rawOffset : null
+				rawOffset: Number.isSafeInteger(rawOffset) ? rawOffset : null,
+				messageId,
+				bytePosition: position
 			});
 		} else {
+			const messageId = target.messageId;
 			const offsets = messageRawOffsets(document, key);
 			insertFrameNote.run({
 				id,
@@ -1656,7 +1659,8 @@ function replaceCanonicalNotes(
 				text,
 				createdAt,
 				profileId: activeProfile?.id ?? null,
-				rawOffsetsJson: offsets ? JSON.stringify(offsets) : null
+				rawOffsetsJson: offsets ? JSON.stringify(offsets) : null,
+				messageId
 			});
 		}
 	}
