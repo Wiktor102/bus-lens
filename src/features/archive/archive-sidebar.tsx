@@ -146,7 +146,16 @@ export function ArchiveSidebar() {
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const [query, setQuery] = useState("");
 	const [folderDialogId, setFolderDialogId] = useState<string | null | undefined>(undefined);
+	const [folderMoveCaptureId, setFolderMoveCaptureId] = useState<string | null>(null);
 	const [captureMenuState, setCaptureMenuState] = useState<CaptureContextMenuState | null>(null);
+	const openNewFolder = useCallback((captureId: string | null = null) => {
+		setFolderMoveCaptureId(captureId);
+		setFolderDialogId(null);
+	}, []);
+	const handleFolderCreated = useCallback((folderId: string) => {
+		if (folderMoveCaptureId) actions.moveCapture(folderMoveCaptureId, folderId);
+		setFolderMoveCaptureId(null);
+	}, [actions, folderMoveCaptureId]);
 	const closeCaptureMenu = useCallback((restoreFocus = false) => {
 		setCaptureMenuState(current => {
 			if (restoreFocus && current?.origin.isConnected) current.origin.focus();
@@ -172,7 +181,7 @@ export function ArchiveSidebar() {
 							className="icon-btn"
 							title="New folder"
 							aria-label="New folder"
-							onClick={() => setFolderDialogId(null)}
+							onClick={() => openNewFolder()}
 						>
 							<svg viewBox="0 0 24 24" aria-hidden="true">
 								<path d="M3.75 6.75h5.1l1.8 2.1h9.6v8.4a1.5 1.5 0 0 1-1.5 1.5h-15a1.5 1.5 0 0 1-1.5-1.5v-9a1.5 1.5 0 0 1 1.5-1.5Z" />
@@ -259,19 +268,29 @@ export function ArchiveSidebar() {
 			</aside>
 			<ArchiveFolderDialog
 				folderId={folderDialogId}
-				onClose={() => setFolderDialogId(undefined)}
+				onCreated={handleFolderCreated}
+				onClose={() => {
+					setFolderDialogId(undefined);
+					setFolderMoveCaptureId(null);
+				}}
 			/>
-			<CaptureContextMenu state={captureMenuState} onClose={closeCaptureMenu} />
+			<CaptureContextMenu
+				state={captureMenuState}
+				onClose={closeCaptureMenu}
+				onCreateFolder={captureId => openNewFolder(captureId)}
+			/>
 		</>
 	);
 }
 
 function CaptureContextMenu({
 	state,
-	onClose
+	onClose,
+	onCreateFolder
 }: {
 	state: CaptureContextMenuState | null;
 	onClose: (restoreFocus?: boolean) => void;
+	onCreateFolder: (captureId: string) => void;
 }) {
 	const snapshot = useSyncExternalStore(subscribeToArchive, getArchiveSnapshot, getArchiveSnapshot);
 	const actions = getArchiveActions();
@@ -379,6 +398,20 @@ function CaptureContextMenu({
 							{currentFolderId === destination.id ? <span aria-hidden="true">✓</span> : null}
 						</button>
 					))}
+					<button
+						type="button"
+						role="menuitem"
+						className="capture-context-new-folder"
+						data-context-action="new-folder"
+						onClick={() => {
+							if (!state) return;
+							onClose();
+							onCreateFolder(state.captureId);
+						}}
+					>
+						<span aria-hidden="true">＋</span>
+						<span>New folder…</span>
+					</button>
 				</div>
 			) : null}
 			<button
@@ -403,9 +436,11 @@ function CaptureContextMenu({
 
 export function ArchiveFolderDialog({
 	folderId,
+	onCreated,
 	onClose
 }: {
 	folderId: string | null | undefined;
+	onCreated?: (folderId: string) => void;
 	onClose: () => void;
 }) {
 	const snapshot = useSyncExternalStore(subscribeToArchive, getArchiveSnapshot, getArchiveSnapshot);
@@ -447,6 +482,12 @@ export function ArchiveFolderDialog({
 					event.preventDefault();
 					if (!valid || !draft) return;
 					if (actions.saveFolder(name, editingId)) {
+						if (!editingId) {
+							const createdFolder = getArchiveSnapshot().folders.find(
+								folder => folder.name.toLowerCase() === name.toLowerCase()
+							);
+							if (createdFolder) onCreated?.(createdFolder.id);
+						}
 						if (dialogRef.current?.open) dialogRef.current.close();
 						else onClose();
 					}

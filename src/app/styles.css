@@ -771,6 +771,11 @@ p {
 	color: var(--acid);
 	opacity: 0.82;
 }
+.capture-context-submenu .capture-context-new-folder {
+	margin-top: 4px;
+	border-top-color: var(--line);
+	color: var(--acid);
+}
 @media (prefers-reduced-motion: reduce) {
 	.message-context-menu {
 		animation: none;
