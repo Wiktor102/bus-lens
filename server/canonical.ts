@@ -81,6 +81,17 @@ type CaptureDocument = Record<string, unknown> & {
 	nextRawOffset?: number;
 	folderId?: string | null;
 	lifecycle?: string;
+	captureSessions?: Array<{
+		id?: string;
+		firstReceivedAt?: number;
+		lastReceivedAt?: number;
+	}>;
+};
+
+type CaptureSessionRecord = {
+	id: string;
+	firstReceivedAt?: number;
+	lastReceivedAt?: number;
 };
 
 type LegacyAnnotationTarget = {
@@ -414,6 +425,68 @@ function ensureRawOffsets(byteStream: RawByteRecord[], nextRawOffset?: number): 
 	return Math.max(next, ...byteStream.map(r => (r.rawOffset ?? 0) + 1), 0);
 }
 
+function finiteTimestamp(value: unknown): number | undefined {
+	const timestamp = Number(value);
+	return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+function normalizeSessionData(
+	document: CaptureDocument,
+	byteStream: Array<RawByteRecord & { rawOffset?: number }>,
+	generateId: () => string
+): { byteStream: Array<RawByteRecord & { rawOffset?: number }>; sessions: CaptureSessionRecord[] } {
+	const sessions: CaptureSessionRecord[] = [];
+	const byId = new Map<string, CaptureSessionRecord>();
+	for (const candidate of Array.isArray(document.captureSessions) ? document.captureSessions : []) {
+		const id = String(candidate?.id || "").trim();
+		if (!id || byId.has(id)) continue;
+		const session: CaptureSessionRecord = { id };
+		const firstReceivedAt = finiteTimestamp(candidate.firstReceivedAt);
+		const lastReceivedAt = finiteTimestamp(candidate.lastReceivedAt);
+		if (firstReceivedAt !== undefined) session.firstReceivedAt = firstReceivedAt;
+		if (lastReceivedAt !== undefined) session.lastReceivedAt = lastReceivedAt;
+		byId.set(id, session);
+		sessions.push(session);
+	}
+
+	const ensureSession = (id: string): CaptureSessionRecord => {
+		const existing = byId.get(id);
+		if (existing) return existing;
+		const session: CaptureSessionRecord = { id };
+		byId.set(id, session);
+		sessions.push(session);
+		return session;
+	};
+
+	let fallbackSessionId: string | undefined;
+	const sessionIdForRecord = (record: RawByteRecord): string | undefined => {
+		const explicit = typeof record.sessionId === "string" && record.sessionId.trim() ? record.sessionId.trim() : undefined;
+		if (explicit) return explicit;
+		if (sessions.length === 1) return sessions[0].id;
+		if (sessions.length === 0) {
+			fallbackSessionId ||= generateId();
+			return fallbackSessionId;
+		}
+		return undefined;
+	};
+
+	const normalizedStream = byteStream.map(record => {
+		const sessionId = sessionIdForRecord(record);
+		if (!sessionId) return record;
+		const session = ensureSession(sessionId);
+		if (record.direction !== "tx") {
+			const timestamp = finiteTimestamp(record.timestamp);
+			if (timestamp !== undefined) {
+				if (session.firstReceivedAt === undefined || timestamp < session.firstReceivedAt) session.firstReceivedAt = timestamp;
+				if (session.lastReceivedAt === undefined || timestamp > session.lastReceivedAt) session.lastReceivedAt = timestamp;
+			}
+		}
+		return record.sessionId === sessionId ? record : { ...record, sessionId };
+	});
+
+	return { byteStream: normalizedStream, sessions };
+}
+
 function normalizeDocumentForConversion(doc: CaptureDocument, generateId: () => string = randomUUID as unknown as () => string): CaptureDocument {
 	// Minimal normalization sufficient for verification: ensure byteStream, sections, etc
 	const cloned: CaptureDocument = JSON.parse(JSON.stringify(doc));
@@ -449,6 +522,13 @@ function normalizeDocumentForConversion(doc: CaptureDocument, generateId: () => 
 		r.direction ||= "rx";
 		r.hidden = Boolean(r.hidden);
 	});
+	const normalizedSessionData = normalizeSessionData(
+		cloned,
+		cloned.byteStream as Array<RawByteRecord & { rawOffset?: number }>,
+		generateId
+	);
+	cloned.byteStream = normalizedSessionData.byteStream;
+	cloned.captureSessions = normalizedSessionData.sessions;
 	// Normalize sections
 	const sections = normalizeSectionsForConversion(
 		(cloned.frameSections as CaptureSection[]) || [],
@@ -483,6 +563,7 @@ type SectionBoundary = { id: string; start: number; mode: string };
 type PersistedConversion = {
 	byteCount: number;
 	byteStream: Array<RawByteRecord & { rawOffset: number }>;
+	captureSessions: CaptureSessionRecord[];
 	sections: SectionBoundary[];
 	frames: MaterializedFrame[];
 	signatures: ReturnType<typeof countSignatures>;
@@ -497,30 +578,38 @@ function readPersistedConversion(database: SqliteDatabase, captureId: string, pr
 	if (!capture) throw new Error(`canonical capture ${captureId} was not persisted`);
 
 	const chunks = database
-		.prepare("SELECT bytes, timestamps_json, directions_json, hidden_json, start_offset FROM raw_chunks WHERE capture_id = @captureId ORDER BY chunk_index")
+		.prepare("SELECT bytes, timestamps_json, directions_json, hidden_json, start_offset, session_id, session_ids_json FROM raw_chunks WHERE capture_id = @captureId ORDER BY chunk_index")
 		.all({ captureId }) as Array<{
 		bytes: Buffer;
 		timestamps_json: string;
 		directions_json: string;
 		hidden_json: string;
 		start_offset: number;
+		session_id: string | null;
+		session_ids_json: string;
 	}>;
 	const byteStream: Array<RawByteRecord & { rawOffset: number }> = [];
 	for (const chunk of chunks) {
 		const timestamps: number[] = JSON.parse(chunk.timestamps_json) as number[];
 		const directions: string[] = JSON.parse(chunk.directions_json) as string[];
 		const hidden: boolean[] = JSON.parse(chunk.hidden_json) as boolean[];
+		const sessionIds: Array<string | null> = JSON.parse(chunk.session_ids_json || "[]") as Array<string | null>;
 		const bytes = chunk.bytes instanceof Buffer ? [...chunk.bytes] : Array.from(new Uint8Array(chunk.bytes as unknown as Uint8Array));
 		for (let index = 0; index < bytes.length; index++) {
+			const sessionId = sessionIds[index] || chunk.session_id || undefined;
 			byteStream.push({
 				rawOffset: chunk.start_offset + index,
 				value: bytes[index],
 				timestamp: timestamps[index] ?? 0,
 				direction: directions[index] || "rx",
-				hidden: Boolean(hidden[index])
+				hidden: Boolean(hidden[index]),
+				...(sessionId ? { sessionId } : {})
 			});
 		}
 	}
+	const captureSessions = database
+		.prepare("SELECT id, first_received_at, last_received_at FROM capture_sessions WHERE capture_id = @captureId ORDER BY ordinal")
+		.all({ captureId }) as Array<{ id: string; first_received_at: number | null; last_received_at: number | null }>;
 
 	const sections = database
 		.prepare("SELECT id, start_offset, framing_mode FROM framing_sections WHERE profile_id = @profileId ORDER BY position")
@@ -639,6 +728,11 @@ function readPersistedConversion(database: SqliteDatabase, captureId: string, pr
 	return {
 		byteCount: capture.byte_count,
 		byteStream,
+		captureSessions: captureSessions.map(session => ({
+			id: session.id,
+			...(session.first_received_at === null ? {} : { firstReceivedAt: session.first_received_at }),
+			...(session.last_received_at === null ? {} : { lastReceivedAt: session.last_received_at })
+		})),
 		sections: sections.map(section => ({ id: section.id, start: section.start_offset, mode: section.framing_mode })),
 		frames,
 		signatures,
@@ -662,6 +756,7 @@ export type VerificationReport = {
 	transitionsOk: boolean;
 	sequenceGroupsOk: boolean;
 	messageVisibilityOk: boolean;
+	sessionIdentityOk: boolean;
 	overallOk: boolean;
 	details?: string;
 };
@@ -714,6 +809,9 @@ function verifyConversion(
 	const actualMessages = persisted.frames.length;
 	const expectedRawBytes = (normalized.byteStream as RawByteRecord[])?.length ?? 0;
 	const actualRawBytes = persisted.byteCount;
+	const expectedSessions = (Array.isArray(normalized.captureSessions) ? normalized.captureSessions : []) as CaptureSessionRecord[];
+	const actualSessions = persisted.captureSessions;
+	const sessionIdentityOk = JSON.stringify(expectedSessions) === JSON.stringify(actualSessions);
 	const rawBytesOk =
 		expectedRawBytes === persisted.byteStream.length &&
 		(normalized.byteStream as RawByteRecord[]).every((expected, index) => {
@@ -724,6 +822,7 @@ function verifyConversion(
 				(expected.timestamp ?? 0) === actual.timestamp &&
 				(expected.direction || "rx") === actual.direction &&
 				Boolean(expected.hidden) === Boolean(actual.hidden) &&
+				(expected.sessionId || undefined) === (actual.sessionId || undefined) &&
 				(expected.rawOffset ?? index) === actual.rawOffset
 			);
 		});
@@ -808,7 +907,7 @@ function verifyConversion(
 		expectedRawBytes === actualRawBytes &&
 		rawBytesOk &&
 		sectionsOk &&
-		signaturesOk && transitionsOk && byteStatsOk && bitStatsOk && seqOk && messageVisibilityOk;
+		signaturesOk && transitionsOk && byteStatsOk && bitStatsOk && seqOk && messageVisibilityOk && sessionIdentityOk;
 
 	return {
 		messageCount: { expected: expectedMessages, actual: actualMessages, ok: expectedMessages === actualMessages },
@@ -820,10 +919,11 @@ function verifyConversion(
 		transitionsOk,
 		sequenceGroupsOk: seqOk,
 		messageVisibilityOk,
+		sessionIdentityOk,
 		overallOk,
 		details: overallOk
 			? undefined
-			: `mismatch: messages ${expectedMessages} vs ${actualMessages}, bytes ${expectedRawBytes} vs ${actualRawBytes}, statsOk=${statsOk}, messageVisibilityOk=${messageVisibilityOk}`
+			: `mismatch: messages ${expectedMessages} vs ${actualMessages}, bytes ${expectedRawBytes} vs ${actualRawBytes}, statsOk=${statsOk}, messageVisibilityOk=${messageVisibilityOk}, sessionIdentityOk=${sessionIdentityOk}`
 	};
 }
 
@@ -896,10 +996,11 @@ export function convertCaptureDocumentToCanonical(
 		patterns = recognizeRepeatedPatterns(
 			frames.map((f, idx) => ({ signature: f.signature, originalIndex: idx, sectionId: f.sectionId }))
 		);
-		report = verifyConversion(doc, normalized, {
-			byteCount,
-			byteStream: stream,
-			sections: sections.map(section => ({ id: section.id, start: section.start, mode: section.framingMode })),
+			report = verifyConversion(doc, normalized, {
+				byteCount,
+				byteStream: stream,
+				captureSessions: (normalized.captureSessions || []) as CaptureSessionRecord[],
+				sections: sections.map(section => ({ id: section.id, start: section.start, mode: section.framingMode })),
 			frames,
 			signatures,
 			stats,
@@ -916,6 +1017,7 @@ export function convertCaptureDocumentToCanonical(
 			transitionsOk: false,
 			sequenceGroupsOk: false,
 			messageVisibilityOk: false,
+			sessionIdentityOk: false,
 			overallOk: false,
 			details: String(e)
 		};
@@ -965,14 +1067,34 @@ export function convertCaptureDocumentToCanonical(
 					folderId: doc.folderId ? String(doc.folderId) : null
 				});
 
+			// Session records preserve explicit capture-session metadata, including
+			// sessions that have no bytes after filtering. Per-byte identities are
+			// stored separately on each raw chunk below.
+			const captureSessions = (normalized.captureSessions || []) as CaptureSessionRecord[];
+			for (let ordinal = 0; ordinal < captureSessions.length; ordinal++) {
+				const session = captureSessions[ordinal];
+				database
+					.prepare(
+						`INSERT INTO capture_sessions (capture_id, ordinal, id, first_received_at, last_received_at)
+						 VALUES (@captureId, @ordinal, @id, @firstReceivedAt, @lastReceivedAt)`
+					)
+					.run({
+						captureId,
+						ordinal,
+						id: session.id,
+						firstReceivedAt: session.firstReceivedAt ?? null,
+						lastReceivedAt: session.lastReceivedAt ?? null
+					});
+			}
+
 			// raw chunks
 			const chunks = chunkRawBytes(stream);
 			for (let i = 0; i < chunks.length; i++) {
 				const ch = chunks[i];
 				database
 					.prepare(
-						`INSERT INTO raw_chunks (capture_id, chunk_index, start_offset, byte_count, bytes, timestamps_json, directions_json, hidden_json, session_id)
-						 VALUES (@captureId, @chunkIndex, @startOffset, @byteCount, @bytes, @timestampsJson, @directionsJson, @hiddenJson, @sessionId)`
+						`INSERT INTO raw_chunks (capture_id, chunk_index, start_offset, byte_count, bytes, timestamps_json, directions_json, hidden_json, session_id, session_ids_json)
+						 VALUES (@captureId, @chunkIndex, @startOffset, @byteCount, @bytes, @timestampsJson, @directionsJson, @hiddenJson, @sessionId, @sessionIdsJson)`
 					)
 					.run({
 						captureId,
@@ -983,7 +1105,8 @@ export function convertCaptureDocumentToCanonical(
 						timestampsJson: JSON.stringify(ch.timestamps),
 						directionsJson: JSON.stringify(ch.directions),
 						hiddenJson: JSON.stringify(ch.hidden),
-						sessionId: null
+						sessionId: ch.sessionIds.every(sessionId => sessionId === ch.sessionIds[0]) ? ch.sessionIds[0] : null,
+						sessionIdsJson: JSON.stringify(ch.sessionIds)
 					});
 			}
 
@@ -1297,6 +1420,8 @@ type CanonicalRawChunkRow = {
 	directions_json: string;
 	hidden_json: string;
 	start_offset: number;
+	session_id: string | null;
+	session_ids_json: string;
 };
 
 function canonicalRawMatches(
@@ -1305,13 +1430,14 @@ function canonicalRawMatches(
 	stream: Array<RawByteRecord & { rawOffset: number }>
 ): boolean {
 	const chunks = database
-		.prepare("SELECT bytes, timestamps_json, directions_json, hidden_json, start_offset FROM raw_chunks WHERE capture_id = @captureId ORDER BY chunk_index")
+		.prepare("SELECT bytes, timestamps_json, directions_json, hidden_json, start_offset, session_id, session_ids_json FROM raw_chunks WHERE capture_id = @captureId ORDER BY chunk_index")
 		.all({ captureId }) as CanonicalRawChunkRow[];
 	let streamIndex = 0;
 	for (const chunk of chunks) {
 		const timestamps: number[] = JSON.parse(chunk.timestamps_json) as number[];
 		const directions: string[] = JSON.parse(chunk.directions_json) as string[];
 		const hidden: boolean[] = JSON.parse(chunk.hidden_json) as boolean[];
+		const sessionIds: Array<string | null> = JSON.parse(chunk.session_ids_json || "[]") as Array<string | null>;
 		const bytes = chunk.bytes instanceof Buffer ? [...chunk.bytes] : Array.from(new Uint8Array(chunk.bytes as unknown as Uint8Array));
 		for (let index = 0; index < bytes.length; index++) {
 			const raw = stream[streamIndex++];
@@ -1321,13 +1447,30 @@ function canonicalRawMatches(
 				(Number(raw.value) & 0xff) !== bytes[index] ||
 				raw.timestamp !== (timestamps[index] ?? 0) ||
 				(raw.direction || "rx") !== (directions[index] || "rx") ||
-				Boolean(raw.hidden) !== Boolean(hidden[index])
+				Boolean(raw.hidden) !== Boolean(hidden[index]) ||
+				(raw.sessionId || undefined) !== (sessionIds[index] || chunk.session_id || undefined)
 			) {
 				return false;
 			}
 		}
 	}
 	return streamIndex === stream.length;
+}
+
+function canonicalSessionsMatch(database: SqliteDatabase, captureId: string, sessions: CaptureSessionRecord[]): boolean {
+	const rows = database
+		.prepare("SELECT ordinal, id, first_received_at, last_received_at FROM capture_sessions WHERE capture_id = @captureId ORDER BY ordinal")
+		.all({ captureId }) as Array<{ ordinal: number; id: string; first_received_at: number | null; last_received_at: number | null }>;
+	if (rows.length !== sessions.length) return false;
+	return rows.every((row, index) => {
+		const expected = sessions[index];
+		return (
+			row.ordinal === index &&
+			row.id === expected.id &&
+			(row.first_received_at ?? undefined) === (expected.firstReceivedAt ?? undefined) &&
+			(row.last_received_at ?? undefined) === (expected.lastReceivedAt ?? undefined)
+		);
+	});
 }
 
 type CanonicalSectionRow = {
@@ -1548,8 +1691,9 @@ export function updateCanonicalCapture(
 	const normalized = normalizeDocumentForConversion(document as CaptureDocument, generateId);
 	const stream = normalized.byteStream as Array<RawByteRecord & { rawOffset: number }>;
 	const sections = normalized.frameSections as unknown as NormalizedSection[];
+	const captureSessions = (normalized.captureSessions || []) as CaptureSessionRecord[];
 
-	if (!canonicalRawMatches(database, captureId, stream)) {
+	if (!canonicalRawMatches(database, captureId, stream) || !canonicalSessionsMatch(database, captureId, captureSessions)) {
 		// Raw chunks are immutable for a given canonical materialization. A byte
 		// edit therefore starts a fresh materialization; stale framing profiles
 		// cannot remain attached to a different byte stream.

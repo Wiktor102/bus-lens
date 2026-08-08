@@ -384,7 +384,7 @@ export class ArchiveRepository {
 		}
 		// Reassemble byteStream from raw_chunks
 		const chunks = this.database
-			.prepare("SELECT bytes, timestamps_json, directions_json, hidden_json, start_offset, session_id FROM raw_chunks WHERE capture_id = @captureId ORDER BY chunk_index")
+			.prepare("SELECT bytes, timestamps_json, directions_json, hidden_json, start_offset, session_id, session_ids_json FROM raw_chunks WHERE capture_id = @captureId ORDER BY chunk_index")
 			.all({ captureId: id }) as Array<{
 			bytes: Buffer;
 			timestamps_json: string;
@@ -392,16 +392,18 @@ export class ArchiveRepository {
 			hidden_json: string;
 			start_offset: number;
 			session_id: string | null;
+			session_ids_json: string;
 		}>;
 		const byteStream: JsonDocument[] = [];
 		for (const ch of chunks) {
 			const timestamps: number[] = JSON.parse(ch.timestamps_json) as number[];
 			const directions: string[] = JSON.parse(ch.directions_json) as string[];
 			const hidden: boolean[] = JSON.parse(ch.hidden_json) as boolean[];
+			const sessionIds: Array<string | null> = JSON.parse(ch.session_ids_json || "[]") as Array<string | null>;
 			const bytes = ch.bytes instanceof Buffer ? [...ch.bytes] : Array.from(new Uint8Array(ch.bytes as unknown as Uint8Array));
 			for (let i = 0; i < bytes.length; i++) {
 				const rawOffset = ch.start_offset + i;
-				const sessionId = sessionIdsByRawOffset.get(rawOffset) ?? ch.session_id;
+				const sessionId = sessionIds[i] ?? ch.session_id ?? sessionIdsByRawOffset.get(rawOffset);
 				byteStream.push({
 					rawOffset,
 					value: bytes[i],
@@ -412,6 +414,18 @@ export class ArchiveRepository {
 				});
 			}
 		}
+		const canonicalSessions = this.database
+			.prepare("SELECT id, first_received_at, last_received_at FROM capture_sessions WHERE capture_id = @captureId ORDER BY ordinal")
+			.all({ captureId: id }) as Array<{ id: string; first_received_at: number | null; last_received_at: number | null }>;
+		const captureSessions: JsonDocument[] = canonicalSessions.length
+			? canonicalSessions.map(session => ({
+					id: session.id,
+					...(session.first_received_at === null ? {} : { firstReceivedAt: session.first_received_at }),
+					...(session.last_received_at === null ? {} : { lastReceivedAt: session.last_received_at })
+				}))
+			: Array.isArray(existingDoc?.document.captureSessions)
+				? existingDoc.document.captureSessions as JsonDocument[]
+				: [];
 		// Active framing profile
 		const activeProfile = this.database
 			.prepare("SELECT id, version, algorithm_version FROM framing_profiles WHERE capture_id = @captureId AND is_active = 1 LIMIT 1")
@@ -542,7 +556,7 @@ export class ArchiveRepository {
 			annotations,
 			patternRemarks,
 			nextRawOffset: byteStream.length ? Math.max(...byteStream.map(b => (b.rawOffset as number) + 1)) : 0,
-			captureSessions: Array.isArray(existingDoc?.document.captureSessions) ? existingDoc.document.captureSessions : []
+			captureSessions
 		};
 		return {
 			id: cap.id,
