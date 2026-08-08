@@ -233,11 +233,67 @@ function signatureForMessage(message: FramedMessage): string {
 	return visibleEntries(message).map(({ value }) => hexByte(value)).join(" ");
 }
 
+type ExistingMessage = {
+	id?: string;
+	hidden?: boolean;
+	bytes: number[];
+	rawOffsets?: number[];
+	_rawPositions?: number[];
+	_byteStart?: number;
+	_byteEnd?: number;
+};
+
+function legacyMessageRawOffsets(message: ExistingMessage): number[] {
+	const persistedOffsets = [message.rawOffsets, message._rawPositions].find(offsets => Array.isArray(offsets) && offsets.length);
+	if (persistedOffsets) {
+		return persistedOffsets
+			.map(offset => normalizedRawOffset(offset))
+			.filter((offset): offset is number => offset !== undefined);
+	}
+	const start = normalizedRawOffset(message._byteStart);
+	if (start === undefined) return [];
+	const end = normalizedRawOffset(message._byteEnd);
+	const length = end !== undefined && end >= start ? end - start : message.bytes.length;
+	return Array.from({ length: Math.max(0, length) }, (_, index) => start + index);
+}
+
+function rawOffsetsKey(rawOffsets: readonly number[]): string {
+	return rawOffsets.join(",");
+}
+
+function rawSpanKey(rawOffsets: readonly number[]): string | undefined {
+	if (!rawOffsets.length) return undefined;
+	return `${rawOffsets[0]}:${rawOffsets.at(-1)}`;
+}
+
+type ExistingMessageIndex = {
+	byRawOffsets: Map<string, ExistingMessage>;
+	byRawSpan: Map<string, ExistingMessage>;
+};
+
+function indexExistingMessages(messages: readonly ExistingMessage[] = []): ExistingMessageIndex {
+	const byRawOffsets = new Map<string, ExistingMessage>();
+	const byRawSpan = new Map<string, ExistingMessage>();
+	for (const message of messages) {
+		const rawOffsets = legacyMessageRawOffsets(message);
+		if (!rawOffsets.length) continue;
+		byRawOffsets.set(rawOffsetsKey(rawOffsets), message);
+		const span = rawSpanKey(rawOffsets);
+		if (span) byRawSpan.set(span, message);
+	}
+	return { byRawOffsets, byRawSpan };
+}
+
+function findExistingMessage(index: ExistingMessageIndex, rawOffsets: readonly number[]): ExistingMessage | undefined {
+	return index.byRawOffsets.get(rawOffsetsKey(rawOffsets)) || index.byRawSpan.get(rawSpanKey(rawOffsets) || "");
+}
+
 // Materialize frames from a compact hidden-filtered stream using domain engine.
 export function materializeFramesFromStream(
 	stream: Array<RawByteRecord & { rawOffset: number }>,
 	sections: NormalizedSection[],
-	generateId: () => string = randomUUID as unknown as () => string
+	generateId: () => string = randomUUID as unknown as () => string,
+	existingMessages: readonly ExistingMessage[] = []
 ): Array<{
 	id: string;
 	ordinal: number;
@@ -250,6 +306,7 @@ export function materializeFramesFromStream(
 	signature: string;
 }> {
 	type PreviewRecord = { value: number; timestamp: number; rawPosition: number };
+	const existingMessagesByIdentity = indexExistingMessages(existingMessages);
 	const preview = stream
 		.map(r => ({ value: r.value, timestamp: r.timestamp, rawPosition: r.rawOffset }))
 		.filter((_, idx) => !stream[idx].hidden);
@@ -276,14 +333,15 @@ export function materializeFramesFromStream(
 		.map(([start, end, sectionId], ordinal) => {
 			const records = preview.slice(start, end);
 			const rawOffsets = records.map(r => r.rawPosition);
+			const previous = findExistingMessage(existingMessagesByIdentity, rawOffsets);
 			// locate original stream records for bytes/directions
 			const bytes = rawOffsets.map(offset => stream.find(r => r.rawOffset === offset)?.value ?? 0);
 			const timestamps = rawOffsets.map(offset => stream.find(r => r.rawOffset === offset)?.timestamp ?? 0);
 			const directions = rawOffsets.map(offset => stream.find(r => r.rawOffset === offset)?.direction || "rx");
-			const hidden = false;
+			const hidden = Boolean(previous?.hidden);
 			const sig = bytes.map(hexByte).join(" ");
 			return {
-				id: generateId(),
+				id: previous?.id || generateId(),
 				ordinal,
 				sectionId,
 				rawOffsets,
@@ -360,7 +418,7 @@ function normalizeDocumentForConversion(doc: CaptureDocument, generateId: () => 
 	cloned.frameSections = sections as unknown as CaptureSection[];
 	// Derive messages via materialization (hidden filtered)
 	const stream = (cloned.byteStream as Array<RawByteRecord & { rawOffset: number }>);
-	const frames = materializeFramesFromStream(stream, sections, generateId);
+	const frames = materializeFramesFromStream(stream, sections, generateId, cloned.messages || []);
 	cloned.messages = frames.map(f => ({
 		id: f.id,
 		timestamp: f.timestamps[0] ?? Date.now(),
@@ -387,9 +445,43 @@ export type VerificationReport = {
 	bitStatisticsOk: boolean;
 	transitionsOk: boolean;
 	sequenceGroupsOk: boolean;
+	messageVisibilityOk: boolean;
 	overallOk: boolean;
 	details?: string;
 };
+
+function verifyMessageVisibility(
+	originalDoc: CaptureDocument,
+	frames: ReadonlyArray<ReturnType<typeof materializeFramesFromStream>[number]>
+): boolean {
+	const legacyMessages = (Array.isArray(originalDoc.messages) ? originalDoc.messages : []) as ExistingMessage[];
+	if (!legacyMessages.length) return true;
+
+	const framesByRawOffsets = new Map<string, ReturnType<typeof materializeFramesFromStream>[number]>();
+	const framesByRawSpan = new Map<string, ReturnType<typeof materializeFramesFromStream>[number]>();
+	for (const frame of frames) {
+		framesByRawOffsets.set(rawOffsetsKey(frame.rawOffsets), frame);
+		const span = rawSpanKey(frame.rawOffsets);
+		if (span) framesByRawSpan.set(span, frame);
+	}
+
+	for (const message of legacyMessages) {
+		const rawOffsets = legacyMessageRawOffsets(message);
+		if (!rawOffsets.length) {
+			// A hidden message without a stable span cannot be safely carried
+			// forward, so fail verification instead of making it visible.
+			if (Boolean(message.hidden)) return false;
+			continue;
+		}
+		const frame = framesByRawOffsets.get(rawOffsetsKey(rawOffsets)) || framesByRawSpan.get(rawSpanKey(rawOffsets) || "");
+		if (!frame) {
+			if (Boolean(message.hidden)) return false;
+			continue;
+		}
+		if (Boolean(message.hidden) !== frame.hidden) return false;
+	}
+	return true;
+}
 
 function verifyConversion(
 	originalDoc: CaptureDocument,
@@ -406,6 +498,7 @@ function verifyConversion(
 	const actualMessages = materialized.frames.length;
 	const expectedRawBytes = (normalized.byteStream as RawByteRecord[])?.length ?? 0;
 	const actualRawBytes = byteCount;
+	const messageVisibilityOk = verifyMessageVisibility(originalDoc, materialized.frames);
 
 	const expectedSections = ((normalized.frameSections as NormalizedSection[]) || []).map(s => ({
 		id: s.id,
@@ -450,7 +543,7 @@ function verifyConversion(
 		expectedMessages === actualMessages &&
 		expectedRawBytes === actualRawBytes &&
 		JSON.stringify(expectedSections) === JSON.stringify(actualSections) &&
-		signaturesOk && transitionsOk && byteStatsOk && bitStatsOk && seqOk;
+		signaturesOk && transitionsOk && byteStatsOk && bitStatsOk && seqOk && messageVisibilityOk;
 
 	return {
 		messageCount: { expected: expectedMessages, actual: actualMessages, ok: expectedMessages === actualMessages },
@@ -461,8 +554,11 @@ function verifyConversion(
 		bitStatisticsOk: bitStatsOk,
 		transitionsOk,
 		sequenceGroupsOk: seqOk,
+		messageVisibilityOk,
 		overallOk,
-		details: overallOk ? undefined : `mismatch: messages ${expectedMessages} vs ${actualMessages}, bytes ${expectedRawBytes} vs ${actualRawBytes}, statsOk=${statsOk}`
+		details: overallOk
+			? undefined
+			: `mismatch: messages ${expectedMessages} vs ${actualMessages}, bytes ${expectedRawBytes} vs ${actualRawBytes}, statsOk=${statsOk}, messageVisibilityOk=${messageVisibilityOk}`
 	};
 }
 
@@ -527,7 +623,7 @@ export function convertCaptureDocumentToCanonical(
 		stream = (normalized.byteStream as Array<RawByteRecord & { rawOffset: number }>);
 		sections = normalized.frameSections as unknown as NormalizedSection[];
 		byteCount = stream.length;
-		frames = materializeFramesFromStream(stream, sections, generateId);
+		frames = materializeFramesFromStream(stream, sections, generateId, normalized.messages || []);
 		// Derive analysis from frames
 		const analysisFrames = frames.map(f => ({ signature: f.signature, bytes: f.bytes }));
 		stats = deriveAnalysisStatistics(analysisFrames);
@@ -546,6 +642,7 @@ export function convertCaptureDocumentToCanonical(
 			bitStatisticsOk: false,
 			transitionsOk: false,
 			sequenceGroupsOk: false,
+			messageVisibilityOk: false,
 			overallOk: false,
 			details: String(e)
 		};
