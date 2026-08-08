@@ -96,7 +96,14 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		rollingCapture.rollingBuffer = true;
 		const firstRetainedOffset = capture.byteStream![excess]?.rawOffset ?? excess;
 		capture.byteStream!.splice(0, excess);
-		capture.frameSections = (capture.frameSections || []).filter(section => section.start! >= firstRetainedOffset);
+		const sections = capture.frameSections || [];
+		const activeSection = sections
+			.filter(section => (section.start ?? 0) <= firstRetainedOffset)
+			.at(-1);
+		capture.frameSections = [
+			...(activeSection ? [{ ...activeSection, start: firstRetainedOffset }] : []),
+			...sections.filter(section => (section.start ?? 0) > firstRetainedOffset)
+		];
 		// Message IDs are derived from stream positions, so old message-specific notes
 		// cannot safely be attached after the oldest portion rolls off.
 		capture.annotations = {};
