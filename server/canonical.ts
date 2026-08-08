@@ -802,7 +802,7 @@ function verifyConversion(
 	// A document with an explicit messages array gives us an independent legacy
 	// source to validate. Raw-only documents have no message source, so their
 	// normalized framing is the source representation for this comparison.
-	const sourceMessages = (Array.isArray(originalDoc.messages) ? originalDoc.messages : normalized.messages || []) as Array<
+	const sourceMessages = (Array.isArray(originalDoc.messages) && originalDoc.messages.length > 0 ? originalDoc.messages : normalized.messages || []) as Array<
 		FramedMessage & { id?: string; sectionId?: string }
 	>;
 	const expectedMessages = sourceMessages.length;
