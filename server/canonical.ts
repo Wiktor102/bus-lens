@@ -335,11 +335,21 @@ export function materializeFramesFromStream(
 	hidden: boolean;
 	signature: string;
 }> {
-	type PreviewRecord = { value: number; timestamp: number; rawPosition: number };
+	type PreviewRecord = {
+		value: number;
+		timestamp: number;
+		rawPosition: number;
+		source: RawByteRecord & { rawOffset: number };
+	};
 	const existingMessagesByIdentity = indexExistingMessages(existingMessages);
 	const preview = stream
-		.map(r => ({ value: r.value, timestamp: r.timestamp, rawPosition: r.rawOffset }))
-		.filter((_, idx) => !stream[idx].hidden);
+		.filter(record => !record.hidden)
+		.map(record => ({
+			value: record.value,
+			timestamp: record.timestamp,
+			rawPosition: record.rawOffset,
+			source: record
+		}));
 	// sections are already normalized and sorted
 	const ranges: Array<[number, number, string]> = [];
 	sections.forEach((section, idx) => {
@@ -364,10 +374,11 @@ export function materializeFramesFromStream(
 			const records = preview.slice(start, end);
 			const rawOffsets = records.map(r => r.rawPosition);
 			const previous = findExistingMessage(existingMessagesByIdentity, rawOffsets);
-			// locate original stream records for bytes/directions
-			const bytes = rawOffsets.map(offset => stream.find(r => r.rawOffset === offset)?.value ?? 0);
-			const timestamps = rawOffsets.map(offset => stream.find(r => r.rawOffset === offset)?.timestamp ?? 0);
-			const directions = rawOffsets.map(offset => stream.find(r => r.rawOffset === offset)?.direction || "rx");
+			// Preview records retain their source records, avoiding a linear stream
+			// lookup for every frame byte.
+			const bytes = records.map(record => record.value);
+			const timestamps = records.map(record => record.timestamp);
+			const directions = records.map(record => record.source.direction || "rx");
 			const hidden = Boolean(previous?.hidden);
 			const sig = bytes.map(hexByte).join(" ");
 			return {
