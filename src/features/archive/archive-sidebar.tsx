@@ -470,7 +470,10 @@ export function ArchiveFolderDialog({
 						placeholder="e.g. Ventilation tests"
 						ref={inputRef}
 						value={draft?.name || ""}
-						onChange={event => setDraft(current => ({ editingId: current?.editingId || editingId, name: event.currentTarget.value }))}
+						onChange={event => {
+							const name = event.currentTarget.value;
+							setDraft(current => ({ editingId: current?.editingId || editingId, name }));
+						}}
 					/>
 				</label>
 				<div id="folderHint" className={`validation-hint ${valid ? "ready" : ""}`} aria-live="polite">
