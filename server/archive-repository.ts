@@ -150,6 +150,78 @@ function timestampAsIso(value: unknown, fallback: string): string {
 	return fallback;
 }
 
+function numericOffsets(value: unknown): number[] | null {
+	if (!Array.isArray(value)) return null;
+	const offsets = value.map(Number);
+	return offsets.every(offset => Number.isSafeInteger(offset) && offset >= 0) ? offsets : null;
+}
+
+function rawOffsetsForMessage(message: JsonDocument): number[] | null {
+	const persisted = numericOffsets(message.rawOffsets) || numericOffsets(message._rawPositions);
+	if (persisted) return persisted;
+	const start = Number(message._byteStart);
+	return Number.isSafeInteger(start) && start >= 0 && Array.isArray(message.bytes)
+		? message.bytes.map((_, index) => start + index)
+		: null;
+}
+
+function parseRawOffsets(value: string | null): number[] | null {
+	if (!value) return null;
+	try {
+		return numericOffsets(JSON.parse(value));
+	} catch {
+		return null;
+	}
+}
+
+function sameOffsets(left: number[], right: number[]): boolean {
+	return left.length === right.length && left.every((offset, index) => offset === right[index]);
+}
+
+type StableAnnotationTarget = {
+	message_id: string | null;
+	byte_position: number | null;
+	raw_offset: number | null;
+	raw_offsets_json: string | null;
+};
+
+function messageForStableAnnotation(messages: JsonDocument[], row: StableAnnotationTarget): JsonDocument | undefined {
+	const byId = row.message_id ? messages.find(message => String(message.id) === row.message_id) : undefined;
+	if (byId) return byId;
+	const rawOffsets = parseRawOffsets(row.raw_offsets_json);
+	if (rawOffsets) {
+		const exact = messages.find(message => {
+			const messageOffsets = rawOffsetsForMessage(message);
+			return messageOffsets ? sameOffsets(messageOffsets, rawOffsets) : false;
+		});
+		if (exact) return exact;
+		const containing = messages.find(message => {
+			const messageOffsets = rawOffsetsForMessage(message);
+			return Boolean(messageOffsets && rawOffsets.some(offset => messageOffsets.includes(offset)));
+		});
+		if (containing) return containing;
+	}
+	const rawOffset = row.raw_offset;
+	if (rawOffset !== null) {
+		return messages.find(message => rawOffsetsForMessage(message)?.includes(rawOffset));
+	}
+	return undefined;
+}
+
+function legacyAnnotationKey(messages: JsonDocument[], row: StableAnnotationTarget & { id: string; target_kind: string }): string {
+	const message = messageForStableAnnotation(messages, row);
+	const messageId = message?.id === undefined ? row.message_id : String(message.id);
+	if (!messageId) return row.id;
+	if (row.target_kind !== "byte") return messageId;
+	const messageOffsets = message ? rawOffsetsForMessage(message) : null;
+	const resolvedPosition =
+		row.raw_offset !== null && messageOffsets ? messageOffsets.indexOf(row.raw_offset) : -1;
+	const bytePosition = resolvedPosition >= 0 ? resolvedPosition : row.byte_position;
+	return typeof bytePosition === "number" && Number.isSafeInteger(bytePosition) && bytePosition >= 0
+		? `${messageId}:${bytePosition}`
+		: row.id;
+}
+
 export class ArchiveRepository {
 	private readonly database: SqliteDatabase;
 	private readonly nowIso: () => string;
@@ -419,7 +491,7 @@ export class ArchiveRepository {
 			});
 		}
 		// Notes: stable_notes
-		const notesRows = this.database.prepare("SELECT id, text, created_at, target_kind, start_row, end_row, raw_offset, raw_offsets_json, start_offset, end_offset, sequence_key FROM stable_notes WHERE capture_id = @captureId").all({ captureId: id }) as Array<{
+		const notesRows = this.database.prepare("SELECT id, text, created_at, target_kind, start_row, end_row, raw_offset, raw_offsets_json, start_offset, end_offset, sequence_key, message_id, byte_position FROM stable_notes WHERE capture_id = @captureId").all({ captureId: id }) as Array<{
 			id: string;
 			text: string;
 			created_at: string;
@@ -431,6 +503,8 @@ export class ArchiveRepository {
 			start_offset: number | null;
 			end_offset: number | null;
 			sequence_key: string | null;
+			message_id: string | null;
+			byte_position: number | null;
 		}>;
 		const captureNotes: JsonDocument[] = [];
 		const annotations: Record<string, JsonDocument> = {};
@@ -440,9 +514,9 @@ export class ArchiveRepository {
 			} else if (row.target_kind === "capture") {
 				captureNotes.push({ id: row.id, type: "capture", text: row.text, createdAt: new Date(row.created_at).getTime() });
 			} else if (row.target_kind === "byte") {
-				annotations[row.id] = { text: row.text, createdAt: new Date(row.created_at).getTime(), type: "byte", targetLabel: `raw ${row.raw_offset}` };
+				annotations[legacyAnnotationKey(messages, row)] = { text: row.text, createdAt: new Date(row.created_at).getTime(), type: "byte", targetLabel: `raw ${row.raw_offset}` };
 			} else if (row.target_kind === "frame") {
-				annotations[row.id] = { text: row.text, createdAt: new Date(row.created_at).getTime(), type: "message", targetLabel: row.raw_offsets_json || "" };
+				annotations[legacyAnnotationKey(messages, row)] = { text: row.text, createdAt: new Date(row.created_at).getTime(), type: "message", targetLabel: row.raw_offsets_json || "" };
 			} else if (row.target_kind === "pattern") {
 				// patternRemarks not reconstructed here; stored separately but we omit for brevity
 			}
@@ -966,10 +1040,12 @@ export class ArchiveRepository {
 		sequence_key: string | null;
 		start_row: number | null;
 		end_row: number | null;
+		message_id: string | null;
+		byte_position: number | null;
 	}> {
 		return this.database
 			.prepare(
-				`SELECT id, text, created_at, target_kind, raw_offset, raw_offsets_json, profile_id, start_offset, end_offset, sequence_key, start_row, end_row
+				`SELECT id, text, created_at, target_kind, raw_offset, raw_offsets_json, profile_id, start_offset, end_offset, sequence_key, start_row, end_row, message_id, byte_position
 				 FROM stable_notes WHERE capture_id = @captureId ORDER BY created_at DESC`
 			)
 			.all({ captureId }) as Array<{
@@ -985,6 +1061,8 @@ export class ArchiveRepository {
 			sequence_key: string | null;
 			start_row: number | null;
 			end_row: number | null;
+			message_id: string | null;
+			byte_position: number | null;
 		}>;
 	}
 

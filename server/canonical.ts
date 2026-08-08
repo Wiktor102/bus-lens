@@ -83,6 +83,36 @@ type CaptureDocument = Record<string, unknown> & {
 	lifecycle?: string;
 };
 
+type LegacyAnnotationTarget = {
+	messageId: string;
+	bytePosition: number | null;
+};
+
+function legacyAnnotationTarget(key: string): LegacyAnnotationTarget {
+	const separator = key.indexOf(":");
+	if (separator < 0) return { messageId: key, bytePosition: null };
+	const bytePosition = Number(key.slice(separator + 1));
+	return {
+		messageId: key.slice(0, separator),
+		bytePosition: Number.isSafeInteger(bytePosition) && bytePosition >= 0 ? bytePosition : null
+	};
+}
+
+function numericRawOffsets(value: unknown): number[] | null {
+	if (!Array.isArray(value)) return null;
+	const offsets = value.map(Number);
+	return offsets.every(offset => Number.isSafeInteger(offset) && offset >= 0) ? offsets : null;
+}
+
+function legacyRawOffsetsForMessage(message: Record<string, unknown> | undefined, byteStream?: RawByteRecord[]): number[] | null {
+	if (!message) return null;
+	const persisted = numericRawOffsets(message.rawOffsets) || numericRawOffsets(message._rawPositions);
+	if (persisted) return persisted;
+	const start = Number(message._byteStart);
+	if (!Number.isSafeInteger(start) || start < 0 || !Array.isArray(message.bytes)) return null;
+	return message.bytes.map((_, index) => byteStream?.[start + index]?.rawOffset ?? start + index);
+}
+
 // ---------------------------------------------------------------------------
 // Chunking
 // ---------------------------------------------------------------------------
@@ -930,42 +960,46 @@ export function convertCaptureDocumentToCanonical(
 				}
 			}
 			const annotations = (doc.annotations as Record<string, Record<string, unknown>>) || {};
+			const sourceMessages = Array.isArray(doc.messages) ? (doc.messages as Array<Record<string, unknown>>) : [];
+			const sourceByteStream = Array.isArray(doc.byteStream) ? (doc.byteStream as RawByteRecord[]) : [];
 			for (const [key, val] of Object.entries(annotations)) {
 				const id = generateId();
 				const text = String(val.text || "");
 				const createdAt = String(val.createdAt ? new Date(Number(val.createdAt)).toISOString() : now);
-				if (key.includes(":")) {
+				const target = legacyAnnotationTarget(key);
+				const sourceMessage = sourceMessages.find(message => String(message.id) === target.messageId);
+				const normalizedMessage = (normalized.messages as Array<Record<string, unknown>>)?.find(
+					message => String(message.id) === target.messageId
+				);
+				const rawOffsets =
+					legacyRawOffsetsForMessage(sourceMessage, sourceByteStream) || legacyRawOffsetsForMessage(normalizedMessage);
+				if (target.bytePosition !== null) {
 					// byte note: resolve raw offset from message id + position if possible
 					// For stability, we attach to absolute raw offset: try to find message's rawOffsets
 					let rawOffset: number | null = null;
-					try {
-						const [messageId, posStr] = key.split(":");
-						const pos = Number(posStr);
-						const msg = (normalized.messages as Array<Record<string, unknown>>)?.find(m => String(m.id) === messageId) as
-							| { rawOffsets?: number[]; _rawPositions?: number[]; bytes?: number[] }
-							| undefined;
-						const offsets = (msg?.rawOffsets as number[] | undefined) || (msg?._rawPositions as number[] | undefined);
-						if (offsets && Number.isInteger(pos)) rawOffset = offsets[pos] ?? null;
-					} catch {}
+					if (rawOffsets) rawOffset = rawOffsets[target.bytePosition] ?? null;
 					database
 						.prepare(
-							`INSERT INTO stable_notes (id, capture_id, text, created_at, target_kind, raw_offset)
-							 VALUES (@id, @captureId, @text, @createdAt, 'byte', @rawOffset)`
+							`INSERT INTO stable_notes
+							 (id, capture_id, text, created_at, target_kind, raw_offset, message_id, byte_position)
+							 VALUES (@id, @captureId, @text, @createdAt, 'byte', @rawOffset, @messageId, @bytePosition)`
 						)
-						.run({ id, captureId, text, createdAt, rawOffset });
+						.run({
+							id,
+							captureId,
+							text,
+							createdAt,
+							rawOffset,
+							messageId: target.messageId,
+							bytePosition: target.bytePosition
+						});
 				} else {
 					// frame/message note: attach to profile + raw span
-					let rawOffsets: number[] | null = null;
-					try {
-						const msg = (normalized.messages as Array<Record<string, unknown>>)?.find(m => String(m.id) === key) as
-							| { rawOffsets?: number[]; _rawPositions?: number[] }
-							| undefined;
-						rawOffsets = (msg?.rawOffsets as number[] | undefined) || (msg?._rawPositions as number[] | undefined) || null;
-					} catch {}
 					database
 						.prepare(
-							`INSERT INTO stable_notes (id, capture_id, text, created_at, target_kind, profile_id, raw_offsets_json)
-							 VALUES (@id, @captureId, @text, @createdAt, 'frame', @profileId, @rawOffsetsJson)`
+							`INSERT INTO stable_notes
+							 (id, capture_id, text, created_at, target_kind, profile_id, raw_offsets_json, message_id)
+							 VALUES (@id, @captureId, @text, @createdAt, 'frame', @profileId, @rawOffsetsJson, @messageId)`
 						)
 						.run({
 							id,
@@ -973,7 +1007,8 @@ export function convertCaptureDocumentToCanonical(
 							text,
 							createdAt,
 							profileId,
-							rawOffsetsJson: rawOffsets ? JSON.stringify(rawOffsets) : null
+							rawOffsetsJson: rawOffsets ? JSON.stringify(rawOffsets) : null,
+							messageId: target.messageId
 						});
 				}
 			}

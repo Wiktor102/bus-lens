@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 
 export type SqliteDatabase = InstanceType<typeof Database>;
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 type Migration = {
 	version: number;
@@ -276,6 +276,15 @@ const migrations: Migration[] = [
 				);
 
 				-- Legacy fallback view helpers (via code, not SQLite views)
+			`);
+		}
+	},
+	{
+		version: 3,
+		up: database => {
+			database.exec(`
+				ALTER TABLE stable_notes ADD COLUMN message_id TEXT;
+				ALTER TABLE stable_notes ADD COLUMN byte_position INTEGER CHECK (byte_position >= 0);
 			`);
 		}
 	}
