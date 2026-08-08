@@ -13,6 +13,10 @@ import {
 	deriveAnalysisStatistics,
 	recognizeRepeatedPatterns
 } from "../src/domain/analysis.ts";
+import {
+	reconstructLegacyByteStream,
+	type LegacyFramedMessage
+} from "../src/features/capture/capture-summary.ts";
 
 // Reuse capture normalization/preview so converted frames stay byte-identical
 // to the JSON-document interpretation. Dynamic import would be circular, so we
@@ -314,8 +318,11 @@ function ensureRawOffsets(byteStream: RawByteRecord[], nextRawOffset?: number): 
 function normalizeDocumentForConversion(doc: CaptureDocument, generateId: () => string = randomUUID as unknown as () => string): CaptureDocument {
 	// Minimal normalization sufficient for verification: ensure byteStream, sections, etc
 	const cloned: CaptureDocument = JSON.parse(JSON.stringify(doc));
-	cloned.byteStream ||= [];
-	if (!Array.isArray(cloned.byteStream)) cloned.byteStream = [];
+	if (!Array.isArray(cloned.byteStream)) {
+		cloned.byteStream = reconstructLegacyByteStream(
+			(Array.isArray(cloned.messages) ? cloned.messages : []) as LegacyFramedMessage[]
+		);
+	}
 	if (!Array.isArray(cloned.frameSections) || !cloned.frameSections.length) {
 		// migrate legacy global framing
 		const legacyMode = normalizeFramingMode(cloned.previewMode);

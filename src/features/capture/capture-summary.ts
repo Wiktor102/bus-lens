@@ -19,6 +19,11 @@ export type FramedMessage = {
 	hiddenBytes?: boolean[];
 };
 
+export type LegacyFramedMessage = FramedMessage & {
+	timestamp: number;
+	byteTimestamps?: number[];
+};
+
 export type CaptureSummaryData = {
 	byteStream?: RawByteRecord[];
 	captureSessions?: RecordingSession[];
@@ -42,6 +47,16 @@ export function signatureForMessage(message: FramedMessage) {
 		.filter((_, index) => !message.hiddenBytes?.[index])
 		.map(byte => Number(byte).toString(16).padStart(2, "0").toUpperCase())
 		.join(" ");
+}
+
+export function reconstructLegacyByteStream(messages: LegacyFramedMessage[] = []): RawByteRecord[] {
+	return messages.flatMap(message =>
+		message.bytes.map((value, index) => ({
+			value,
+			timestamp: message.byteTimestamps?.[index] ?? message.timestamp,
+			hidden: Boolean(message.hiddenBytes?.[index])
+		}))
+	);
 }
 
 export function countDistinctMessageSignatures(messages: FramedMessage[] = []) {
