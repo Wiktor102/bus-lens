@@ -17,6 +17,11 @@ import {
 	getCaptureHeaderSnapshot,
 	subscribeToCaptureHeader
 } from "../features/capture/capture-header-bridge";
+import {
+	getCaptureStorageActions,
+	getCaptureStorageSnapshot,
+	subscribeToCaptureStorage
+} from "../features/capture/capture-storage-bridge";
 import { normalizeCaptureDescription, normalizeCaptureTitle } from "../features/capture/capture-header";
 import {
 	getFramingToolbarSnapshot,
@@ -34,6 +39,7 @@ import {
 } from "../shared/persistence-error-bridge";
 import {
 	AnnotationDialog,
+	CanonicalizationDialog,
 	ContextDialog,
 	ExportDialog,
 	PatternRemarkDialog
@@ -98,6 +104,12 @@ function CaptureHeader() {
 		getCaptureHeaderSnapshot
 	);
 	const actions = getCaptureHeaderActions();
+	const storage = useSyncExternalStore(
+		subscribeToCaptureStorage,
+		getCaptureStorageSnapshot,
+		getCaptureStorageSnapshot
+	);
+	const storageActions = getCaptureStorageActions();
 	const [titleDraft, setTitleDraft] = useState(snapshot.title);
 	const [descriptionDraft, setDescriptionDraft] = useState(snapshot.description);
 	const titleRef = useRef<HTMLInputElement>(null);
@@ -131,6 +143,15 @@ function CaptureHeader() {
 				<div className="capture-identity">
 					<div className="eyebrow-row">
 						<span className="eyebrow">Active capture</span>
+						{storage.label ? (
+							<span
+								id="captureStorageBadge"
+								className={`storage-badge storage-${storage.status}`}
+								data-storage-status={storage.status}
+							>
+								{storage.label}
+							</span>
+						) : null}
 						<span id="captureState" className={`capture-state ${snapshot.live ? "live" : ""}`.trim()}>
 							{snapshot.stateText}
 						</span>
@@ -141,7 +162,7 @@ function CaptureHeader() {
 							className="title-input"
 							ref={titleRef}
 							value={titleDraft}
-							disabled={!snapshot.hasCapture}
+							disabled={!snapshot.hasCapture || storage.locked}
 							aria-label="Capture title"
 							onChange={event => {
 								setTitleDraft(event.currentTarget.value);
@@ -158,7 +179,7 @@ function CaptureHeader() {
 							className="capture-description"
 							ref={descriptionRef}
 							value={descriptionDraft}
-							disabled={!snapshot.hasCapture}
+							disabled={!snapshot.hasCapture || storage.locked}
 							rows={1}
 							placeholder="Add a description…"
 							aria-label="Capture description"
@@ -194,20 +215,33 @@ function CaptureHeader() {
 					<span title="Received raw bytes only; transmitted bytes are excluded" aria-label="Captured: received raw bytes only; transmitted bytes are excluded">Captured <strong id="statCapturedBytes">{snapshot.summary.capturedBytes}</strong></span>
 				</div>
 				<div ref={actionsRef} className="header-actions">
-					<button id="editContextBtn" className="btn btn-secondary" type="button" disabled={!snapshot.hasCapture} onClick={() => actions.openContext()}>
+					<button id="editContextBtn" className="btn btn-secondary" type="button" disabled={!snapshot.hasCapture || storage.locked} onClick={() => actions.openContext()}>
 						Edit context
 					</button>
 					<button
 						id="moreBtn"
 						className="icon-btn"
 						type="button"
-						disabled={!snapshot.hasCapture}
+						disabled={!snapshot.hasCapture || storage.locked}
 						aria-label="Capture menu"
 						onClick={() => setMenuOpen(open => !open)}
 					>
 						•••
 					</button>
 				<div id="moreMenu" className={`popover capture-menu ${menuOpen ? "" : "hidden"}`.trim()}>
+					{storage.canUpgrade ? (
+						<button
+							id="upgradeCaptureStorageBtn"
+							type="button"
+							onClick={() => {
+								storageActions.upgrade();
+								setMenuOpen(false);
+							}}
+						>
+							<span aria-hidden="true">↥</span>
+							<span>Upgrade capture storage</span>
+						</button>
+					) : null}
 					<button
 						id="duplicateCaptureBtn"
 						type="button"
@@ -215,6 +249,7 @@ function CaptureHeader() {
 							actions.duplicate();
 							setMenuOpen(false);
 						}}
+						disabled={storage.locked}
 					>
 						<svg viewBox="0 0 24 24" aria-hidden="true">
 							<rect x="8" y="8" width="11.5" height="11.5" rx="1" />
@@ -229,6 +264,7 @@ function CaptureHeader() {
 							actions.clearMessages();
 							setMenuOpen(false);
 						}}
+						disabled={storage.locked}
 					>
 						<svg viewBox="0 0 24 24" aria-hidden="true">
 							<path d="M4.5 7.5h15M9 7.5V5h6v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5M14 11v5" />
@@ -243,6 +279,7 @@ function CaptureHeader() {
 							actions.deleteCapture();
 							setMenuOpen(false);
 						}}
+						disabled={storage.locked}
 					>
 						<svg viewBox="0 0 24 24" aria-hidden="true">
 							<path d="M5 7.5h14M9 7.5V5h6v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5M14 11v5" />
@@ -1133,6 +1170,7 @@ function App() {
 			</div>
 			<SendPanel open={sendPopupOpen} onOpenChange={handleSendPopupChange} />
 			<ContextDialog />
+			<CanonicalizationDialog />
 			<AnnotationDialog />
 			<PatternRemarkDialog />
 			<ExportDialog />

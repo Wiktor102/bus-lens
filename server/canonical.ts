@@ -1071,11 +1071,22 @@ function markCanonicalizationFailed(
 	database: SqliteDatabase,
 	captureId: string,
 	error: string,
-	nowIso: () => string
+	nowIso: () => string,
+	report?: VerificationReport
 ): void {
 	try {
 		const transaction = database.transaction(() => {
 			const now = nowIso();
+			// A failed attempt must not leave an incidental canonical graph behind.
+			// finalization_jobs is intentionally independent of the canonical graph, so
+			// the failure record can survive this cleanup while the legacy document
+			// remains authoritative.
+			database.prepare("DELETE FROM captures WHERE id = @captureId").run({ captureId });
+			database.prepare("DELETE FROM finalization_jobs WHERE capture_id = @captureId AND id <> @jobId").run({
+				captureId,
+				jobId: `conv-${captureId}`
+			});
+			database.prepare("DELETE FROM capture_backups WHERE capture_id = @captureId").run({ captureId });
 			database
 				.prepare(
 					`INSERT INTO capture_storage (capture_id, status, created_at, updated_at, last_error)
@@ -1095,17 +1106,16 @@ function markCanonicalizationFailed(
 					canonicalStatus: CANONICAL_STORAGE_STATUS
 				});
 
-			const canonicalCapture = database.prepare("SELECT id FROM captures WHERE id = @captureId").get({ captureId });
-			if (canonicalCapture) {
-				database
-					.prepare(
-						`INSERT INTO finalization_jobs (id, capture_id, status, created_at, updated_at, error, verified)
-						 VALUES (@id, @captureId, 'failed', @createdAt, @updatedAt, @error, 0)
-						 ON CONFLICT (id) DO UPDATE SET
-							status = 'failed', updated_at = excluded.updated_at, error = excluded.error, verified = 0`
-					)
-					.run({ id: `conv-${captureId}`, captureId, createdAt: now, updatedAt: now, error });
-			}
+			database
+				.prepare(
+					`INSERT INTO finalization_jobs
+						(id, capture_id, status, created_at, updated_at, error, verified, completed_at, verification_report_json)
+						VALUES (@id, @captureId, 'failed', @createdAt, @updatedAt, @error, 0, NULL, @reportJson)
+						ON CONFLICT (id) DO UPDATE SET
+							status = 'failed', updated_at = excluded.updated_at, error = excluded.error, verified = 0,
+							completed_at = NULL, profile_id = NULL, verification_report_json = excluded.verification_report_json`
+				)
+				.run({ id: `conv-${captureId}`, captureId, createdAt: now, updatedAt: now, error, reportJson: report ? JSON.stringify(report) : null });
 		});
 		transaction();
 	} catch {
@@ -1241,13 +1251,13 @@ export function convertCaptureDocumentToCanonical(
 			details: String(e)
 		};
 		const error = String(e);
-		markCanonicalizationFailed(database, captureId, error, nowIso);
+		markCanonicalizationFailed(database, captureId, error, nowIso, report);
 		return { captureId, ok: false, verified: false, report, error };
 	}
 
 	if (!report.overallOk) {
 		const error = report.details || "verification failed";
-		markCanonicalizationFailed(database, captureId, error, nowIso);
+		markCanonicalizationFailed(database, captureId, error, nowIso, report);
 		return { captureId, ok: false, verified: false, report, error };
 	}
 
@@ -1258,6 +1268,10 @@ export function convertCaptureDocumentToCanonical(
 			// Rows under a non-canonical storage status are not authoritative. Clear
 			// any incidental/failed canonical materialization before rebuilding it.
 			database.prepare("DELETE FROM captures WHERE id = @id").run({ id: captureId });
+			database.prepare("DELETE FROM finalization_jobs WHERE capture_id = @captureId AND id <> @jobId").run({
+				captureId,
+				jobId: `conv-${captureId}`
+			});
 			const metadata = canonicalMetadata(doc);
 			// captures
 			database
@@ -1682,21 +1696,22 @@ export function convertCaptureDocumentToCanonical(
 			database
 				.prepare(
 					`INSERT INTO finalization_jobs
-					 (id, capture_id, status, created_at, updated_at, profile_id, data_revision,
-					  source_data_revision, completed_at, error, verified)
-					 VALUES (@id, @captureId, 'completed', @createdAt, @updatedAt, @profileId, 1,
-					  1, @completedAt, NULL, 1)
-					 ON CONFLICT (id) DO UPDATE SET
-						 status = 'completed',
-						 updated_at = excluded.updated_at,
-						 profile_id = excluded.profile_id,
-						 data_revision = excluded.data_revision,
-						 source_data_revision = excluded.source_data_revision,
-						 completed_at = excluded.completed_at,
-						error = NULL,
-						 verified = 1`
+						(id, capture_id, status, created_at, updated_at, profile_id, data_revision,
+						 source_data_revision, completed_at, error, verified, verification_report_json)
+						VALUES (@id, @captureId, 'completed', @createdAt, @updatedAt, @profileId, 1,
+						 1, @completedAt, NULL, 1, @reportJson)
+						ON CONFLICT (id) DO UPDATE SET
+							status = 'completed',
+							updated_at = excluded.updated_at,
+							profile_id = excluded.profile_id,
+							data_revision = excluded.data_revision,
+							source_data_revision = excluded.source_data_revision,
+							completed_at = excluded.completed_at,
+							error = NULL,
+							verified = 1,
+							verification_report_json = excluded.verification_report_json`
 				)
-				.run({ id: `conv-${captureId}`, captureId, profileId, createdAt: now, updatedAt: now, completedAt: now });
+				.run({ id: `conv-${captureId}`, captureId, profileId, createdAt: now, updatedAt: now, completedAt: now, reportJson: JSON.stringify(report) });
 
 			// Switch authority last. If any canonical write, verification, backup, or
 			// document deletion fails, SQLite rolls the entire conversion back.
@@ -2036,6 +2051,7 @@ export function updateCanonicalCapture(
 		database
 			.prepare("UPDATE capture_documents SET document_json = @documentJson WHERE id = @id")
 			.run({ id: captureId, documentJson: JSON.stringify(rebuiltDocument) });
+		database.prepare("DELETE FROM finalization_jobs WHERE capture_id = @captureId").run({ captureId });
 		database.prepare("DELETE FROM captures WHERE id = @id").run({ id: captureId });
 		const result = convertCaptureDocumentToCanonical(database, captureId, {
 			nowIso: () => now,

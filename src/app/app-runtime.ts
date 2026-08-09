@@ -4,6 +4,9 @@ import type { Capture } from "../features/capture/capture-framing.ts";
 import {
 	ArchiveClient,
 	type CanonicalCaptureSummary,
+	type CanonicalizationJob,
+	type CanonicalizationPreflight,
+	type LegacyBackupResponse,
 	type CaptureMetadataPatch,
 	type CaptureState,
 	type CaptureWriter,
@@ -47,9 +50,16 @@ export type AppRuntime = {
 	saveSettings: () => void;
 	captureWriter: CaptureWriter | undefined;
 	isCanonicalCapture: (captureId: string) => boolean;
+	getCaptureStorageStatus: (captureId: string) => CanonicalCaptureSummary["status"] | undefined;
+	isCaptureConversionLocked: (captureId: string) => boolean;
+	setCaptureStorageStatus: (captureId: string, status: CanonicalCaptureSummary["status"]) => void;
 	ensureCanonicalCapture: (captureId: string) => Promise<boolean>;
 	waitForCaptureWrite: (captureId: string) => Promise<void>;
 	refreshCapture: (captureId: string) => Promise<Capture>;
+	getCanonicalizationPreflight: (captureId: string) => Promise<CanonicalizationPreflight>;
+	startCanonicalization: (captureId: string) => Promise<CanonicalizationJob>;
+	getCanonicalizationJob: (captureId: string, jobId: string) => Promise<CanonicalizationJob>;
+	getLegacyBackup: (captureId: string) => Promise<LegacyBackupResponse>;
 };
 
 type PersistedEntityIds = {
@@ -187,7 +197,6 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 	let unloading = false;
 	let persistedIds = emptyPersistedEntityIds();
 	let captureStatuses = new Map<string, CanonicalCaptureSummary["status"]>();
-	let captureStatusesReady = false;
 	const activeCaptureWrites = new Map<string, Promise<unknown>>();
 	const pendingDeletions = emptyPersistedEntityIds();
 	const activeDeletions = {
@@ -220,14 +229,17 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		if (unloading || !databaseReady || !capture || !writer) return;
 		const id = String(capture.id);
 		if (activeCaptureWrites.has(id)) return;
+		if (captureStatuses.get(id) === "converting") return;
 		const isNew = !persistedIds.captures.has(id);
 		let operation: Promise<unknown>;
 		if (isNew) {
 			captureStatuses.set(id, "canonical");
+			capture.storageStatus = "canonical";
 			operation = writer.createCapture(captureCreateRequest(capture)).then(result => {
 				applyCanonicalCaptureState(capture, result);
 				persistedIds.captures.add(id);
 				captureStatuses.set(id, "canonical");
+				capture.storageStatus = "canonical";
 			});
 		} else if (captureStatuses.get(id) === "canonical") {
 			operation = writer.patchMetadata({ captureId: id, patch: captureMetadataPatch(capture) }).then(result => {
@@ -252,8 +264,22 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 	}
 
 	function isCanonicalCapture(captureId: string): boolean {
-		const status = captureStatuses.get(captureId);
-		return status === "canonical" || (captureStatusesReady && status === undefined);
+		return captureStatuses.get(String(captureId)) === "canonical";
+	}
+
+	function getCaptureStorageStatus(captureId: string): CanonicalCaptureSummary["status"] | undefined {
+		return captureStatuses.get(String(captureId));
+	}
+
+	function isCaptureConversionLocked(captureId: string): boolean {
+		return getCaptureStorageStatus(captureId) === "converting";
+	}
+
+	function setCaptureStorageStatus(captureId: string, status: CanonicalCaptureSummary["status"]): void {
+		const id = String(captureId);
+		captureStatuses.set(id, status);
+		const item = state.captures.find(candidate => String(candidate.id) === id);
+		if (item) item.storageStatus = status;
 	}
 
 	async function waitForCaptureWrite(captureId: string): Promise<void> {
@@ -261,33 +287,15 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 	}
 
 	async function ensureCanonicalCapture(captureId: string): Promise<boolean> {
-		const status = captureStatuses.get(captureId);
-		if (status === "legacy-not-canonicalized" || status === "canonicalization-failed") return false;
 		await waitForCaptureWrite(captureId);
-		if (captureStatuses.get(captureId) === "canonical") return true;
-		if (!captureStatusesReady || !writer) return false;
-		const capture = state.captures.find(item => String(item.id) === captureId);
-		if (!capture) return false;
-		captureStatuses.set(captureId, "canonical");
-		const operation = writer.createCapture(captureCreateRequest(capture))
-			.then(result => {
-				applyCanonicalCaptureState(capture, result);
-				persistedIds.captures.add(captureId);
-			})
-			.catch(error => {
-				captureStatuses.delete(captureId);
-				persistedIds.captures.delete(captureId);
-				throw error;
-			})
-			.finally(() => activeCaptureWrites.delete(captureId));
-		activeCaptureWrites.set(captureId, operation);
-		await operation;
-		return true;
+		return isCanonicalCapture(captureId);
 	}
 
 	async function refreshCapture(captureId: string): Promise<Capture> {
 		if (!client) throw new Error("archive client is unavailable");
 		const refreshed = await client.loadCapture(captureId);
+		const knownStatus = captureStatuses.get(String(captureId));
+		if (knownStatus) refreshed.storageStatus = knownStatus;
 		const index = state.captures.findIndex(capture => String(capture.id) === captureId);
 		if (index >= 0) state.captures[index] = refreshed;
 		return refreshed;
@@ -370,13 +378,42 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		try {
 			const summaries = await client.listCaptureSummaries();
 			captureStatuses = new Map(summaries.map(summary => [summary.id, summary.status]));
-			captureStatusesReady = true;
+			for (const capture of state.captures) {
+				const status = captureStatuses.get(String(capture.id));
+				if (status) capture.storageStatus = status;
+			}
 		} catch {
 			// A missing status read must fail closed: existing captures use the
 			// explicit legacy method until the server identifies them as canonical.
 			captureStatuses = new Map();
-			captureStatusesReady = false;
+			for (const capture of state.captures) capture.storageStatus = undefined;
 		}
+	}
+
+	async function getCanonicalizationPreflight(captureId: string): Promise<CanonicalizationPreflight> {
+		if (!client) throw new Error("archive client is unavailable");
+		return client.getCanonicalizationPreflight(captureId);
+	}
+
+	async function startCanonicalization(captureId: string): Promise<CanonicalizationJob> {
+		if (!client) throw new Error("archive client is unavailable");
+		await waitForCaptureWrite(captureId);
+		const job = await client.startCanonicalization(captureId);
+		setCaptureStorageStatus(
+			captureId,
+			job.status === "completed" ? "canonical" : job.status === "failed" ? "canonicalization-failed" : "converting"
+		);
+		return job;
+	}
+
+	async function getCanonicalizationJob(captureId: string, jobId: string): Promise<CanonicalizationJob> {
+		if (!client) throw new Error("archive client is unavailable");
+		return client.getCanonicalizationJob(captureId, jobId);
+	}
+
+	async function getLegacyBackup(captureId: string): Promise<LegacyBackupResponse> {
+		if (!client) throw new Error("archive client is unavailable");
+		return client.getLegacyBackup(captureId);
 	}
 
 	const ready = client ? (async () => {
@@ -422,9 +459,16 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		saveSettings,
 		captureWriter: writer,
 		isCanonicalCapture,
+		getCaptureStorageStatus,
+		isCaptureConversionLocked,
+		setCaptureStorageStatus,
 		ensureCanonicalCapture,
 		waitForCaptureWrite,
 		refreshCapture,
+		getCanonicalizationPreflight,
+		startCanonicalization,
+		getCanonicalizationJob,
+		getLegacyBackup,
 		showToast
 	};
 }

@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 
 export type SqliteDatabase = InstanceType<typeof Database>;
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 type Migration = {
 	version: number;
@@ -596,6 +596,74 @@ const migrations: Migration[] = [
 				CREATE INDEX stable_notes_capture_raw_offset ON stable_notes (capture_id, raw_offset);
 				CREATE INDEX stable_notes_profile_target ON stable_notes (profile_id, target_kind);
 				CREATE INDEX stable_notes_sequence_group ON stable_notes (sequence_group_id);
+			`);
+		}
+	},
+	{
+		version: 6,
+		up: database => {
+			// Canonicalization is a user-controlled, observable operation.  Keep the
+			// transient converting state in the authority table so every command
+			// boundary can fail closed while the legacy document remains readable.
+			database.exec(`
+				CREATE TABLE capture_storage_v6 (
+					capture_id TEXT PRIMARY KEY NOT NULL CHECK (length(trim(capture_id)) > 0),
+					status TEXT NOT NULL CHECK (status IN ('legacy-not-canonicalized','converting','canonical','canonicalization-failed')),
+					created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+					updated_at TEXT NOT NULL,
+					last_error TEXT
+				);
+
+				INSERT INTO capture_storage_v6 (capture_id, status, created_at, updated_at, last_error)
+				SELECT capture_id, status, created_at, updated_at, last_error FROM capture_storage;
+				DROP TABLE capture_storage;
+				ALTER TABLE capture_storage_v6 RENAME TO capture_storage;
+				CREATE INDEX capture_storage_status ON capture_storage (status, updated_at DESC);
+
+				CREATE TABLE finalization_jobs_v6 (
+					id TEXT PRIMARY KEY NOT NULL,
+					-- Conversion jobs must remain readable after a failed conversion
+					-- removes partial canonical rows.  The authority row is checked by
+					-- the repository at every operation boundary; a foreign key to
+					-- captures would delete the failure record with those rows.
+					capture_id TEXT NOT NULL,
+					status TEXT NOT NULL CHECK (status IN ('pending','running','completed','failed')),
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL,
+					error TEXT,
+					verified INTEGER NOT NULL DEFAULT 0 CHECK (verified IN (0,1)),
+					session_id TEXT,
+					profile_id TEXT REFERENCES framing_profiles(id) ON DELETE SET NULL,
+					data_revision INTEGER NOT NULL DEFAULT 0 CHECK (data_revision >= 0),
+					source_data_revision INTEGER,
+					attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+					next_attempt_at TEXT,
+					lease_token TEXT,
+					lease_expires_at TEXT,
+					started_at TEXT,
+					completed_at TEXT,
+					verification_report_json TEXT CHECK (verification_report_json IS NULL OR json_valid(verification_report_json))
+				);
+
+				INSERT INTO finalization_jobs_v6
+					(id, capture_id, status, created_at, updated_at, error, verified,
+					 session_id, profile_id, data_revision, source_data_revision, attempt_count,
+					 next_attempt_at, lease_token, lease_expires_at, started_at, completed_at)
+				SELECT id, capture_id, status, created_at, updated_at, error, verified,
+					 session_id, profile_id, data_revision, source_data_revision, attempt_count,
+					 next_attempt_at, lease_token, lease_expires_at, started_at, completed_at
+				FROM finalization_jobs;
+				DROP TABLE finalization_jobs;
+				ALTER TABLE finalization_jobs_v6 RENAME TO finalization_jobs;
+				CREATE INDEX finalization_jobs_capture_status ON finalization_jobs (capture_id, status);
+				CREATE INDEX finalization_jobs_retry ON finalization_jobs (status, next_attempt_at, updated_at);
+				CREATE UNIQUE INDEX finalization_jobs_retry_identity
+					ON finalization_jobs (
+						capture_id,
+						COALESCE(session_id, ''),
+						COALESCE(profile_id, ''),
+						data_revision
+					);
 			`);
 		}
 	}

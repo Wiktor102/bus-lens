@@ -4,15 +4,63 @@ import {
 	convertCaptureDocumentToCanonical as convertDocumentCanonical,
 	createFramingRevision as createCanonicalRevision,
 	getActiveProfile as getCanonicalActiveProfile,
-	getPreviousProfiles as listCanonicalPreviousProfiles
+	getPreviousProfiles as listCanonicalPreviousProfiles,
+	type VerificationReport
 } from "./canonical.ts";
 
 export type JsonDocument = Record<string, unknown>;
 
 export type CaptureStorageStatus =
 	| "legacy-not-canonicalized"
+	| "converting"
 	| "canonical"
 	| "canonicalization-failed";
+
+export type CanonicalizationStatus =
+	| "legacy-not-canonicalized"
+	| "converting"
+	| "canonical"
+	| "failed";
+
+export type CanonicalizationVerification = {
+	rawBytesMatched: boolean;
+	framesMatched: boolean;
+	sectionsMatched: boolean;
+	notesMatched: boolean;
+	analysisMatched: boolean;
+};
+
+export type CanonicalizationPreflight = {
+	captureId: string;
+	status: CanonicalizationStatus;
+	storageStatus: CaptureStorageStatus | null;
+	existingStorageStatus: CaptureStorageStatus | null;
+	captureSize: number;
+	byteCount: number;
+	messageCount: number;
+	noteCount: number;
+	recordingActive: boolean;
+	isRecording: boolean;
+	eligible: boolean;
+	estimatedEligibility: "eligible" | "already-canonical" | "converting" | "recording-active" | "missing" | "invalid";
+	activeJobId?: string;
+	verification?: CanonicalizationVerification | null;
+	error?: string;
+};
+
+export type CanonicalizationJob = {
+	id: string;
+	captureId: string;
+	status: "pending" | "running" | "completed" | "failed";
+	progress: number;
+	verified: boolean;
+	verification: CanonicalizationVerification | null;
+	report: VerificationReport | null;
+	error: string | null;
+	createdAt: string;
+	updatedAt: string;
+	completedAt: string | null;
+};
 
 export type DocumentRecord = {
 	id: string;
@@ -126,6 +174,28 @@ function serializeDocument(document: JsonDocument): string {
 	const serialized = JSON.stringify(document);
 	if (!serialized) throw new RepositoryValidationError("Document could not be serialized as JSON");
 	return serialized;
+}
+
+function canonicalizationVerification(report: VerificationReport | null): CanonicalizationVerification | null {
+	if (!report) return null;
+	const extended = report as VerificationReport & { notesMatched?: boolean; metadataMatched?: boolean };
+	return {
+		rawBytesMatched: report.rawByteCount.ok,
+		framesMatched: report.messageCount.ok && report.signaturesOk && report.messageVisibilityOk,
+		sectionsMatched: report.sectionBoundaries.ok,
+		notesMatched: extended.notesMatched ?? true,
+		analysisMatched: report.byteStatisticsOk && report.bitStatisticsOk && report.transitionsOk && report.sequenceGroupsOk
+	};
+}
+
+function canonicalizationStatusFor(
+	storageStatus: CaptureStorageStatus | undefined,
+	jobStatus: string | undefined
+): CanonicalizationStatus {
+	if (storageStatus === "canonical") return "canonical";
+	if (storageStatus === "converting" || jobStatus === "pending" || jobStatus === "running") return "converting";
+	if (storageStatus === "canonicalization-failed" || jobStatus === "failed") return "failed";
+	return "legacy-not-canonicalized";
 }
 
 function documentRecord(row: StoredDocumentRow): DocumentRecord {
@@ -359,7 +429,7 @@ export class ArchiveRepository {
 	getCapture(id: string): DocumentRecord | undefined {
 		const status = this.getCaptureStorageStatus(id);
 		if (status === "canonical") return this.getCanonicalCapture(id);
-		if (status === "legacy-not-canonicalized" || status === "canonicalization-failed") {
+		if (status === "legacy-not-canonicalized" || status === "converting" || status === "canonicalization-failed") {
 			return this.getDocument("capture_documents", id);
 		}
 		return undefined;
@@ -670,7 +740,9 @@ export class ArchiveRepository {
 
 	putCapture(id: string, document: JsonDocument, expectedVersion?: number): DocumentRecord {
 		const transaction = this.database.transaction(() => {
-			if (this.getCaptureStorageStatus(id) === "canonical") throw new CanonicalCommandRequiredError();
+			const storageStatus = this.getCaptureStorageStatus(id);
+			if (storageStatus === "canonical") throw new CanonicalCommandRequiredError();
+			if (storageStatus === "converting") throw new RepositoryConflictError("Capture conversion is in progress", "canonicalization-in-progress");
 			const record = this.putDocument("capture_documents", id, document, expectedVersion);
 			this.markLegacyCapture(record.id);
 			const existingOrder = this.database
@@ -1037,6 +1109,246 @@ export class ArchiveRepository {
 
 	isCaptureConverted(id: string): boolean {
 		return this.getCaptureStorageStatus(id) === "canonical";
+	}
+
+	/**
+	 * Read-only information used to decide whether the explicit migration action
+	 * can be offered. This method never materializes canonical data for a legacy
+	 * capture and never starts conversion.
+	 */
+	getCanonicalizationPreflight(id: string): CanonicalizationPreflight {
+		const captureId = String(id);
+		const storageStatus = this.getCaptureStorageStatus(captureId) ?? null;
+		const jobRow = this.database
+			.prepare("SELECT id, status, error, verification_report_json FROM finalization_jobs WHERE id = @jobId AND capture_id = @captureId")
+			.get({ jobId: `conv-${captureId}`, captureId }) as { id: string; status: string; error: string | null; verification_report_json: string | null } | undefined;
+		const status = canonicalizationStatusFor(storageStatus ?? undefined, jobRow?.status);
+		let preflightReport: VerificationReport | null = null;
+		if (jobRow?.verification_report_json) {
+			try { preflightReport = JSON.parse(jobRow.verification_report_json) as VerificationReport; } catch { preflightReport = null; }
+		}
+
+		let captureSize = 0;
+		let messageCount = 0;
+		let noteCount = 0;
+		let recordingActive = false;
+		let exists = false;
+		let validDocument = true;
+		let error: string | undefined;
+
+		if (status === "canonical") {
+			const row = this.database
+				.prepare("SELECT byte_count, lifecycle FROM captures WHERE id = @captureId")
+				.get({ captureId }) as { byte_count: number; lifecycle: string } | undefined;
+			if (row) {
+				exists = true;
+				captureSize = row.byte_count;
+				recordingActive = row.lifecycle === "recording" || Boolean(
+					this.database
+						.prepare("SELECT 1 FROM capture_sessions WHERE capture_id = @captureId AND status IN ('recording','finalizing') LIMIT 1")
+						.get({ captureId })
+				);
+				const profile = this.database
+					.prepare("SELECT active_framing_profile_id FROM captures WHERE id = @captureId")
+					.get({ captureId }) as { active_framing_profile_id: string | null } | undefined;
+				messageCount = profile?.active_framing_profile_id
+					? (this.database
+							.prepare("SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId")
+							.get({ profileId: profile.active_framing_profile_id }) as { count: number }).count
+					: 0;
+				noteCount = (this.database
+					.prepare("SELECT COUNT(*) AS count FROM stable_notes WHERE capture_id = @captureId")
+					.get({ captureId }) as { count: number }).count;
+			} else {
+				exists = false;
+				validDocument = false;
+				error = "canonical capture rows are incomplete";
+			}
+		} else {
+			const row = this.database
+				.prepare("SELECT document_json FROM capture_documents WHERE id = @captureId")
+				.get({ captureId }) as { document_json: string } | undefined;
+			if (row) {
+				exists = true;
+				try {
+					const document = JSON.parse(row.document_json) as Record<string, unknown>;
+					const byteStream = Array.isArray(document.byteStream) ? document.byteStream : [];
+					const messages = Array.isArray(document.messages) ? document.messages : [];
+					const notes = Array.isArray(document.notes) ? document.notes : [];
+					const annotations = document.annotations && typeof document.annotations === "object" ? document.annotations as object : {};
+					const patternRemarks = document.patternRemarks && typeof document.patternRemarks === "object" ? document.patternRemarks as object : {};
+					captureSize = byteStream.length;
+					messageCount = messages.length;
+					noteCount = notes.length + Object.keys(annotations).length + Object.keys(patternRemarks).length;
+					recordingActive = document.lifecycle === "recording" || document.recording === true;
+				} catch (parseError) {
+					validDocument = false;
+					error = parseError instanceof Error ? parseError.message : String(parseError);
+				}
+			} else {
+				exists = false;
+				validDocument = false;
+				error = "capture document not found";
+			}
+		}
+
+		const estimatedEligibility = !exists
+			? "missing"
+			: !validDocument
+				? "invalid"
+				: status === "canonical"
+					? "already-canonical"
+					: status === "converting"
+						? "converting"
+						: recordingActive
+							? "recording-active"
+							: "eligible";
+		const eligible = (status === "legacy-not-canonicalized" || status === "failed") && validDocument && !recordingActive;
+		return {
+			captureId,
+			status,
+			storageStatus,
+			existingStorageStatus: storageStatus,
+			captureSize,
+			byteCount: captureSize,
+			messageCount,
+			noteCount,
+			recordingActive,
+			isRecording: recordingActive,
+			eligible,
+			estimatedEligibility,
+			...(error || jobRow?.error ? { error: error || jobRow?.error || undefined } : {}),
+			...(jobRow ? { activeJobId: jobRow.id, verification: canonicalizationVerification(preflightReport) } : {})
+		};
+	}
+
+	private readCanonicalizationJobRow(captureId: string, jobId: string): CanonicalizationJob | undefined {
+		const row = this.database
+			.prepare(
+				`SELECT id, capture_id, status, verified, error, created_at, updated_at,
+						completed_at, verification_report_json
+				 FROM finalization_jobs WHERE id = @jobId AND capture_id = @captureId`
+			)
+			.get({ jobId, captureId }) as
+			| {
+					id: string;
+					capture_id: string;
+					status: "pending" | "running" | "completed" | "failed";
+					verified: number;
+					error: string | null;
+					created_at: string;
+					updated_at: string;
+					completed_at: string | null;
+					verification_report_json: string | null;
+				}
+			| undefined;
+		if (!row) return undefined;
+		let report: VerificationReport | null = null;
+		if (row.verification_report_json) {
+			try { report = JSON.parse(row.verification_report_json) as VerificationReport; } catch { report = null; }
+		}
+		if (!report && row.status === "completed") {
+			const backup = this.getCaptureBackup(captureId);
+			if (backup?.verification_report_json) {
+				try { report = JSON.parse(backup.verification_report_json) as VerificationReport; } catch { report = null; }
+			}
+		}
+		return {
+			id: row.id,
+			captureId: row.capture_id,
+			status: row.status,
+			progress: row.status === "completed" || row.status === "failed" ? 1 : row.status === "running" ? 0.5 : 0,
+			verified: Boolean(row.verified),
+			verification: canonicalizationVerification(report),
+			report,
+			error: row.error,
+			createdAt: row.created_at,
+			updatedAt: row.updated_at,
+			completedAt: row.completed_at
+		};
+	}
+
+	getCanonicalizationJob(captureId: string, jobId: string): CanonicalizationJob | undefined {
+		return this.readCanonicalizationJobRow(String(captureId), String(jobId));
+	}
+
+	getLatestCanonicalizationJob(captureId: string): CanonicalizationJob | undefined {
+		const id = String(captureId);
+		const row = this.database
+			.prepare("SELECT id FROM finalization_jobs WHERE capture_id = @captureId ORDER BY updated_at DESC, id DESC LIMIT 1")
+			.get({ captureId: id }) as { id: string } | undefined;
+		return row ? this.readCanonicalizationJobRow(id, row.id) : undefined;
+	}
+
+	/** Start one explicit conversion, then return its durable finalization job. */
+	startCanonicalization(captureId: string): CanonicalizationJob {
+		const id = String(captureId);
+		const preflight = this.getCanonicalizationPreflight(id);
+		if (preflight.status === "canonical") {
+			const existing = this.getLatestCanonicalizationJob(id);
+			if (existing) return existing;
+			throw new RepositoryConflictError("capture is canonical but has no finalization job", "canonicalization-job-missing");
+		}
+		if (preflight.status === "converting") {
+			throw new RepositoryConflictError("capture conversion is already in progress", "canonicalization-in-progress");
+		}
+		if (preflight.recordingActive) {
+			throw new RepositoryConflictError("capture cannot be converted while recording", "canonicalization-recording-active");
+		}
+		if (!preflight.eligible) {
+			throw new RepositoryConflictError(preflight.error || "capture is not eligible for conversion", "canonicalization-not-eligible");
+		}
+
+		const jobId = `conv-${id}`;
+		const now = this.nowIso();
+		const prepare = this.database.transaction(() => {
+			const row = this.database
+				.prepare("SELECT status FROM capture_storage WHERE capture_id = @captureId")
+				.get({ captureId: id }) as { status: CaptureStorageStatus } | undefined;
+			if (!row) throw new RepositoryValidationError("capture storage status is missing");
+			if (row.status === "canonical") return;
+			if (row.status === "converting") throw new RepositoryConflictError("capture conversion is already in progress", "canonicalization-in-progress");
+			this.database
+				.prepare("UPDATE capture_storage SET status = 'converting', updated_at = @updatedAt, last_error = NULL WHERE capture_id = @captureId")
+				.run({ captureId: id, updatedAt: now });
+			this.database
+				.prepare(
+					`INSERT INTO finalization_jobs
+						(id, capture_id, status, created_at, updated_at, error, verified, data_revision,
+						 source_data_revision, attempt_count, started_at, completed_at, verification_report_json)
+					 VALUES (@id, @captureId, 'running', @createdAt, @updatedAt, NULL, 0, 0,
+						 NULL, 1, @startedAt, NULL, NULL)
+					 ON CONFLICT (id) DO UPDATE SET
+						 status = 'running', updated_at = excluded.updated_at, error = NULL, verified = 0,
+						 data_revision = 0, source_data_revision = NULL, attempt_count = finalization_jobs.attempt_count + 1,
+						 started_at = excluded.started_at, completed_at = NULL, profile_id = NULL,
+						 verification_report_json = NULL`
+				)
+				.run({ id: jobId, captureId: id, createdAt: now, updatedAt: now, startedAt: now });
+		});
+		prepare();
+
+		this.convertCaptureToCanonical(id);
+		const job = this.getCanonicalizationJob(id, jobId);
+		if (!job) throw new RepositoryValidationError("canonicalization job was not persisted");
+		return job;
+	}
+
+	getLegacyBackupDocument(captureId: string): { captureId: string; source: "legacy-document" | "recovery-backup"; documentJson: string; document: JsonDocument | null; verified: boolean } | undefined {
+		const id = String(captureId);
+		const documentRow = this.database
+			.prepare("SELECT document_json FROM capture_documents WHERE id = @captureId")
+			.get({ captureId: id }) as { document_json: string } | undefined;
+		if (documentRow) {
+			let document: JsonDocument | null = null;
+			try { document = parseDocument(documentRow.document_json); } catch { document = null; }
+			return { captureId: id, source: "legacy-document", documentJson: documentRow.document_json, document, verified: false };
+		}
+		const backup = this.getCaptureBackup(id);
+		if (!backup) return undefined;
+		let document: JsonDocument | null = null;
+		try { document = parseDocument(backup.document_json); } catch { document = null; }
+		return { captureId: id, source: "recovery-backup", documentJson: backup.document_json, document, verified: Boolean(backup.verified) };
 	}
 
 	getCaptureBackup(id: string): { document_json: string; verified: number; verification_report_json: string | null } | undefined {

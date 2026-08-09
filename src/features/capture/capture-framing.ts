@@ -97,7 +97,7 @@ export type Capture = Omit<CaptureSummaryData, "notes"> & {
 	frameSections?: CaptureSection[];
 	/** The next unassigned absolute raw offset. */
 	nextRawOffset?: number;
-	storageStatus?: "legacy-not-canonicalized" | "canonical" | "canonicalization-failed";
+	storageStatus?: "legacy-not-canonicalized" | "converting" | "canonical" | "canonicalization-failed";
 	lifecycle?: string;
 	dataRevision?: number;
 	byteCount?: number;

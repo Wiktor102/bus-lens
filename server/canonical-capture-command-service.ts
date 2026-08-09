@@ -3271,7 +3271,11 @@ export class CanonicalCaptureCommandService {
 			this.requireCanonicalStorage(captureId);
 
 			// captures owns the canonical child graph; foreign-key cascades remove
-			// chunks, sessions, profiles, materializations, analysis, notes, and jobs.
+			// chunks, sessions, profiles, materializations, analysis, and notes.
+			// Conversion jobs deliberately do not use a captures foreign key so a
+			// failed conversion can retain its durable failure record; delete them
+			// explicitly with the capture instead.
+			this.database.prepare("DELETE FROM finalization_jobs WHERE capture_id = @captureId").run({ captureId });
 			this.database.prepare("DELETE FROM captures WHERE id = @captureId").run({ captureId });
 			this.database.prepare("DELETE FROM capture_storage WHERE capture_id = @captureId").run({ captureId });
 			this.database.prepare("DELETE FROM archive_order WHERE entity_type = 'capture' AND entity_id = @captureId").run({ captureId });

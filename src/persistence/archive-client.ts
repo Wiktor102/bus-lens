@@ -1,7 +1,57 @@
 import type { AppState, SendSettings, StoredFolder } from "../shared/app-state.ts";
 import type { Capture } from "../features/capture/capture-framing.ts";
 
-export type CanonicalStorageStatus = "canonical" | "canonicalization-failed" | (string & {});
+export type CanonicalStorageStatus = "canonical" | "converting" | "canonicalization-failed" | (string & {});
+
+export type CanonicalizationStatus = "legacy-not-canonicalized" | "converting" | "canonical" | "failed";
+
+export type CanonicalizationVerification = Readonly<{
+	rawBytesMatched: boolean;
+	framesMatched: boolean;
+	sectionsMatched: boolean;
+	notesMatched: boolean;
+	analysisMatched: boolean;
+}>;
+
+export type CanonicalizationPreflight = Readonly<{
+	captureId: string;
+	status: CanonicalizationStatus;
+	storageStatus: CanonicalStorageStatus | null;
+	existingStorageStatus: CanonicalStorageStatus | null;
+	captureSize: number;
+	byteCount: number;
+	messageCount: number;
+	noteCount: number;
+	recordingActive: boolean;
+	isRecording: boolean;
+	eligible: boolean;
+	estimatedEligibility: "eligible" | "already-canonical" | "converting" | "recording-active" | "missing" | "invalid";
+	activeJobId?: string;
+	verification?: CanonicalizationVerification | null;
+	error?: string;
+}>;
+
+export type CanonicalizationJob = Readonly<{
+	id: string;
+	captureId: string;
+	status: "pending" | "running" | "completed" | "failed";
+	progress: number;
+	verified: boolean;
+	verification: CanonicalizationVerification | null;
+	report: Record<string, unknown> | null;
+	error: string | null;
+	createdAt: string;
+	updatedAt: string;
+	completedAt: string | null;
+}>;
+
+export type LegacyBackupResponse = Readonly<{
+	captureId: string;
+	source: "legacy-document" | "recovery-backup";
+	documentJson: string;
+	document: Capture | null;
+	verified: boolean;
+}>;
 
 export type CaptureStorageStatusResponse = Readonly<{
 	captureId: string;
@@ -367,7 +417,7 @@ export type CaptureState = Readonly<{
 
 export type CanonicalCaptureSummary = Readonly<{
 	id: string;
-	status: "canonical" | "legacy-not-canonicalized" | "canonicalization-failed";
+	status: "canonical" | "legacy-not-canonicalized" | "converting" | "canonicalization-failed";
 	name: string;
 	lifecycle: string | null;
 	byteCount: number | null;
@@ -507,9 +557,29 @@ export class ArchiveClient implements CaptureWriter {
 			return typeof value.id === "string" && (
 				value.status === "canonical" ||
 				value.status === "legacy-not-canonicalized" ||
+				value.status === "converting" ||
 				value.status === "canonicalization-failed"
 			);
 		});
+	}
+
+	async getCanonicalizationPreflight(captureId: string): Promise<CanonicalizationPreflight> {
+		return requestJson<CanonicalizationPreflight>(`${capturePath(captureId)}/canonicalization`, "GET");
+	}
+
+	async startCanonicalization(captureId: string): Promise<CanonicalizationJob> {
+		return requestJson<CanonicalizationJob>(`${capturePath(captureId)}/canonicalization`, "POST", {});
+	}
+
+	async getCanonicalizationJob(captureId: string, jobId: string): Promise<CanonicalizationJob> {
+		return requestJson<CanonicalizationJob>(
+			`${capturePath(captureId)}/canonicalization/jobs/${encodeURIComponent(jobId)}`,
+			"GET"
+		);
+	}
+
+	async getLegacyBackup(captureId: string): Promise<LegacyBackupResponse> {
+		return requestJson<LegacyBackupResponse>(`${capturePath(captureId)}/legacy-backup`, "GET");
 	}
 
 	/** Persist a legacy JSON capture only while its server storage is unconverted. */
