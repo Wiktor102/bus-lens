@@ -249,6 +249,15 @@ async function appendThreeChunks(request: HttpRequest, captureId: string, sessio
 	return acknowledgements;
 }
 
+async function finalizeSession(request: HttpRequest, captureId: string, sessionId: string): Promise<JsonRecord> {
+	const result = await request(`/api/captures/${encodeURIComponent(captureId)}/sessions/${encodeURIComponent(sessionId)}/finalize`, {
+		method: "POST",
+		body: {}
+	});
+	status(result, 200);
+	return record(result.body);
+}
+
 test("HTTP canonical creation is idempotent, explicit, and document-free", async () => {
 	await withHttpService(async ({ request, service }) => {
 		const body = createCaptureBody(CAPTURE_ID);
@@ -518,5 +527,284 @@ test("HTTP finalization synthesizes canonical reads and creates a new profile pe
 		const finalizationJobs = array(jobs.body, "finalization jobs").map(item => record(item));
 		assert.equal(finalizationJobs.length, 2);
 		assert.ok(finalizationJobs.every(job => job.status === "completed" && job.verified === 1 || job.verified === true));
+	});
+});
+
+test("HTTP framing drafts stay draft-only while recording and stale reframes are rejected", async () => {
+	await withHttpService(async ({ request, service }) => {
+		await createCanonical(request, "framing-capture");
+		await startSession(request, "framing-capture", "framing-session");
+		const draft = await request("/api/captures/framing-capture/framing-draft", {
+			method: "PATCH",
+			body: { expectedRevision: 0, sections: framingSections(3) }
+		});
+		status(draft, 200);
+		const firstDraft = record(draft.body);
+		assert.equal(firstDraft.revision, 1);
+		assert.deepEqual(firstDraft.sections, framingSections(3));
+		const profilesWhileRecording = service.database
+			.prepare("SELECT COUNT(*) AS count FROM framing_profiles WHERE capture_id = @id")
+			.get({ id: "framing-capture" }) as { count: number };
+		assert.equal(profilesWhileRecording.count, 0);
+
+		const newerDraft = await request("/api/captures/framing-capture/framing-draft", {
+			method: "PATCH",
+			body: { expectedRevision: 1, sections: framingSections(4) }
+		});
+		status(newerDraft, 200);
+		assert.equal(record(newerDraft.body).revision, 2);
+
+		await appendChunk(request, "framing-capture", "framing-session", {
+			requestId: "framing-data-0",
+			sequence: 0,
+			expectedStartOffset: 0,
+			timestamp: 300,
+			direction: "rx",
+			bytes: [0x01, 0x02, 0x03, 0x04]
+		}).then(result => status(result, 200));
+		const finalization = await finalizeSession(request, "framing-capture", "framing-session");
+		const profileId = String(finalization.profileId);
+		assert.equal(finalization.dataRevision, 1);
+
+		const profiles = await request("/api/captures/framing-capture/profiles");
+		status(profiles, 200);
+		const materializedProfiles = array(profiles.body, "framing profiles").map(item => record(item));
+		const initialProfile = materializedProfiles.find(profile => profile.id === profileId);
+		assert.ok(initialProfile);
+		if (initialProfile && initialProfile.sections !== undefined) {
+			assert.equal(record(array(initialProfile.sections, "initial profile sections")[0]).frameSize, 4);
+		}
+
+		const reframed = await request("/api/captures/framing-capture/framing-revisions", {
+			method: "POST",
+			body: {
+				expectedActiveProfileId: profileId,
+				expectedDataRevision: 1,
+				sections: framingSections(2),
+				algorithmVersion: 1
+			}
+		});
+		status(reframed, 200);
+		const newProfile = record(reframed.body);
+		assert.equal(typeof newProfile.profileId, "string");
+		assert.notEqual(newProfile.profileId, profileId);
+		assert.equal(newProfile.sourceDataRevision, 1);
+		assert.equal(newProfile.verified, true);
+
+		const staleReframe = await request("/api/captures/framing-capture/framing-revisions", {
+			method: "POST",
+			body: {
+				expectedActiveProfileId: profileId,
+				expectedDataRevision: 1,
+				sections: framingSections(1),
+				algorithmVersion: 1
+			}
+		});
+		conflict(staleReframe, "CONFLICT", { expectedActiveProfileId: profileId, expectedDataRevision: 1 });
+
+		const profilesAfterStale = await request("/api/captures/framing-capture/profiles");
+		status(profilesAfterStale, 200);
+		const finalProfiles = array(profilesAfterStale.body, "profiles after stale reframe").map(item => record(item));
+		assert.equal(finalProfiles.length, 2);
+		assert.equal(finalProfiles.filter(profile => Boolean(profile.isActive)).length, 1);
+		assert.equal(finalProfiles.find(profile => Boolean(profile.isActive))?.id, newProfile.profileId);
+	});
+});
+
+test("HTTP note CRUD preserves stable range raw-span evidence", async () => {
+	await withHttpService(async ({ request }) => {
+		await createCanonical(request, "note-capture");
+		await startSession(request, "note-capture", "note-session");
+		await appendThreeChunks(request, "note-capture", "note-session");
+		const finalization = await finalizeSession(request, "note-capture", "note-session");
+		const profileId = String(finalization.profileId);
+		const target = {
+			kind: "range",
+			profileId,
+			startOrdinal: 0,
+			endOrdinal: 1,
+			startRawOffset: 0,
+			endRawOffset: 3
+		};
+
+		const created = await request("/api/captures/note-capture/notes", {
+			method: "POST",
+			body: { text: "stable range", target }
+		});
+		status(created, 201);
+		const createdBody = record(created.body);
+		const note = record(createdBody.note ?? createdBody);
+		assert.equal(typeof note.id, "string");
+		assert.equal(createdBody.contentRevision, 1);
+		const createdTarget = record(note.target);
+		assert.equal(createdTarget.kind, "range");
+		assert.equal(createdTarget.profileId, profileId);
+		assert.equal(createdTarget.startRawOffset, 0);
+		assert.equal(createdTarget.endRawOffset, 3);
+		const noteId = String(note.id);
+
+		const listed = await request("/api/captures/note-capture/notes");
+		status(listed, 200);
+		const listedNote = array(listed.body, "notes").map(item => record(item)).find(item => item.id === noteId);
+		assert.ok(listedNote);
+		assert.equal(record(listedNote?.target).startRawOffset, 0);
+		assert.equal(record(listedNote?.target).endRawOffset, 3);
+
+		const updated = await request(`/api/captures/note-capture/notes/${encodeURIComponent(noteId)}`, {
+			method: "PATCH",
+			body: { text: "updated stable range", target }
+		});
+		status(updated, 200);
+		const updatedBody = record(updated.body);
+		assert.equal(updatedBody.contentRevision, 2);
+		assert.equal(record(record(updatedBody.note ?? updatedBody).target).endRawOffset, 3);
+
+		const deleted = await request(`/api/captures/note-capture/notes/${encodeURIComponent(noteId)}`, { method: "DELETE" });
+		status(deleted, 204);
+		const afterDelete = await request("/api/captures/note-capture/notes");
+		status(afterDelete, 200);
+		assert.deepEqual(afterDelete.body, []);
+	});
+});
+
+test("HTTP byte and frame visibility use separate overrides and leave raw chunk BLOBs unchanged", async () => {
+	await withHttpService(async ({ request, service }) => {
+		await createCanonical(request, "visibility-capture");
+		await startSession(request, "visibility-capture", "visibility-session");
+		await appendThreeChunks(request, "visibility-capture", "visibility-session");
+		const finalization = await finalizeSession(request, "visibility-capture", "visibility-session");
+		const profileId = String(finalization.profileId);
+		const frameWindow = await request("/api/canonical/captures/visibility-capture/frames?offset=0&limit=1");
+		status(frameWindow, 200);
+		const frames = array(record(frameWindow.body).frames, "frame window");
+		assert.ok(frames.length > 0);
+		const frameId = String(record(frames[0]).id);
+		const rawBefore = service.database
+			.prepare("SELECT bytes FROM raw_chunks WHERE capture_id = @id ORDER BY chunk_index LIMIT 1")
+			.get({ id: "visibility-capture" }) as { bytes: Buffer };
+		const bytesBefore = Buffer.from(rawBefore.bytes);
+
+		const byteVisibility = await request("/api/captures/visibility-capture/bytes/1/visibility", {
+			method: "PUT",
+			body: { hidden: true }
+		});
+		status(byteVisibility, 200);
+		assert.equal(record(byteVisibility.body).hidden, true);
+		assert.equal(record(byteVisibility.body).contentRevision, 1);
+
+		const frameVisibility = await request(`/api/captures/visibility-capture/frames/${encodeURIComponent(frameId)}/visibility`, {
+			method: "PUT",
+			body: { hidden: true }
+		});
+		status(frameVisibility, 200);
+		const frameVisibilityBody = record(frameVisibility.body);
+		assert.equal(frameVisibilityBody.hidden, true);
+		assert.equal(frameVisibilityBody.profileId, profileId);
+		assert.equal(frameVisibilityBody.contentRevision, 2);
+
+		const deleteByteVisibility = await request("/api/captures/visibility-capture/bytes/1/visibility", { method: "DELETE" });
+		status(deleteByteVisibility, 204);
+		const deleteFrameVisibility = await request(`/api/captures/visibility-capture/frames/${encodeURIComponent(frameId)}/visibility`, {
+			method: "DELETE"
+		});
+		status(deleteFrameVisibility, 204);
+
+		const rawAfter = service.database
+			.prepare("SELECT bytes FROM raw_chunks WHERE capture_id = @id ORDER BY chunk_index LIMIT 1")
+			.get({ id: "visibility-capture" }) as { bytes: Buffer };
+		assert.deepEqual(Buffer.from(rawAfter.bytes), bytesBefore);
+	});
+});
+
+test("HTTP clear data preserves metadata and capture notes, while duplicate and delete stay command-scoped", async () => {
+	await withHttpService(async ({ request, service }) => {
+		await createCanonical(request, "ops-capture");
+		await startSession(request, "ops-capture", "ops-session");
+		await appendThreeChunks(request, "ops-capture", "ops-session");
+		const finalization = await finalizeSession(request, "ops-capture", "ops-session");
+		const profileId = String(finalization.profileId);
+		const captureNote = await request("/api/captures/ops-capture/notes", {
+			method: "POST",
+			body: { text: "keep this capture note", target: { kind: "capture" } }
+		});
+		status(captureNote, 201);
+		const rangeNote = await request("/api/captures/ops-capture/notes", {
+			method: "POST",
+			body: {
+				text: "remove this range note",
+				target: {
+					kind: "range",
+					profileId,
+					startOrdinal: 0,
+					endOrdinal: 1,
+					startRawOffset: 0,
+					endRawOffset: 3
+				}
+			}
+		});
+		status(rangeNote, 201);
+
+		const clear = await request("/api/captures/ops-capture/data", { method: "DELETE" });
+		status(clear, 200);
+		const clearBody = record(clear.body);
+		assert.equal(clearBody.captureId, "ops-capture");
+		assert.equal(clearBody.clearedByteCount, 5);
+		assert.ok(Number(clearBody.dataRevision) > 3);
+
+		const afterClear = await request("/api/captures/ops-capture");
+		status(afterClear, 200);
+		const clearedDocument = documentBody(afterClear);
+		assert.equal(clearedDocument.name, "HTTP command capture");
+		assert.deepEqual(clearedDocument.byteStream, []);
+		const clearedOverview = await request("/api/canonical/captures/ops-capture/overview");
+		status(clearedOverview, 200);
+		const clearedOverviewBody = record(clearedOverview.body);
+		assert.equal(clearedOverviewBody.rawByteCount, 0);
+		assert.equal(clearedOverviewBody.frameCount, 0);
+		assert.equal(clearedOverviewBody.activeProfile, null);
+
+		const notesAfterClear = await request("/api/captures/ops-capture/notes");
+		status(notesAfterClear, 200);
+		const remainingNotes = array(notesAfterClear.body, "notes after clear").map(item => record(item));
+		assert.equal(remainingNotes.length, 1);
+		assert.equal(remainingNotes[0].text, "keep this capture note");
+		assert.equal(record(remainingNotes[0].target).kind, "capture");
+
+		const rawChunks = service.database
+			.prepare("SELECT COUNT(*) AS count FROM raw_chunks WHERE capture_id = @id")
+			.get({ id: "ops-capture" }) as { count: number };
+		const sessions = service.database
+			.prepare("SELECT COUNT(*) AS count FROM capture_sessions WHERE capture_id = @id")
+			.get({ id: "ops-capture" }) as { count: number };
+		assert.equal(rawChunks.count, 0);
+		assert.equal(sessions.count, 0);
+
+		const duplicate = await request("/api/captures/ops-capture/duplicate", {
+			method: "POST",
+			body: { id: "ops-copy" }
+		});
+		status(duplicate, 201);
+		const duplicateBody = record(duplicate.body);
+		assert.equal(duplicateBody.sourceCaptureId, "ops-capture");
+		assert.equal(duplicateBody.captureId, "ops-copy");
+		assert.equal(duplicateBody.name, "HTTP command capture · copy");
+
+		const copyRead = await request("/api/captures/ops-copy");
+		status(copyRead, 200);
+		assert.equal(documentBody(copyRead).name, "HTTP command capture · copy");
+		assert.deepEqual(documentBody(copyRead).byteStream, []);
+		const copyNotes = await request("/api/captures/ops-copy/notes");
+		status(copyNotes, 200);
+		assert.equal(array(copyNotes.body, "duplicated notes").length, 1);
+
+		const deleteCopy = await request("/api/captures/ops-copy", { method: "DELETE" });
+		status(deleteCopy, 204);
+		const deletedCopyRead = await request("/api/captures/ops-copy");
+		status(deletedCopyRead, 404);
+
+		const deleteSource = await request("/api/captures/ops-capture", { method: "DELETE" });
+		status(deleteSource, 204);
+		const deletedSourceRead = await request("/api/captures/ops-capture");
+		status(deletedSourceRead, 404);
 	});
 });
