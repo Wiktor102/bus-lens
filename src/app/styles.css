@@ -223,9 +223,53 @@ button {
 }
 
 .workspace {
+	--sidebar-width: 260px;
+	position: relative;
 	display: grid;
-	grid-template-columns: 260px minmax(0, 1fr);
+	grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
 	height: calc(100vh - 68px);
+}
+.sidebar-resizer {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: calc(var(--sidebar-width) - 5px);
+	width: 10px;
+	z-index: 3;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	cursor: col-resize;
+	touch-action: none;
+}
+.sidebar-resizer::before {
+	content: "";
+	position: absolute;
+	top: 50%;
+	left: 4px;
+	width: 2px;
+	height: 36px;
+	border-radius: 2px;
+	background: var(--faint);
+	opacity: 0;
+	transform: translateY(-50%);
+	transition: opacity 0.15s ease;
+}
+.sidebar-resizer:hover::before,
+.sidebar-resizer:focus-visible::before,
+.sidebar-resizing .sidebar-resizer::before {
+	opacity: 1;
+}
+.sidebar-resizer:focus-visible {
+	outline: 1px solid var(--acid);
+	outline-offset: -1px;
+}
+.sidebar-resizing,
+.sidebar-resizing * {
+	user-select: none;
+}
+.sidebar-resizing .sidebar-resizer {
+	cursor: col-resize;
 }
 .sidebar {
 	border-right: 1px solid var(--line);
@@ -2325,7 +2369,7 @@ tr:hover .row-action,
 		margin-top: -3px;
 	}
 	.workspace {
-		grid-template-columns: 210px minmax(0, 1fr);
+		grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
 	}
 	.toolbar {
 		align-items: flex-start;
@@ -2371,6 +2415,9 @@ tr:hover .row-action,
 	.workspace {
 		display: block;
 		height: auto;
+	}
+	.sidebar-resizer {
+		display: none;
 	}
 	.sidebar {
 		height: 235px;

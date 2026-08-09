@@ -7,6 +7,7 @@ import {
 	useState,
 	useSyncExternalStore,
 	type CSSProperties,
+	type PointerEvent as ReactPointerEvent,
 	type RefObject
 } from "react";
 import { ArchiveSidebar } from "../features/archive/archive-sidebar";
@@ -939,12 +940,107 @@ function Toast({ sendPopupOpen }: { sendPopupOpen: boolean }) {
 	);
 }
 
+const SIDEBAR_WIDTH_STORAGE_KEY = "bus-lens.sidebar-width";
+const DEFAULT_SIDEBAR_WIDTH = 260;
+const NARROW_SIDEBAR_WIDTH = 210;
+const MIN_SIDEBAR_WIDTH = 210;
+const MAX_SIDEBAR_WIDTH = 440;
+
+function clampSidebarWidth(width: number) {
+	return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(width)));
+}
+
+function readSidebarWidth() {
+	const defaultWidth = typeof window !== "undefined" && window.innerWidth <= 900 ? NARROW_SIDEBAR_WIDTH : DEFAULT_SIDEBAR_WIDTH;
+	try {
+		const storedValue = globalThis.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+		const storedWidth = storedValue === null ? NaN : Number(storedValue);
+		return Number.isFinite(storedWidth) ? clampSidebarWidth(storedWidth) : defaultWidth;
+	} catch {
+		return defaultWidth;
+	}
+}
+
+function SidebarResizeHandle({
+	width,
+	onWidthChange,
+	onResizingChange
+}: {
+	width: number;
+	onWidthChange: (width: number) => void;
+	onResizingChange: (resizing: boolean) => void;
+}) {
+	const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+
+	const finishResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+		if (resizeRef.current?.pointerId !== event.pointerId) return;
+		if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+		resizeRef.current = null;
+		onResizingChange(false);
+	};
+
+	return (
+		<div
+			className="sidebar-resizer"
+			role="separator"
+			aria-label="Resize archive sidebar"
+			aria-orientation="vertical"
+			aria-valuemin={MIN_SIDEBAR_WIDTH}
+			aria-valuemax={MAX_SIDEBAR_WIDTH}
+			aria-valuenow={width}
+			tabIndex={0}
+			onDoubleClick={() => onWidthChange(DEFAULT_SIDEBAR_WIDTH)}
+			onKeyDown={event => {
+				const step = event.shiftKey ? 50 : 10;
+				if (event.key === "ArrowLeft") {
+					event.preventDefault();
+					onWidthChange(clampSidebarWidth(width - step));
+				} else if (event.key === "ArrowRight") {
+					event.preventDefault();
+					onWidthChange(clampSidebarWidth(width + step));
+				} else if (event.key === "Home") {
+					event.preventDefault();
+					onWidthChange(MIN_SIDEBAR_WIDTH);
+				} else if (event.key === "End") {
+					event.preventDefault();
+					onWidthChange(MAX_SIDEBAR_WIDTH);
+				}
+			}}
+			onPointerDown={event => {
+				if (event.button !== 0) return;
+				event.preventDefault();
+				resizeRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: width };
+				event.currentTarget.setPointerCapture(event.pointerId);
+				onResizingChange(true);
+			}}
+			onPointerMove={event => {
+				const resize = resizeRef.current;
+				if (!resize || resize.pointerId !== event.pointerId) return;
+				onWidthChange(clampSidebarWidth(resize.startWidth + event.clientX - resize.startX));
+			}}
+			onPointerUp={finishResize}
+			onPointerCancel={finishResize}
+			title="Drag to resize archive sidebar; double-click to reset"
+		/>
+	);
+}
+
 function App() {
 	const [sendPopupOpen, setSendPopupOpen] = useState(false);
+	const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
+	const [sidebarResizing, setSidebarResizing] = useState(false);
 	const [viewState, dispatchViewState] = useReducer(reduceViewState, EMPTY_VIEW_STATE_SNAPSHOT);
 	const messageFilterRef = useRef<HTMLInputElement>(null);
 	const messageFilterToggleRef = useRef<HTMLButtonElement>(null);
 	const handleSendPopupChange = (open: boolean) => setSendPopupOpen(open);
+
+	useEffect(() => {
+		try {
+			globalThis.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
+		} catch {
+			// Preferences are optional when storage is unavailable.
+		}
+	}, [sidebarWidth]);
 
 	useEffect(() => {
 		let disposed = false;
@@ -972,8 +1068,16 @@ function App() {
 		<>
 			<div className="app-shell">
 				<TopBar />
-				<main className="workspace">
+				<main
+					className={`workspace ${sidebarResizing ? "sidebar-resizing" : ""}`.trim()}
+					style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+				>
 					<ArchiveSidebar />
+					<SidebarResizeHandle
+						width={sidebarWidth}
+						onWidthChange={setSidebarWidth}
+						onResizingChange={setSidebarResizing}
+					/>
 					<section className="main-panel">
 						<CaptureHeader />
 						<Toolbar
