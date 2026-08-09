@@ -229,20 +229,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			dependencies.saveState(immediate ? { immediate: true } : undefined);
 			return;
 		}
-		const sections = framingRequest(item);
-		const operation = dependencies.transport.isRecording()
-			? dependencies.captureWriter!.updateFramingDraft({
-				captureId: item.id,
-				sections,
-				expectedRevision: item.framingDraftRevision
-			}).then(draft => { item.framingDraftRevision = draft.revision; })
-			: dependencies.captureWriter!.reframe({
-				captureId: item.id,
-				sections,
-				expectedActiveProfileId: item.activeFramingProfileId,
-				expectedDataRevision: Number(item.dataRevision ?? 0)
-			}).then(profile => { item.activeFramingProfileId = profile.profileId; });
-		void operation.catch(error => reconcileFailure(item.id, error));
+		framingRequest(item);
+		queueCaptureWrite(item.id, "framing");
 	}
 
 	function selectArchiveCapture(captureId: string) {
@@ -412,19 +400,34 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		dependencies.render();
 	}
 
-	function deleteArchiveCapture(captureId: string) {
+	async function deleteArchiveCapture(captureId: string): Promise<void> {
 		const item = state.captures.find(captureItem => captureItem.id === captureId);
 		if (!item || !dependencies.confirm(`Delete “${item.name}”?`)) return;
 		const deletingActiveCapture = dependencies.getActiveId() === captureId;
-		if (deletingActiveCapture && dependencies.transport.isRecording()) dependencies.transport.stopRecording();
+		if (deletingActiveCapture) {
+			try {
+				// stopRecording is idempotent when idle, and also waits for an already
+				// pending shutdown whose synchronous recording flag is already false.
+				await dependencies.transport.stopRecording();
+			} catch {
+				// The transport owns the recovery state and must keep the capture
+				// available for retry/export when shutdown cannot be completed.
+				dependencies.render();
+				return;
+			}
+		}
 		state.captures = state.captures.filter(captureItem => captureItem.id !== captureId);
 		if (deletingActiveCapture) dependencies.setActiveId(state.captures[0]?.id || null);
 		if (isCanonical(item)) {
-			void dependencies.captureWriter!.delete(item.id).catch(error => {
+			try {
+				await dependencies.captureWriter!.delete(item.id);
+			} catch (error) {
 				state.captures.unshift(item);
+				if (deletingActiveCapture) dependencies.setActiveId(item.id);
 				reportFailure(item.id, error);
 				dependencies.render();
-			});
+				return;
+			}
 		} else dependencies.saveState();
 		dependencies.render();
 	}
