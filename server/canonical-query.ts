@@ -40,6 +40,7 @@ export type CanonicalFrameWindow = {
 	offset: number;
 	limit: number;
 	totalFrames: number | null;
+	hasMore: boolean;
 	frames: CanonicalFrame[];
 };
 
@@ -210,21 +211,24 @@ export class CanonicalQueryService {
 		const summary = this.getCaptureSummary(captureId);
 		if (!summary) return undefined;
 		if (summary.status === "legacy-not-canonicalized") {
-			return { capture: summary, status: summary.status, offset, limit: boundedLimit, totalFrames: null, frames: [] };
+			return { capture: summary, status: summary.status, offset, limit: boundedLimit, totalFrames: null, hasMore: false, frames: [] };
 		}
 
 		const profile = this.database.prepare(
 			"SELECT id FROM framing_profiles WHERE capture_id = @captureId AND is_active = 1 LIMIT 1"
 		).get({ captureId }) as { id: string } | undefined;
-		if (!profile) return { capture: summary, status: summary.status, offset, limit: boundedLimit, totalFrames: 0, frames: [] };
+		if (!profile) return { capture: summary, status: summary.status, offset, limit: boundedLimit, totalFrames: 0, hasMore: false, frames: [] };
 		const totalFrames = (this.database.prepare("SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId").get({ profileId: profile.id }) as { count: number }).count;
+		// `offset` is the first ordinal, not a SQL row offset. The ordinal index
+		// lets distant windows seek directly without scanning earlier frames.
 		const rows = this.database.prepare(
 			`SELECT id, ordinal, section_id, raw_offsets_json, bytes_json, timestamps_json,
 					directions_json, hidden, signature
 			 FROM materialized_frames
 			 WHERE profile_id = @profileId
+			   AND ordinal >= @offset
 			 ORDER BY ordinal
-			 LIMIT @limit OFFSET @offset`
+			 LIMIT @limit`
 		).all({ profileId: profile.id, limit: boundedLimit, offset }) as FrameRow[];
 		return {
 			capture: summary,
@@ -232,6 +236,7 @@ export class CanonicalQueryService {
 			offset,
 			limit: boundedLimit,
 			totalFrames,
+			hasMore: offset + rows.length < totalFrames,
 			frames: rows.map(row => ({
 				id: row.id,
 				ordinal: row.ordinal,
