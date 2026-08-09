@@ -33,7 +33,8 @@ function FolderGroup({
 	onRename,
 	onDelete,
 	onSelect,
-	onContextMenu
+	onContextMenu,
+	contextMenuCaptureId
 }: {
 	group: ArchiveGroup;
 	searching: boolean;
@@ -43,6 +44,7 @@ function FolderGroup({
 	onDelete: (folderId: string) => void;
 	onSelect: (captureId: string) => void;
 	onContextMenu: (event: ReactMouseEvent<HTMLDivElement>, captureId: string) => void;
+	contextMenuCaptureId: string | null;
 }) {
 	const collapsed = group.collapsed && !searching;
 
@@ -94,6 +96,7 @@ function FolderGroup({
 							key={capture.id}
 							capture={capture}
 							active={capture.id === activeId}
+							contextMenuOpen={capture.id === contextMenuCaptureId}
 							onSelect={onSelect}
 							onContextMenu={event => onContextMenu(event, capture.id)}
 						/>
@@ -109,17 +112,19 @@ function FolderGroup({
 function CaptureItem({
 	capture,
 	active,
+	contextMenuOpen,
 	onSelect,
 	onContextMenu
 }: {
 	capture: ArchiveCapture;
 	active: boolean;
+	contextMenuOpen: boolean;
 	onSelect: (captureId: string) => void;
 	onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void;
 }) {
 	return (
 		<div
-			className={`capture-item ${active ? "active" : ""}`}
+			className={`capture-item ${active ? "active" : ""} ${contextMenuOpen ? "context-menu-open" : ""}`.trim()}
 			onContextMenu={onContextMenu}
 		>
 			<button className="capture-open" type="button" data-capture-id={capture.id} onClick={() => onSelect(capture.id)}>
@@ -217,6 +222,7 @@ export function ArchiveSidebar() {
 							group={group}
 							searching={archive.searching}
 							activeId={snapshot.activeId}
+							contextMenuCaptureId={captureMenuState?.captureId ?? null}
 							onToggle={actions.toggleFolder}
 							onRename={folderId => setFolderDialogId(folderId)}
 							onDelete={actions.deleteFolder}

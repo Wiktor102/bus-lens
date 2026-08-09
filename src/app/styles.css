@@ -402,7 +402,8 @@ p {
 	border-left: 2px solid transparent;
 	margin-bottom: 3px;
 }
-.capture-item:hover {
+.capture-item:hover,
+.capture-item.context-menu-open {
 	background: var(--panel);
 }
 .capture-item.active {
@@ -1434,6 +1435,9 @@ tr:hover .row-action,
 .message-table tr:not(.marker-prompt-row):hover td {
 	background: #181d19;
 }
+.message-table tr.context-menu-open:not(.marker-prompt-row) td {
+	background: #181d19;
+}
 .message-table tr.sequence-noted td:first-child {
 	border-left: 2px solid var(--blue);
 }
@@ -1566,6 +1570,10 @@ tr:hover .row-action,
 }
 .byte.out-end::after {
 	border-right: 2px solid var(--out-color);
+}
+.byte.context-menu-open {
+	background: color-mix(in srgb, var(--byte-color) 19%, transparent);
+	border-color: var(--byte-color);
 }
 .repeat-pill {
 	display: inline-grid;
@@ -1998,6 +2006,9 @@ tr:hover .row-action,
 	background: color-mix(in srgb, var(--acid) 4%, var(--panel));
 	font: 9px var(--mono);
 	letter-spacing: 0.03em;
+}
+.message-table tr.section-divider.context-menu-open td {
+	background: #181d19;
 }
 .message-table .section-divider .section-header-cell {
 	grid-column: 1 / -1;
