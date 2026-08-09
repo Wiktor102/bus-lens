@@ -808,3 +808,118 @@ test("HTTP clear data preserves metadata and capture notes, while duplicate and 
 		status(deletedSourceRead, 404);
 	});
 });
+
+function legacyCaptureDocument(id: string, name: string): JsonRecord {
+	return {
+		id,
+		name,
+		description: "legacy JSON capture",
+		view: "raw",
+		baudRate: 19200,
+		inputFormat: "binary",
+		params: [{ key: "legacy", value: "yes" }],
+		byteStream: [
+			{ rawOffset: 0, value: 0x51, timestamp: 400, direction: "rx" },
+			{ rawOffset: 1, value: 0x52, timestamp: 410, direction: "tx" }
+		],
+		frameSections: [{ id: "legacy-section", start: 0, framingMode: "length", frameSize: 2 }],
+		messages: [{
+			id: "legacy-message",
+			timestamp: 400,
+			bytes: [0x51, 0x52],
+			byteTimestamps: [400, 410],
+			rawOffsets: [0, 1]
+		}],
+		notes: []
+	};
+}
+
+test("HTTP generic capture PUT rejects canonical storage but remains available for legacy JSON", async () => {
+	await withHttpService(async ({ request, service }) => {
+		await createCanonical(request, "put-canonical");
+		const canonicalPut = await request("/api/captures/put-canonical", {
+			method: "PUT",
+			body: { id: "put-canonical", name: "must use metadata command", byteStream: [] }
+		});
+		conflict(canonicalPut, "canonical-command-required");
+		const canonicalDocuments = service.database
+			.prepare("SELECT COUNT(*) AS count FROM capture_documents WHERE id = @id")
+			.get({ id: "put-canonical" }) as { count: number };
+		assert.equal(canonicalDocuments.count, 0);
+
+		const legacy = legacyCaptureDocument("put-legacy", "Legacy before update");
+		const legacyPut = await request("/api/captures/put-legacy", { method: "PUT", body: legacy });
+		status(legacyPut, 200);
+		assert.equal(documentBody(legacyPut).name, "Legacy before update");
+		const legacyUpdate = await request("/api/captures/put-legacy", {
+			method: "PUT",
+			body: { ...legacy, name: "Legacy updated through PUT" }
+		});
+		status(legacyUpdate, 200);
+		assert.equal(documentBody(legacyUpdate).name, "Legacy updated through PUT");
+		const legacyDocuments = service.database
+			.prepare("SELECT COUNT(*) AS count FROM capture_documents WHERE id = @id")
+			.get({ id: "put-legacy" }) as { count: number };
+		assert.equal(legacyDocuments.count, 1);
+	});
+});
+
+test("HTTP explicit legacy conversion creates one verified backup and canonical reads ignore it", async () => {
+	await withHttpService(async ({ request, service }) => {
+		const legacy = legacyCaptureDocument("convert-legacy", "Convertible legacy capture");
+		const seeded = await request("/api/captures/convert-legacy", { method: "PUT", body: legacy });
+		status(seeded, 200);
+		const beforeDocuments = service.database
+			.prepare("SELECT COUNT(*) AS count FROM capture_documents WHERE id = @id")
+			.get({ id: "convert-legacy" }) as { count: number };
+		const beforeBackups = service.database
+			.prepare("SELECT COUNT(*) AS count FROM capture_backups WHERE capture_id = @id")
+			.get({ id: "convert-legacy" }) as { count: number };
+		assert.equal(beforeDocuments.count, 1);
+		assert.equal(beforeBackups.count, 0);
+
+		const converted = await request("/api/captures/convert-legacy/convert", { method: "POST", body: {} });
+		status(converted, 200);
+		assert.equal(record(converted.body).verified, true);
+
+		const documentsAfter = service.database
+			.prepare("SELECT COUNT(*) AS count FROM capture_documents WHERE id = @id")
+			.get({ id: "convert-legacy" }) as { count: number };
+		const backupsAfter = service.database
+			.prepare("SELECT COUNT(*) AS count FROM capture_backups WHERE capture_id = @id")
+			.get({ id: "convert-legacy" }) as { count: number };
+		const verifiedBackups = service.database
+			.prepare("SELECT COUNT(*) AS count FROM capture_backups WHERE capture_id = @id AND verified = 1")
+			.get({ id: "convert-legacy" }) as { count: number };
+		assert.equal(documentsAfter.count, 0);
+		assert.equal(backupsAfter.count, 1);
+		assert.equal(verifiedBackups.count, 1);
+
+		const backup = await request("/api/captures/convert-legacy/backup");
+		status(backup, 200);
+		assert.ok([1, true].includes(record(backup.body).verified as number | boolean));
+		const normalBeforePoison = await request("/api/captures/convert-legacy");
+		status(normalBeforePoison, 200);
+		assert.equal(documentBody(normalBeforePoison).name, "Convertible legacy capture");
+
+		service.database
+			.prepare("UPDATE capture_backups SET document_json = @documentJson WHERE capture_id = @id")
+			.run({
+				id: "convert-legacy",
+				documentJson: JSON.stringify({ ...legacy, name: "backup must not be read" })
+			});
+		const normalAfterPoison = await request("/api/captures/convert-legacy");
+		status(normalAfterPoison, 200);
+		assert.equal(documentBody(normalAfterPoison).name, "Convertible legacy capture");
+		assert.deepEqual(
+			array(documentBody(normalAfterPoison).byteStream, "converted byteStream").map(item => record(item).value),
+			[0x51, 0x52]
+		);
+
+		const wholeDocumentPut = await request("/api/captures/convert-legacy", {
+			method: "PUT",
+			body: { ...legacy, name: "must use canonical command" }
+		});
+		conflict(wholeDocumentPut, "canonical-command-required");
+	});
+});
