@@ -216,7 +216,7 @@ function normalizeSectionsForConversion(
 	sections: CaptureSection[],
 	byteStream: RawByteRecord[],
 	fallbackFrameSize = 3,
-	generateId: () => string = randomUUID as unknown as () => string
+	generateSectionId: () => string = randomUUID as unknown as () => string
 ): NormalizedSection[] {
 	const firstOffset = byteStream[0]?.rawOffset ?? 0;
 	const lastOffset = byteStream.at(-1)?.rawOffset ?? 0;
@@ -227,7 +227,6 @@ function normalizeSectionsForConversion(
 			const start = Math.max(firstOffset, Math.min(lastOffset, Math.floor(Number(section.start) || firstOffset)));
 			const settings = normalizeSectionSettings(section);
 			byStart.set(start, {
-				id: section.id || generateId(),
 				start,
 				...settings,
 				collapseRuns: Boolean(section.collapseRuns),
@@ -236,7 +235,6 @@ function normalizeSectionsForConversion(
 		});
 	if (!byStart.has(firstOffset)) {
 		byStart.set(firstOffset, {
-			id: generateId(),
 			start: firstOffset,
 			framingMode: "length",
 			frameSize: fallbackFrameSize,
@@ -250,7 +248,10 @@ function normalizeSectionsForConversion(
 	return [...byStart.values()]
 		.sort((a, b) => (a.start as number) - (b.start as number))
 		.map(s => ({
-			id: s.id as string,
+			// Legacy section ids were capture-local. Allocate canonical ids after
+			// section normalization so every materialized profile gets identities
+			// that are independent of the source document.
+			id: generateSectionId(),
 			start: s.start as number,
 			framingMode: s.framingMode as "length" | "marker" | "time",
 			frameSize: s.frameSize as number,
@@ -276,6 +277,7 @@ function signatureForMessage(message: FramedMessage): string {
 
 type ExistingMessage = {
 	id?: string;
+	sectionId?: string;
 	hidden?: boolean;
 	bytes: number[];
 	rawOffsets?: number[];
@@ -487,7 +489,11 @@ function normalizeSessionData(
 	return { byteStream: normalizedStream, sessions };
 }
 
-function normalizeDocumentForConversion(doc: CaptureDocument, generateId: () => string = randomUUID as unknown as () => string): CaptureDocument {
+function normalizeDocumentForConversion(
+	doc: CaptureDocument,
+	generateId: () => string = randomUUID as unknown as () => string,
+	generateSectionId: () => string = generateId
+): CaptureDocument {
 	// Minimal normalization sufficient for verification: ensure byteStream, sections, etc
 	const cloned: CaptureDocument = JSON.parse(JSON.stringify(doc));
 	if (!Array.isArray(cloned.byteStream)) {
@@ -505,7 +511,6 @@ function normalizeDocumentForConversion(doc: CaptureDocument, generateId: () => 
 		const firstOffset = (cloned.byteStream as RawByteRecord[])[0]?.rawOffset ?? 0;
 		cloned.frameSections = [
 			{
-				id: generateId(),
 				start: firstOffset,
 				framingMode: legacyMode,
 				frameSize: normalizeFrameSize(cloned.frameSize),
@@ -534,7 +539,7 @@ function normalizeDocumentForConversion(doc: CaptureDocument, generateId: () => 
 		(cloned.frameSections as CaptureSection[]) || [],
 		cloned.byteStream as RawByteRecord[],
 		normalizeFrameSize(cloned.frameSize),
-		generateId
+		generateSectionId
 	);
 	cloned.frameSections = sections as unknown as CaptureSection[];
 	// Derive messages via materialization (hidden filtered)
@@ -893,12 +898,22 @@ function verifyConversion(
 
 	// Sequence groups are also compared with the original message stream and the
 	// rows read back from canonical storage.
+	// Section ids are intentionally regenerated at the canonical boundary.
+	// Compare pattern membership using the regenerated id for the matching raw
+	// span, otherwise repeated legacy ids across sections would make a valid
+	// conversion look different during verification.
+	const normalizedMessages = (normalized.messages || []) as ExistingMessage[];
+	const normalizedMessageIndex = indexExistingMessages(normalizedMessages);
 	const expectedPatterns = recognizeRepeatedPatterns(
-		sourceMessages.map((m, idx) => ({
-			signature: signatureForMessage(m),
-			originalIndex: idx,
-			sectionId: (m as Record<string, unknown>).sectionId
-		}))
+		sourceMessages.map((message, idx) => {
+			const normalizedMessage =
+				findExistingMessage(normalizedMessageIndex, legacyMessageRawOffsets(message as ExistingMessage)) || normalizedMessages[idx];
+			return {
+				signature: signatureForMessage(message),
+				originalIndex: idx,
+				sectionId: normalizedMessage?.sectionId
+			};
+		})
 	);
 	const seqOk = JSON.stringify(expectedPatterns) === JSON.stringify(persisted.patterns);
 
