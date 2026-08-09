@@ -946,6 +946,12 @@ export function lifecycleForDocument(doc: CaptureDocument): string {
 	return "finalized";
 }
 
+function discardVerifiedCaptureBackup(database: SqliteDatabase, captureId: string): void {
+	// capture_documents remains the UI-compatible JSON source; once canonical
+	// rows are verified, retaining another full JSON copy is unnecessary.
+	database.prepare("DELETE FROM capture_backups WHERE capture_id = @captureId AND verified = 1").run({ captureId });
+}
+
 export function convertCaptureDocumentToCanonical(
 	database: SqliteDatabase,
 	captureId: string,
@@ -970,6 +976,7 @@ export function convertCaptureDocumentToCanonical(
 	// Already converted? Check canonical captures table
 	const existingCanonical = database.prepare("SELECT id FROM captures WHERE id = @id").get({ id: captureId }) as { id: string } | undefined;
 	if (existingCanonical) {
+		discardVerifiedCaptureBackup(database, captureId);
 		return { captureId, ok: true, verified: true, report: null as unknown as VerificationReport };
 	}
 
@@ -1408,6 +1415,7 @@ export function convertCaptureDocumentToCanonical(
 				.run({ id: `conv-${captureId}`, captureId, createdAt: now, updatedAt: now });
 		});
 		transaction();
+		discardVerifiedCaptureBackup(database, captureId);
 		return { captureId, ok: true, verified: true, report };
 	} catch (e) {
 		return { captureId, ok: false, verified: false, report, error: String(e) };
