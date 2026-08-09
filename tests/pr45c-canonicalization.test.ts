@@ -102,7 +102,29 @@ test("canonicalization exposes preflight, recovery JSON, verification, and one i
 		const repeated = await request<JsonRecord>("/api/captures/legacy-1/canonicalization", { method: "POST", body: {} });
 		assert.equal(repeated.status, 200);
 		assert.equal(bodyRecord(repeated.body).id, job.id);
- 	});
+	});
+});
+
+test("canonicalization completes for legacy captures that share a section id", async () => {
+	await withService(async request => {
+		for (const captureId of ["legacy-shared-section-a", "legacy-shared-section-b"]) {
+			const seeded = await request(`/api/captures/${captureId}`, {
+				method: "PUT",
+				body: legacyCapture(captureId)
+			});
+			assert.equal(seeded.status, 200);
+		}
+
+		for (const captureId of ["legacy-shared-section-a", "legacy-shared-section-b"]) {
+			const converted = await request<JsonRecord>(`/api/captures/${captureId}/canonicalization`, {
+				method: "POST",
+				body: {}
+			});
+			assert.equal(converted.status, 200);
+			assert.equal(bodyRecord(converted.body).status, "completed");
+			assert.equal(bodyRecord(converted.body).verified, true);
+		}
+	});
 });
 
 test("recording captures cannot be converted and failed conversion keeps the legacy source for retry", async () => {
