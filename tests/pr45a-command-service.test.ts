@@ -704,3 +704,108 @@ test("retention advances the presentation boundary without deleting acknowledged
 		database.close();
 	}
 });
+
+test("retention prunes only notes whose referenced evidence is outside the retained tail", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		const service = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-09T00:00:00.000Z" });
+		service.createCapture({
+			captureId: "target-aware-retention",
+			inputFormat: "binary",
+			framing: [{ start: 0, framingMode: "length", frameSize: 10 }]
+		});
+		service.startSession({ captureId: "target-aware-retention", sessionId: "initial-session" });
+		service.appendChunk({
+			captureId: "target-aware-retention",
+			sessionId: "initial-session",
+			requestId: "initial-request",
+			sequence: 0,
+			expectedStartOffset: 0,
+			bytes: new Uint8Array(50_000).fill(0x5a)
+		});
+		const finalized = service.finalizeSession({ captureId: "target-aware-retention", sessionId: "initial-session" });
+		const firstFrame = database
+			.prepare("SELECT id FROM materialized_frames WHERE profile_id = @profileId AND ordinal = 0")
+			.get({ profileId: finalized.profileId }) as { id: string };
+		const retainedFrame = database
+			.prepare("SELECT id FROM materialized_frames WHERE profile_id = @profileId AND ordinal = 4000")
+			.get({ profileId: finalized.profileId }) as { id: string };
+
+		service.createNote({
+			captureId: "target-aware-retention",
+			noteId: "old-frame-note",
+			text: "outside frame",
+			target: { kind: "frame", frameId: firstFrame.id }
+		});
+		service.createNote({
+			captureId: "target-aware-retention",
+			noteId: "retained-frame-note",
+			text: "retained frame",
+			target: { kind: "frame", frameId: retainedFrame.id }
+		});
+		service.createNote({
+			captureId: "target-aware-retention",
+			noteId: "old-range-note",
+			text: "outside range",
+			target: { kind: "range", profileId: finalized.profileId, startOrdinal: 0, endOrdinal: 0 }
+		});
+		service.createNote({
+			captureId: "target-aware-retention",
+			noteId: "retained-range-note",
+			text: "retained range",
+			target: { kind: "range", profileId: finalized.profileId, startOrdinal: 4000, endOrdinal: 4000 }
+		});
+
+		const insertCompatibilityNote = database.prepare(
+			`INSERT INTO stable_notes
+			 (id, capture_id, text, created_at, target_kind, sequence_key, start_offset, end_offset, start_row, end_row)
+			 VALUES (@id, @captureId, @text, @createdAt, @targetKind, @sequenceKey, @startOffset, @endOffset, @startRow, @endRow)`
+		);
+		const createdAt = "2026-08-09T00:00:00.000Z";
+		for (const note of [
+			{ id: "old-sequence-note", targetKind: "sequence", startOffset: 0, endOffset: 9 },
+			{ id: "retained-sequence-note", targetKind: "sequence", startOffset: 40_000, endOffset: 40_009 },
+			{ id: "pattern-note", targetKind: "pattern", sequenceKey: "5A×1" },
+			{ id: "legacy-sequence-note", targetKind: "legacy-sequence", startRow: 1, endRow: 1 }
+		]) {
+			insertCompatibilityNote.run({
+				id: note.id,
+				captureId: "target-aware-retention",
+				text: note.id,
+				createdAt,
+				targetKind: note.targetKind,
+				sequenceKey: "sequenceKey" in note ? note.sequenceKey : null,
+				startOffset: "startOffset" in note ? note.startOffset : null,
+				endOffset: "endOffset" in note ? note.endOffset : null,
+				startRow: "startRow" in note ? note.startRow : null,
+				endRow: "endRow" in note ? note.endRow : null
+			});
+		}
+
+		service.startSession({ captureId: "target-aware-retention", sessionId: "retained-session" });
+		const acknowledgement = service.appendChunk({
+			captureId: "target-aware-retention",
+			sessionId: "retained-session",
+			requestId: "retained-request",
+			sequence: 0,
+			expectedStartOffset: 50_000,
+			bytes: new Uint8Array(10).fill(0x33)
+		});
+
+		assert.equal(acknowledgement.nextRawOffset, 50_010);
+		assert.equal(service.getCaptureState("target-aware-retention").retainedStartOffset, 10);
+		assert.deepEqual(
+			(database.prepare("SELECT id FROM stable_notes WHERE capture_id = 'target-aware-retention' ORDER BY id").all() as Array<{ id: string }>).map(row => row.id),
+			[
+				"legacy-sequence-note",
+				"pattern-note",
+				"retained-frame-note",
+				"retained-range-note",
+				"retained-sequence-note"
+			]
+		);
+	} finally {
+		database.close();
+	}
+});
