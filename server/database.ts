@@ -266,7 +266,7 @@ const migrations: Migration[] = [
 				);
 				CREATE INDEX IF NOT EXISTS finalization_jobs_capture_status ON finalization_jobs (capture_id, status);
 
-				-- Migration backup: original JSON retained until verification succeeds
+				-- Reserved migration backup table; capture_documents remains authoritative in PR #24
 				CREATE TABLE IF NOT EXISTS capture_backups (
 					capture_id TEXT PRIMARY KEY NOT NULL,
 					document_json TEXT NOT NULL CHECK (json_valid(document_json)),

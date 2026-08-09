@@ -1291,21 +1291,6 @@ export function convertCaptureDocumentToCanonical(
 			report = verifyConversion(doc, normalized, readPersistedConversion(database, captureId, profileId));
 			if (!report.overallOk) throw new Error(report.details || "canonical conversion verification failed");
 
-			// Retain the original JSON only after the persisted canonical rows have
-			// been read back and verified.
-			database
-				.prepare(
-					`INSERT INTO capture_backups (capture_id, document_json, migrated_at, verified, verification_report_json)
-					 VALUES (@captureId, @documentJson, @migratedAt, 1, @reportJson)
-					 ON CONFLICT (capture_id) DO UPDATE SET verified=1, verification_report_json=excluded.verification_report_json`
-				)
-				.run({
-					captureId,
-					documentJson: row.document_json,
-					migratedAt: now,
-					reportJson: JSON.stringify(report)
-				});
-
 			// stable notes: map capture.notes and annotations
 			const notes = (doc.notes as Array<Record<string, unknown>>) || [];
 			for (const note of notes) {
