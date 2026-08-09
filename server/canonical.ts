@@ -1416,6 +1416,7 @@ export function convertCaptureDocumentToCanonical(
 			discardVerifiedCaptureBackup(database, captureId);
 		});
 		transaction();
+		discardVerifiedCaptureBackup(database, captureId);
 		return { captureId, ok: true, verified: true, report };
 	} catch (e) {
 		return { captureId, ok: false, verified: false, report, error: String(e) };
