@@ -3,6 +3,8 @@ import test from "node:test";
 import { CanonicalCaptureCommandService, CanonicalCaptureIdempotencyConflictError } from "../server/canonical-capture-command-service.ts";
 import { openDatabase } from "../server/database.ts";
 
+const framing = [{ start: 0, framingMode: "length", frameSize: 2, collapseRuns: false, collapsed: false }] as const;
+
 function columns(database: ReturnType<typeof openDatabase>, table: string): Set<string> {
 	return new Set((database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(column => column.name));
 }
@@ -56,6 +58,21 @@ function installCommandSchema(database: ReturnType<typeof openDatabase>): void {
 			updated_at TEXT NOT NULL,
 			last_error TEXT
 		);
+		CREATE TABLE IF NOT EXISTS raw_chunk_requests (
+			capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+			request_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			sequence INTEGER NOT NULL,
+			expected_start_offset INTEGER NOT NULL,
+			payload_hash TEXT NOT NULL,
+			accepted_start_offset INTEGER NOT NULL,
+			accepted_end_offset INTEGER NOT NULL,
+			next_raw_offset INTEGER NOT NULL,
+			next_sequence INTEGER NOT NULL,
+			data_revision INTEGER NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (capture_id, request_id)
+		);
 	`);
 }
 
@@ -69,11 +86,12 @@ test("canonical creation is idempotent by stable request hash and stores ordered
 		});
 		const request = {
 			captureId: "capture-1",
+			framing,
 			name: "Canonical capture",
 			description: "operator notes",
 			controllerView: "RS-485",
 			baudRate: 115200,
-			inputFormat: "hex",
+			inputFormat: "binary",
 			parameters: [
 				{ key: "mode", value: "safe" },
 				{ key: "channel", value: "A" }
@@ -84,6 +102,10 @@ test("canonical creation is idempotent by stable request hash and stores ordered
 		assert.equal(first.captureId, "capture-1");
 		assert.deepEqual(second, first);
 		assert.equal(first.storage.status, "canonical");
+		assert.equal(first.lifecycle, "finalized");
+		assert.ok(first.activeProfile);
+		assert.equal(first.activeProfile?.verified, true);
+		assert.equal(first.draft?.sections[0].framingMode, "length");
 		assert.deepEqual(
 			database.prepare("SELECT position, key_text, value_text FROM capture_parameters ORDER BY position").all(),
 			[
@@ -107,7 +129,7 @@ test("metadata patches increment only metadata revision and replace parameters i
 	installCommandSchema(database);
 	try {
 		const service = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-09T00:00:00.000Z" });
-		const created = service.createCapture({ captureId: "metadata-capture", name: "Before", parameters: [{ key: "one", value: "1" }] });
+		const created = service.createCapture({ captureId: "metadata-capture", framing, inputFormat: "binary", name: "Before", parameters: [{ key: "one", value: "1" }] });
 		const updated = service.patchMetadata({
 			captureId: created.captureId,
 			expectedMetadataRevision: 0,
@@ -116,7 +138,7 @@ test("metadata patches increment only metadata revision and replace parameters i
 				description: "Updated description",
 				controllerView: "controller",
 				baudRate: 9600,
-				inputFormat: "ascii",
+				inputFormat: "binary",
 				parameters: [
 					{ key: "two", value: "2" },
 					{ key: "one", value: "changed" }
@@ -152,7 +174,7 @@ test("sessions are durable, retryable by id, and support repeat recording", () =
 			nowIso: () => "2026-08-09T00:00:00.000Z",
 			generateId: () => `session-${nextId++}`
 		});
-		service.createCapture({ captureId: "session-capture" });
+		service.createCapture({ captureId: "session-capture", framing, inputFormat: "binary" });
 		const first = service.startSession({ captureId: "session-capture", sessionId: "recording-a" });
 		const retry = service.startSession({ captureId: "session-capture", sessionId: "recording-a" });
 		assert.deepEqual(retry, first);
@@ -164,9 +186,105 @@ test("sessions are durable, retryable by id, and support repeat recording", () =
 		database.prepare("UPDATE capture_sessions SET status = 'finalized', finalized_at = @finalizedAt WHERE id = 'recording-a'").run({ finalizedAt: "2026-08-09T00:01:00.000Z" });
 		const second = service.startSession({ captureId: "session-capture" });
 		assert.equal(second.session.ordinal, 1);
-		assert.equal(second.session.id, "session-0");
+		assert.equal(second.session.id, "session-2");
 		assert.equal(second.session.nextRawOffset, 0);
 		assert.equal(service.getCaptureState("session-capture").sessions.length, 2);
+	} finally {
+		database.close();
+	}
+});
+
+test("append flattens segments, preserves byte metadata, and is SHA-256 idempotent", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		const service = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-09T00:00:00.000Z" });
+		service.createCapture({ captureId: "append-capture", framing, inputFormat: "binary" });
+		service.startSession({ captureId: "append-capture", sessionId: "append-session" });
+		const request = {
+			captureId: "append-capture",
+			sessionId: "append-session",
+			requestId: "request-1",
+			sequence: 0,
+			expectedStartOffset: 0,
+			segments: [
+				{ timestamp: 100, direction: "rx", bytes: [0x10, 0x11] },
+				{ timestamp: 120, direction: "tx", bytes: [0x20] }
+			]
+		} as const;
+		const first = service.appendChunk(request);
+		const retry = service.appendChunk(request);
+		assert.equal(first.idempotent, false);
+		assert.equal(retry.idempotent, true);
+		assert.equal(first.acceptedStartOffset, 0);
+		assert.equal(first.acceptedEndOffset, 3);
+		assert.equal(first.nextRawOffset, 3);
+		assert.equal(first.nextSequence, 1);
+		assert.equal(first.dataRevision, 1);
+		assert.equal(retry.dataRevision, first.dataRevision);
+		const chunk = database.prepare("SELECT start_offset, byte_count, bytes, timestamps_json, directions_json, session_ids_json FROM raw_chunks WHERE capture_id = 'append-capture'").get() as {
+			start_offset: number;
+			byte_count: number;
+			bytes: Buffer;
+			timestamps_json: string;
+			directions_json: string;
+			session_ids_json: string;
+		};
+		assert.equal(chunk.start_offset, 0);
+		assert.equal(chunk.byte_count, 3);
+		assert.deepEqual([...chunk.bytes], [0x10, 0x11, 0x20]);
+		assert.deepEqual(JSON.parse(chunk.timestamps_json), [100, 100, 120]);
+		assert.deepEqual(JSON.parse(chunk.directions_json), ["rx", "rx", "tx"]);
+		assert.deepEqual(JSON.parse(chunk.session_ids_json), ["append-session", "append-session", "append-session"]);
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM materialized_frames").get() as { count: number }).count, 0);
+		assert.throws(
+			() => service.appendChunk({ ...request, bytes: [0xff], segments: undefined }),
+			(error: unknown) => error instanceof Error && "code" in error && (error as { code: string }).code === "IDEMPOTENCY_CONFLICT"
+		);
+		assert.throws(
+			() => service.appendChunk({ ...request, sequence: 1, expectedStartOffset: 3 }),
+			(error: unknown) => error instanceof Error && "code" in error && (error as { code: string }).code === "IDEMPOTENCY_CONFLICT"
+		);
+		const retainedAppend = service.appendChunk({
+			captureId: "append-capture",
+			sessionId: "append-session",
+			requestId: "request-2",
+			sequence: 1,
+			expectedStartOffset: 3,
+			bytes: new Uint8Array(50_000)
+		});
+		assert.equal(retainedAppend.dataRevision, 2);
+		assert.equal(service.getCaptureState("append-capture").retainedStartOffset, 3);
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM raw_chunks WHERE capture_id = 'append-capture'").get() as { count: number }).count, 2);
+		assert.throws(
+			() => service.appendChunk({ ...request, segments: [{ timestamp: 100, direction: "invalid", bytes: [1] }] }),
+			(error: unknown) => error instanceof Error && "code" in error && (error as { code: string }).code === "VALIDATION_ERROR"
+		);
+		assert.throws(
+			() => service.appendChunk({ ...request, requestId: "request-2", sequence: 3 }),
+			(error: unknown) => error instanceof Error && "code" in error && (error as { code: string }).code === "IDEMPOTENCY_CONFLICT"
+		);
+		assert.equal(service.getCaptureState("append-capture").dataRevision, 2);
+	} finally {
+		database.close();
+	}
+});
+
+test("commands reject incidental canonical rows when storage authority is failed", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		const service = new CanonicalCaptureCommandService(database);
+		service.createCapture({ captureId: "failed-authority", framing, inputFormat: "binary" });
+		database.prepare("UPDATE capture_storage SET status = 'canonicalization-failed', last_error = 'legacy source retained' WHERE capture_id = 'failed-authority'").run();
+		for (const command of [
+			() => service.patchMetadata({ captureId: "failed-authority", patch: { name: "blocked" } }),
+			() => service.startSession({ captureId: "failed-authority" }),
+			() => service.appendChunk({ captureId: "failed-authority", sessionId: "missing", requestId: "request", sequence: 0, expectedStartOffset: 0, bytes: [1] })
+		]) {
+			assert.throws(command, (error: unknown) => error instanceof Error && "details" in error && (error as { details: { status?: string } }).details.status === "canonicalization-failed");
+		}
+		assert.equal(service.getCaptureState("failed-authority").storage.status, "canonicalization-failed");
 	} finally {
 		database.close();
 	}

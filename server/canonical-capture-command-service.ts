@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { SqliteDatabase } from "./database.ts";
+import { markerBytes as parseMarkerBytes } from "../src/domain/framing.ts";
 
 export const CANONICAL_STORAGE_STATUS = "canonical" as const;
 export const CANONICALIZATION_FAILED_STORAGE_STATUS = "canonicalization-failed" as const;
@@ -73,12 +74,13 @@ export type CreateCaptureRequest = Readonly<{
 	captureId?: string;
 	id?: string;
 	requestHash?: string;
+	framing: readonly FramingSectionRequest[] | Readonly<{ sections: readonly FramingSectionRequest[] }>;
 	name?: string;
 	description?: string;
 	controllerView?: string;
 	view?: string;
 	baudRate?: number;
-	inputFormat?: string;
+	inputFormat: "binary";
 	folderId?: string | null;
 	parameters?: readonly OrderedCaptureParameter[];
 	}>;
@@ -89,7 +91,7 @@ export type CaptureMetadataPatch = Readonly<{
 	controllerView?: string;
 	view?: string;
 	baudRate?: number;
-	inputFormat?: string;
+	inputFormat?: "binary";
 	folderId?: string | null;
 	parameters?: readonly OrderedCaptureParameter[];
 }>;
@@ -136,9 +138,10 @@ export type StartSessionResponse = Readonly<{
 
 export type RawChunkSegment = Readonly<{
 	bytes: readonly number[] | Uint8Array | Buffer;
+	timestamp?: number;
+	direction?: string;
 	timestamps?: readonly number[];
 	directions?: readonly string[];
-	direction?: string;
 	sessionIds?: readonly (string | null | undefined)[];
 	sessionId?: string | null;
 }>;
@@ -484,11 +487,65 @@ function captureCreationHash(request: CreateCaptureRequest, captureId: string): 
 			description: String(request.description ?? ""),
 			controllerView: String(request.controllerView ?? request.view ?? ""),
 			baudRate: request.baudRate === undefined ? 115200 : request.baudRate,
-			inputFormat: String(request.inputFormat ?? ""),
+			inputFormat: request.inputFormat,
+			framing: request.framing,
 			folderId: request.folderId ?? null,
 			parameters: normalizedParameters(request.parameters)
 		})
 	);
+}
+
+function framingSectionsFrom(value: CreateCaptureRequest["framing"] | readonly FramingSectionRequest[]): readonly FramingSectionRequest[] {
+	if (Array.isArray(value)) return value;
+	if (isRecord(value) && Array.isArray(value.sections)) return value.sections as readonly FramingSectionRequest[];
+	throw new CanonicalCaptureValidationError("framing sections are required");
+}
+
+function normalizeFramingSections(
+	value: CreateCaptureRequest["framing"] | readonly FramingSectionRequest[],
+	generateId: () => string
+): FramingSectionRequest[] {
+	const sections = framingSectionsFrom(value);
+	if (!sections.length) throw new CanonicalCaptureValidationError("at least one framing section is required");
+	let previousStart = -1;
+	return sections.map((section, index) => {
+		if (!isRecord(section)) throw new CanonicalCaptureValidationError("framing section must be an object", { index });
+		const start = nonNegativeInteger(section.start, `framing[${index}].start`);
+		if (start < previousStart) throw new CanonicalCaptureValidationError("framing sections must be ordered by start", { index });
+		if (index === 0 && start !== 0) throw new CanonicalCaptureValidationError("the first framing section must start at raw offset 0");
+		previousStart = start;
+		const framingMode = section.framingMode;
+		if (framingMode !== "length" && framingMode !== "marker" && framingMode !== "time") {
+			throw new CanonicalCaptureValidationError("framing mode must be length, marker, or time", { index, framingMode });
+		}
+		const frameSize = section.frameSize === undefined ? undefined : nonNegativeInteger(section.frameSize, `framing[${index}].frameSize`);
+		const frameTimeGap = section.frameTimeGap === undefined ? undefined : Number(section.frameTimeGap);
+		if (framingMode === "length" && (!frameSize || frameSize < 1)) {
+			throw new CanonicalCaptureValidationError("length framing requires a positive frameSize", { index });
+		}
+		if (framingMode === "time" && (frameTimeGap === undefined || !Number.isFinite(frameTimeGap) || frameTimeGap <= 0)) {
+			throw new CanonicalCaptureValidationError("time framing requires a positive frameTimeGap", { index });
+		}
+		const frameMarker = String(section.frameMarker ?? "").trim();
+		if (framingMode === "marker" && !parseMarkerBytes(frameMarker).length) {
+			throw new CanonicalCaptureValidationError("marker framing requires frameMarker bytes", { index });
+		}
+		const markerPosition = section.markerPosition ?? "start";
+		if (markerPosition !== "start" && markerPosition !== "end") {
+			throw new CanonicalCaptureValidationError("markerPosition must be start or end", { index });
+		}
+		return {
+			id: requiredString(section.id ?? generateId(), `framing[${index}].id`),
+			start,
+			framingMode,
+			...(frameSize === undefined ? {} : { frameSize }),
+			frameMarker,
+			markerPosition,
+			...(frameTimeGap === undefined ? {} : { frameTimeGap }),
+			collapseRuns: Boolean(section.collapseRuns),
+			collapsed: Boolean(section.collapsed)
+		};
+	});
 }
 
 function isoFrom(value: string | number | undefined, fallback: string): string {
@@ -535,6 +592,135 @@ type NoteRow = {
 	end_row: number | null;
 };
 
+type FlattenedChunk = {
+	bytes: Buffer;
+	timestamps: number[];
+	directions: string[];
+	sessionIds: Array<string | null>;
+};
+
+function numbersFromBytes(value: readonly number[] | Uint8Array | Buffer, field: string): number[] {
+	const values = Buffer.isBuffer(value) ? [...value] : Array.from(value as ArrayLike<number>);
+	return values.map((item, index) => {
+		const byte = Number(item);
+		if (!Number.isInteger(byte) || byte < 0 || byte > 255) {
+			throw new CanonicalCaptureValidationError(`${field}[${index}] must be a byte`, { field, index, value: item });
+		}
+		return byte;
+	});
+}
+
+function normalizedDirection(value: unknown, field: string): "rx" | "tx" {
+	if (value !== "rx" && value !== "tx") throw new CanonicalCaptureValidationError(`${field} must be rx or tx`, { field, value });
+	return value;
+}
+
+function segmentFrom(value: unknown, index: number): RawChunkSegment {
+	if (!isRecord(value) || value.bytes === undefined) {
+		throw new CanonicalCaptureValidationError(`segments[${index}] must contain bytes`, { index });
+	}
+	return value as unknown as RawChunkSegment;
+}
+
+function flattenChunkPayload(request: AppendChunkRequest): FlattenedChunk {
+	let segments: RawChunkSegment[] = [];
+	let fallbackBytes: readonly number[] | Uint8Array | Buffer | undefined;
+	let fallbackTimestamps: readonly number[] | undefined;
+	let fallbackDirections: readonly string[] | undefined;
+	let fallbackSessionIds: readonly (string | null | undefined)[] | undefined;
+	if (request.segments !== undefined) {
+		segments = request.segments.map(segmentFrom);
+	} else if (request.payload !== undefined) {
+		if (Array.isArray(request.payload)) {
+			if (request.payload.length === 0 || typeof request.payload[0] === "number") fallbackBytes = request.payload as readonly number[];
+			else segments = request.payload.map(segmentFrom);
+		} else if (isRecord(request.payload) && request.payload.segments !== undefined) {
+			segments = (request.payload.segments as readonly unknown[]).map(segmentFrom);
+			fallbackBytes = request.payload.bytes as readonly number[] | Uint8Array | Buffer | undefined;
+			fallbackTimestamps = request.payload.timestamps as readonly number[] | undefined;
+			fallbackDirections = request.payload.directions as readonly string[] | undefined;
+			fallbackSessionIds = request.payload.sessionIds as readonly (string | null | undefined)[] | undefined;
+		} else if (isRecord(request.payload) && request.payload.bytes !== undefined) {
+			fallbackBytes = request.payload.bytes as readonly number[] | Uint8Array | Buffer;
+			fallbackTimestamps = request.payload.timestamps as readonly number[] | undefined;
+			fallbackDirections = request.payload.directions as readonly string[] | undefined;
+			fallbackSessionIds = request.payload.sessionIds as readonly (string | null | undefined)[] | undefined;
+		} else {
+			fallbackBytes = request.payload as readonly number[] | Uint8Array | Buffer;
+		}
+	} else if (request.bytes !== undefined) {
+		fallbackBytes = request.bytes;
+		fallbackTimestamps = request.timestamps;
+		fallbackDirections = request.directions;
+		fallbackSessionIds = request.sessionIds;
+	}
+	if (fallbackBytes !== undefined) {
+		segments.push({ bytes: fallbackBytes, timestamps: fallbackTimestamps, directions: fallbackDirections, sessionIds: fallbackSessionIds });
+	}
+	if (!segments.length) throw new CanonicalCaptureValidationError("append payload must contain at least one segment");
+
+	const bytes: number[] = [];
+	const timestamps: number[] = [];
+	const directions: string[] = [];
+	const sessionIds: Array<string | null> = [];
+	segments.forEach((segment, segmentIndex) => {
+		const segmentBytes = numbersFromBytes(segment.bytes, `segments[${segmentIndex}].bytes`);
+		const segmentTimestamps = segment.timestamps === undefined
+			? segment.timestamp === undefined
+				? []
+				: segmentBytes.map(() => Number(segment.timestamp))
+			: segment.timestamps.map(Number);
+		const segmentDirections = segment.directions === undefined
+			? segment.direction === undefined
+				? []
+				: segmentBytes.map(() => normalizedDirection(segment.direction, `segments[${segmentIndex}].direction`))
+			: segment.directions.map((direction, index) => normalizedDirection(direction, `segments[${segmentIndex}].directions[${index}]`));
+		const segmentSessionIds = segment.sessionIds === undefined ? [] : segment.sessionIds.map(sessionId => sessionId ? String(sessionId) : null);
+		if (segmentTimestamps.length && segmentTimestamps.length !== segmentBytes.length) {
+			throw new CanonicalCaptureValidationError("segment timestamps must match segment byte count", { segmentIndex });
+		}
+		if (segmentDirections.length && segmentDirections.length !== segmentBytes.length) {
+			throw new CanonicalCaptureValidationError("segment directions must match segment byte count", { segmentIndex });
+		}
+		if (segmentSessionIds.length && segmentSessionIds.length !== segmentBytes.length) {
+			throw new CanonicalCaptureValidationError("segment sessionIds must match segment byte count", { segmentIndex });
+		}
+		segmentBytes.forEach((byte, index) => {
+			const timestamp = segmentTimestamps[index] ?? 0;
+			if (!Number.isFinite(timestamp)) throw new CanonicalCaptureValidationError("segment timestamp must be finite", { segmentIndex, index });
+			bytes.push(byte);
+			timestamps.push(timestamp);
+			directions.push(segmentDirections[index] || "rx");
+			sessionIds.push(segmentSessionIds[index] ?? (segment.sessionId ? String(segment.sessionId) : null));
+		});
+	});
+	if (!bytes.length) throw new CanonicalCaptureValidationError("append payload must contain at least one byte");
+	return { bytes: Buffer.from(bytes), timestamps, directions, sessionIds };
+}
+
+function chunkPayloadHash(payload: FlattenedChunk): string {
+	return sha256Hex(
+		stableSerialize({
+			bytes: [...payload.bytes],
+			timestamps: payload.timestamps,
+			directions: payload.directions,
+			sessionIds: payload.sessionIds
+		})
+	);
+}
+
+function appendSemanticHash(captureId: string, sessionId: string, sequence: number, expectedStartOffset: number, payload: FlattenedChunk): string {
+	return sha256Hex(
+		stableSerialize({
+			captureId,
+			sessionId,
+			sequence,
+			expectedStartOffset,
+			payloadHash: chunkPayloadHash(payload)
+		})
+	);
+}
+
 function noteTargetFromRow(row: NoteRow): CanonicalNoteTarget {
 	if (row.target_kind === "byte") return { kind: "byte", rawOffset: row.raw_offset ?? 0 };
 	if (row.target_kind === "frame") {
@@ -574,14 +760,31 @@ export class CanonicalCaptureCommandService {
 		this.generateId = dependencies.generateId ?? randomUUID;
 	}
 
+	private requireCanonicalStorage(captureId: string): void {
+		const row = this.database
+			.prepare("SELECT status FROM capture_storage WHERE capture_id = @captureId")
+			.get({ captureId }) as { status: string } | undefined;
+		if (!row || row.status !== CANONICAL_STORAGE_STATUS) {
+			throw new CanonicalCaptureConflictError("capture storage is not canonical", {
+				captureId,
+				status: row?.status ?? null,
+				requiredStatus: CANONICAL_STORAGE_STATUS
+			});
+		}
+	}
+
 	createCapture(request: CreateCaptureRequest): CaptureState {
 		const captureId = normalizedCaptureId(request, this.generateId);
+		if (request.inputFormat !== "binary") {
+			throw new CanonicalCaptureValidationError("inputFormat must be exactly binary", { inputFormat: request.inputFormat });
+		}
+		const framingSections = normalizeFramingSections(request.framing, this.generateId);
 		const requestHash = captureCreationHash(request, captureId);
 		const name = String(request.name ?? "Untitled capture");
 		const description = String(request.description ?? "");
 		const controllerView = String(request.controllerView ?? request.view ?? "");
 		const baudRate = request.baudRate === undefined ? 115200 : optionalPositiveNumber(request.baudRate, "baudRate");
-		const inputFormat = String(request.inputFormat ?? "");
+		const inputFormat = request.inputFormat;
 		const folderId = request.folderId === undefined ? null : optionalString(request.folderId);
 		const parameters = normalizedParameters(request.parameters);
 		const now = this.nowIso();
@@ -619,7 +822,7 @@ export class CanonicalCaptureCommandService {
 					 (id, name, description, controller_view, baud_rate, input_format, lifecycle, byte_count,
 					  created_at, updated_at, folder_id, data_revision, metadata_revision, content_revision,
 					  retained_start_offset, create_request_hash)
-					 VALUES (@id, @name, @description, @controllerView, @baudRate, @inputFormat, 'stopped', 0,
+					 VALUES (@id, @name, @description, @controllerView, @baudRate, @inputFormat, 'finalized', 0,
 					  @createdAt, @updatedAt, @folderId, 0, 0, 0, 0, @requestHash)`
 				)
 				.run({
@@ -640,6 +843,47 @@ export class CanonicalCaptureCommandService {
 			parameters.forEach((parameter, position) =>
 				insertParameter.run({ captureId, position, keyText: parameter.key, valueText: parameter.value })
 			);
+			const profileId = requiredString(this.generateId(), "profileId");
+			this.database
+				.prepare(
+					`INSERT INTO framing_profiles
+					 (id, capture_id, version, algorithm_version, is_active, created_at, updated_at,
+					  source_data_revision, retained_start_offset, verified)
+					 VALUES (@id, @captureId, 1, 1, 1, @createdAt, @updatedAt, 0, 0, 1)`
+				)
+				.run({ id: profileId, captureId, createdAt: now, updatedAt: now });
+			const insertSection = this.database.prepare(
+				`INSERT INTO framing_sections
+				 (id, profile_id, capture_id, start_offset, position, framing_mode, frame_length,
+				  marker_bytes, marker_position, time_gap_ms, collapse_runs, collapsed)
+				 VALUES (@id, @profileId, @captureId, @startOffset, @position, @framingMode,
+				  @frameLength, @markerBytes, @markerPosition, @timeGapMs, @collapseRuns, @collapsed)`
+			);
+			framingSections.forEach((section, position) =>
+				insertSection.run({
+					id: section.id,
+					profileId,
+					captureId,
+					startOffset: section.start,
+					position,
+					framingMode: section.framingMode,
+					frameLength: section.framingMode === "length" ? section.frameSize : null,
+					markerBytes: section.framingMode === "marker" ? JSON.stringify(parseMarkerBytes(section.frameMarker)) : null,
+					markerPosition: section.framingMode === "marker" ? section.markerPosition : null,
+					timeGapMs: section.framingMode === "time" ? section.frameTimeGap : null,
+					collapseRuns: section.collapseRuns ? 1 : 0,
+					collapsed: section.collapsed ? 1 : 0
+				})
+			);
+			this.database
+				.prepare("UPDATE captures SET active_framing_profile_id = @profileId WHERE id = @captureId")
+				.run({ captureId, profileId });
+			this.database
+				.prepare(
+					`INSERT INTO framing_drafts (capture_id, revision, sections_json, updated_at)
+					 VALUES (@captureId, 0, @sectionsJson, @updatedAt)`
+				)
+				.run({ captureId, sectionsJson: JSON.stringify(framingSections), updatedAt: now });
 			this.database
 				.prepare(
 					`INSERT INTO capture_storage (capture_id, status, updated_at, last_error)
@@ -869,10 +1113,7 @@ export class CanonicalCaptureCommandService {
 					}
 				| undefined;
 			if (!row) throw new CanonicalCaptureNotFoundError(captureId);
-			const storage = this.database
-				.prepare("SELECT status FROM capture_storage WHERE capture_id = @captureId")
-				.get({ captureId }) as { status: string } | undefined;
-			if (!storage) throw new CanonicalCaptureConflictError("capture storage status is not explicit", { captureId });
+			this.requireCanonicalStorage(captureId);
 			if (expectedRevision !== undefined && row.metadata_revision !== expectedRevision) {
 				throw new CanonicalCaptureConflictError("metadata revision does not match", {
 					captureId,
@@ -895,7 +1136,12 @@ export class CanonicalCaptureCommandService {
 			values.controllerView = String(patch.controllerView ?? patch.view ?? "");
 		}
 		if (Object.prototype.hasOwnProperty.call(patch, "baudRate")) values.baudRate = optionalPositiveNumber(patch.baudRate, "baudRate");
-		if (Object.prototype.hasOwnProperty.call(patch, "inputFormat")) values.inputFormat = String(patch.inputFormat ?? "");
+		if (Object.prototype.hasOwnProperty.call(patch, "inputFormat")) {
+			if (patch.inputFormat !== "binary") {
+				throw new CanonicalCaptureValidationError("inputFormat must be exactly binary", { inputFormat: patch.inputFormat });
+			}
+			values.inputFormat = patch.inputFormat;
+		}
 		if (Object.prototype.hasOwnProperty.call(patch, "folderId")) values.folderId = optionalString(patch.folderId);
 
 		this.database
@@ -935,10 +1181,7 @@ export class CanonicalCaptureCommandService {
 				.prepare("SELECT byte_count, data_revision FROM captures WHERE id = @captureId")
 				.get({ captureId }) as { byte_count: number; data_revision: number } | undefined;
 			if (!capture) throw new CanonicalCaptureNotFoundError(captureId);
-			const storage = this.database
-				.prepare("SELECT status FROM capture_storage WHERE capture_id = @captureId")
-				.get({ captureId }) as { status: string } | undefined;
-			if (!storage) throw new CanonicalCaptureConflictError("capture storage status is not explicit", { captureId });
+			this.requireCanonicalStorage(captureId);
 
 			if (requestedSessionId) {
 				const existing = this.database
@@ -1003,8 +1246,206 @@ export class CanonicalCaptureCommandService {
 		};
 	}
 
-	appendChunk(_request: AppendChunkRequest): AppendChunkResponse {
-		throw new Error("CanonicalCaptureCommandService.appendChunk is not implemented");
+	appendChunk(request: AppendChunkRequest): AppendChunkResponse {
+		const captureId = requiredString(request.captureId, "captureId");
+		const sessionId = requiredString(request.sessionId, "sessionId");
+		const requestId = requiredString(request.requestId, "requestId");
+		const sequence = nonNegativeInteger(request.sequence, "sequence");
+		const expectedStartOffset = nonNegativeInteger(request.expectedStartOffset, "expectedStartOffset");
+		const expectedDataRevision = request.expectedDataRevision === undefined
+			? undefined
+			: nonNegativeInteger(request.expectedDataRevision, "expectedDataRevision");
+		const flattened = flattenChunkPayload(request);
+		if (flattened.sessionIds.some(value => value !== null && value !== sessionId)) {
+			throw new CanonicalCaptureValidationError("segment session id must match request session id", { sessionId });
+		}
+		flattened.sessionIds = flattened.sessionIds.map(() => sessionId);
+		const payloadHash = appendSemanticHash(captureId, sessionId, sequence, expectedStartOffset, flattened);
+		const transaction = this.database.transaction(() => {
+			const existingRequest = this.database
+				.prepare(
+					`SELECT request_id, session_id, sequence, expected_start_offset, payload_hash,
+							accepted_start_offset, accepted_end_offset, next_raw_offset, next_sequence, data_revision
+					 FROM raw_chunk_requests WHERE capture_id = @captureId AND request_id = @requestId`
+				)
+				.get({ captureId, requestId }) as
+				| {
+						request_id: string;
+						session_id: string;
+						sequence: number;
+						expected_start_offset: number;
+						payload_hash: string;
+						accepted_start_offset: number;
+						accepted_end_offset: number;
+						next_raw_offset: number;
+						next_sequence: number;
+						data_revision: number;
+					}
+				| undefined;
+			if (existingRequest) {
+				if (existingRequest.payload_hash !== payloadHash) {
+					throw new CanonicalCaptureIdempotencyConflictError("append request id was reused with a different payload", {
+						captureId,
+						requestId,
+						existingPayloadHash: existingRequest.payload_hash,
+						payloadHash,
+						existingSessionId: existingRequest.session_id,
+						existingSequence: existingRequest.sequence,
+						existingExpectedStartOffset: existingRequest.expected_start_offset,
+						requestedSessionId: sessionId,
+						requestedSequence: sequence,
+						requestedExpectedStartOffset: expectedStartOffset
+					});
+				}
+				return {
+					captureId,
+					sessionId: existingRequest.session_id,
+					requestId,
+					sequence: existingRequest.sequence,
+					payloadHash,
+					acceptedStartOffset: existingRequest.accepted_start_offset,
+					acceptedEndOffset: existingRequest.accepted_end_offset,
+					nextRawOffset: existingRequest.next_raw_offset,
+					nextSequence: existingRequest.next_sequence,
+					dataRevision: existingRequest.data_revision,
+					idempotent: true
+				} satisfies AppendChunkResponse;
+			}
+
+			const capture = this.database
+				.prepare("SELECT byte_count, data_revision, retained_start_offset FROM captures WHERE id = @captureId")
+				.get({ captureId }) as { byte_count: number; data_revision: number; retained_start_offset: number } | undefined;
+			if (!capture) throw new CanonicalCaptureNotFoundError(captureId);
+			this.requireCanonicalStorage(captureId);
+			if (expectedDataRevision !== undefined && expectedDataRevision !== capture.data_revision) {
+				throw new CanonicalCaptureConflictError("data revision does not match", {
+					captureId,
+					expectedDataRevision,
+					actualDataRevision: capture.data_revision
+				});
+			}
+			const session = this.database
+				.prepare(
+					"SELECT status, next_chunk_sequence, next_raw_offset, first_received_at, last_received_at FROM capture_sessions WHERE capture_id = @captureId AND id = @sessionId"
+				)
+				.get({ captureId, sessionId }) as
+				| {
+						status: string;
+						next_chunk_sequence: number;
+						next_raw_offset: number;
+						first_received_at: number | null;
+						last_received_at: number | null;
+					}
+				| undefined;
+			if (!session) throw new CanonicalCaptureNotFoundError(`session ${sessionId} in capture ${captureId}`);
+			if (session.status !== "recording") {
+				throw new CanonicalCaptureConflictError("session is not recording", { captureId, sessionId, status: session.status });
+			}
+			const expectedSequenceMatches = session.next_chunk_sequence === sequence;
+		const expectedOffsetMatches = session.next_raw_offset === expectedStartOffset;
+		if (!expectedSequenceMatches || !expectedOffsetMatches) {
+				throw new CanonicalCaptureConflictError("append sequence or offset does not match durable session state", {
+					captureId,
+					sessionId,
+					expectedSequence: sequence,
+					actualSequence: session.next_chunk_sequence,
+					expectedStartOffset,
+					actualStartOffset: session.next_raw_offset
+				});
+			}
+
+			const acceptedStartOffset = expectedStartOffset;
+			const acceptedEndOffset = acceptedStartOffset + flattened.bytes.length;
+			const nextRawOffset = acceptedEndOffset;
+			const nextSequence = sequence + 1;
+			const chunkIndexRow = this.database
+				.prepare("SELECT COALESCE(MAX(chunk_index), -1) AS chunk_index FROM raw_chunks WHERE capture_id = @captureId")
+				.get({ captureId }) as { chunk_index: number };
+			this.database
+				.prepare(
+					`INSERT INTO raw_chunks
+					 (capture_id, chunk_index, start_offset, byte_count, bytes, timestamps_json, directions_json,
+					  hidden_json, session_id, session_ids_json)
+					 VALUES (@captureId, @chunkIndex, @startOffset, @byteCount, @bytes, @timestampsJson,
+					  @directionsJson, @hiddenJson, @sessionId, @sessionIdsJson)`
+				)
+				.run({
+					captureId,
+					chunkIndex: chunkIndexRow.chunk_index + 1,
+					startOffset: acceptedStartOffset,
+					byteCount: flattened.bytes.length,
+					bytes: flattened.bytes,
+					timestampsJson: JSON.stringify(flattened.timestamps),
+					directionsJson: JSON.stringify(flattened.directions),
+					hiddenJson: JSON.stringify(Array.from({ length: flattened.bytes.length }, () => false)),
+					sessionId,
+					sessionIdsJson: JSON.stringify(flattened.sessionIds)
+				});
+			const nextDataRevision = capture.data_revision + 1;
+			const retainedStartOffset = Math.max(capture.retained_start_offset, Math.max(0, nextRawOffset - CANONICAL_RETENTION_LIMIT));
+			const receivedTimestamps = flattened.timestamps.filter((_, index) => flattened.directions[index] !== "tx");
+			const firstReceivedAt = receivedTimestamps.length
+				? Math.min(session.first_received_at ?? Number.POSITIVE_INFINITY, ...receivedTimestamps)
+				: session.first_received_at;
+			const lastReceivedAt = receivedTimestamps.length
+				? Math.max(session.last_received_at ?? Number.NEGATIVE_INFINITY, ...receivedTimestamps)
+				: session.last_received_at;
+			this.database
+				.prepare(
+					`INSERT INTO raw_chunk_requests
+					 (capture_id, request_id, session_id, sequence, expected_start_offset, payload_hash,
+					  accepted_start_offset, accepted_end_offset, next_raw_offset, next_sequence, data_revision, created_at)
+					 VALUES (@captureId, @requestId, @sessionId, @sequence, @expectedStartOffset, @payloadHash,
+					  @acceptedStartOffset, @acceptedEndOffset, @nextRawOffset, @nextSequence, @dataRevision, @createdAt)`
+				)
+				.run({
+					captureId,
+					requestId,
+					sessionId,
+					sequence,
+					expectedStartOffset,
+					payloadHash,
+					acceptedStartOffset,
+					acceptedEndOffset,
+					nextRawOffset,
+					nextSequence,
+					dataRevision: nextDataRevision,
+					createdAt: this.nowIso()
+				});
+			this.database
+				.prepare(
+					`UPDATE capture_sessions
+					 SET next_chunk_sequence = @nextSequence, next_raw_offset = @nextRawOffset,
+						 first_received_at = @firstReceivedAt, last_received_at = @lastReceivedAt
+					 WHERE capture_id = @captureId AND id = @sessionId`
+				)
+				.run({ captureId, sessionId, nextSequence, nextRawOffset, firstReceivedAt, lastReceivedAt });
+			this.database
+				.prepare(
+					`UPDATE captures
+					 SET byte_count = byte_count + @byteCount, data_revision = @dataRevision,
+						 retained_start_offset = @retainedStartOffset, updated_at = @updatedAt
+					 WHERE id = @captureId`
+				)
+				.run({ captureId, byteCount: flattened.bytes.length, dataRevision: nextDataRevision, retainedStartOffset, updatedAt: this.nowIso() });
+			this.database
+				.prepare("UPDATE capture_storage SET updated_at = @updatedAt, last_error = NULL WHERE capture_id = @captureId")
+				.run({ captureId, updatedAt: this.nowIso() });
+			return {
+				captureId,
+				sessionId,
+				requestId,
+				sequence,
+				payloadHash,
+				acceptedStartOffset,
+				acceptedEndOffset,
+				nextRawOffset,
+				nextSequence,
+				dataRevision: nextDataRevision,
+				idempotent: false
+			} satisfies AppendChunkResponse;
+		});
+		return transaction() as AppendChunkResponse;
 	}
 
 	finalizeSession(_request: FinalizeSessionRequest): FinalizeSessionResponse {
