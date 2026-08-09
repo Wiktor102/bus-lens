@@ -83,6 +83,13 @@ type CaptureWriteQueue = {
 	running: Promise<void> | null;
 };
 
+type PatternRemarkWriteQueue = {
+	pendingText: string | undefined;
+	noteId?: string;
+	retries: number;
+	running: Promise<void> | null;
+};
+
 function formatTime(ms: number): string {
 	return new Date(ms).toLocaleTimeString("en-GB", {
 		hour: "2-digit",
@@ -96,6 +103,7 @@ function formatTime(ms: number): string {
 export function createCaptureController(dependencies: CaptureControllerDependencies) {
 	const state = dependencies.state as ActiveAppState;
 	const captureWriteQueues = new Map<string, CaptureWriteQueue>();
+	const patternRemarkWriteQueues = new Map<string, Map<string, PatternRemarkWriteQueue>>();
 
 	function capture(): ActiveCapture | undefined {
 		return dependencies.capture() as ActiveCapture | undefined;
@@ -250,6 +258,122 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		}
 	}
 
+	function patternRemarkQueuesForCapture(captureId: string): Map<string, PatternRemarkWriteQueue> {
+		const queues = patternRemarkWriteQueues.get(captureId) || new Map<string, PatternRemarkWriteQueue>();
+		patternRemarkWriteQueues.set(captureId, queues);
+		return queues;
+	}
+
+	function patternRemarkQueue(captureId: string, patternKey: string, noteId?: string): PatternRemarkWriteQueue {
+		const queues = patternRemarkQueuesForCapture(captureId);
+		const existing = queues.get(patternKey);
+		if (existing) {
+			if (!existing.noteId && noteId) existing.noteId = noteId;
+			return existing;
+		}
+		const queue: PatternRemarkWriteQueue = { pendingText: undefined, noteId, retries: 0, running: null };
+		queues.set(patternKey, queue);
+		return queue;
+	}
+
+	async function writePatternRemark(
+		captureId: string,
+		patternKey: string,
+		queue: PatternRemarkWriteQueue,
+		text: string
+	): Promise<void> {
+		if (dependencies.waitForCaptureWrite) await dependencies.waitForCaptureWrite(captureId);
+		const item = captureById(captureId);
+		if (!item || !isCanonical(item)) return;
+		const target: CanonicalNoteTarget = { kind: "pattern", sequenceKey: patternKey };
+		if (text) {
+			const result = queue.noteId
+				? await dependencies.captureWriter!.updateNote({ captureId: item.id, noteId: queue.noteId, text, target })
+				: await dependencies.captureWriter!.createNote({ captureId: item.id, text, target });
+			queue.noteId = result.note.id;
+			const current = captureById(captureId);
+			if (current) {
+				const optimistic = current.patternRemarks[patternKey];
+				if (optimistic && typeof optimistic === "object") optimistic.noteId = result.note.id;
+				current.contentRevision = result.contentRevision;
+			}
+		} else if (queue.noteId) {
+			await dependencies.captureWriter!.deleteNote({ captureId: item.id, noteId: queue.noteId });
+			queue.noteId = undefined;
+		}
+	}
+
+	async function recoverPatternRemarkWrite(
+		captureId: string,
+		patternKey: string,
+		queue: PatternRemarkWriteQueue,
+		desiredText: string,
+		error: unknown
+	): Promise<void> {
+		const latestText = queue.pendingText ?? desiredText;
+		if (queue.retries >= 1 || !dependencies.refreshCapture) {
+			queue.pendingText = undefined;
+			queue.retries = 0;
+			reportFailure(captureId, error);
+			dependencies.renderMessages();
+			return;
+		}
+		queue.pendingText = latestText;
+		queue.retries += 1;
+		try {
+			await dependencies.refreshCapture(captureId);
+			const current = captureById(captureId);
+			const loaded = current?.patternRemarks?.[patternKey];
+			const loadedValue = loaded && typeof loaded === "object" ? loaded as PatternRemarkValue : undefined;
+			queue.noteId = loadedValue?.noteId ? String(loadedValue.noteId) : undefined;
+			if (current) {
+				if (latestText) {
+					current.patternRemarks[patternKey] = {
+						text: latestText,
+						updatedAt: Date.now(),
+						...(queue.noteId ? { noteId: queue.noteId } : {})
+					};
+				} else delete current.patternRemarks[patternKey];
+			}
+			dependencies.renderMessages();
+		} catch (refreshError) {
+			queue.pendingText = undefined;
+			queue.retries = 0;
+			reportFailure(captureId, refreshError);
+			dependencies.renderMessages();
+		}
+	}
+
+	function drainPatternRemarkWrites(captureId: string, patternKey: string, queue: PatternRemarkWriteQueue): Promise<void> {
+		if (queue.running) return queue.running;
+		queue.running = (async () => {
+			while (queue.pendingText !== undefined) {
+				const text = queue.pendingText;
+				queue.pendingText = undefined;
+				try {
+					await writePatternRemark(captureId, patternKey, queue, text);
+					queue.retries = 0;
+				} catch (error) {
+					await recoverPatternRemarkWrite(captureId, patternKey, queue, text, error);
+				}
+			}
+		})().finally(() => {
+			queue.running = null;
+			const queues = patternRemarkWriteQueues.get(captureId);
+			if (queues?.get(patternKey) === queue && queue.pendingText === undefined) {
+				queues.delete(patternKey);
+				if (!queues.size) patternRemarkWriteQueues.delete(captureId);
+			}
+		});
+		return queue.running;
+	}
+
+	function queuePatternRemarkWrite(captureId: string, patternKey: string, text: string, noteId?: string): void {
+		const queue = patternRemarkQueue(captureId, patternKey, noteId);
+		queue.pendingText = text;
+		void drainPatternRemarkWrites(captureId, patternKey, queue);
+	}
+
 	function drainCaptureWrites(captureId: string, queue: CaptureWriteQueue): Promise<void> {
 		if (queue.running) return queue.running;
 		queue.running = (async () => {
@@ -309,8 +433,15 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	}
 
 	async function waitForCaptureWrites(captureId: string): Promise<void> {
-		while (captureWriteQueues.get(captureId)?.running) {
-			await captureWriteQueues.get(captureId)!.running;
+		while (true) {
+			const captureQueue = captureWriteQueues.get(captureId);
+			const patternQueues = patternRemarkWriteQueues.get(captureId);
+			const running = [
+				...(captureQueue?.running ? [captureQueue.running] : []),
+				...(patternQueues ? [...patternQueues.values()].flatMap(queue => queue.running ? [queue.running] : []) : [])
+			];
+			if (!running.length) return;
+			await Promise.all(running);
 		}
 	}
 
@@ -882,25 +1013,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		};
 		else delete c.patternRemarks[input.patternKey];
 		if (isCanonical(c)) {
-			const target: CanonicalNoteTarget = { kind: "pattern", sequenceKey: input.patternKey };
-			const operation = text
-				? previousNoteId
-					? dependencies.captureWriter!.updateNote({ captureId: c.id, noteId: previousNoteId, text, target })
-					: dependencies.captureWriter!.createNote({ captureId: c.id, text, target })
-				: previousNoteId
-					? dependencies.captureWriter!.deleteNote({ captureId: c.id, noteId: previousNoteId })
-					: Promise.resolve();
-			void operation.then(result => {
-				if (text && result && "note" in result) {
-					const optimistic = c.patternRemarks?.[input.patternKey] as PatternRemarkValue | undefined;
-					if (optimistic) optimistic.noteId = result.note.id;
-					c.contentRevision = result.contentRevision;
-				}
-			}).catch(error => reconcileFailure(c.id!, error, () => {
-				if (previousValue) c.patternRemarks![input.patternKey] = previousValue;
-				else delete c.patternRemarks![input.patternKey];
-				dependencies.renderMessages();
-			}));
+			queuePatternRemarkWrite(c.id, input.patternKey, text, previousNoteId);
 		} else dependencies.saveState();
 		dependencies.renderMessages();
 		dependencies.showToast(text ? "Sequence note saved" : "Sequence note removed");

@@ -399,6 +399,71 @@ test("routes canonical pattern remarks and folder changes through commands", asy
 	assert.equal(capture.folderId, null);
 });
 
+test("serializes rapid canonical pattern remark intent without duplicate notes", async () => {
+	const capture: Capture = {
+		id: "pattern-queue-capture",
+		name: "Canonical",
+		messages: [],
+		byteStream: [],
+		frameSections: [],
+		params: [],
+		notes: [],
+		annotations: {},
+		patternRemarks: {},
+		storageStatus: "canonical"
+	};
+	const state = { captures: [capture], folders: [], unfiledCollapsed: false } as unknown as AppState;
+	const calls: string[] = [];
+	let releaseCreate!: (result: { note: { id: string }; contentRevision: number }) => void;
+	const createResult = new Promise<{ note: { id: string }; contentRevision: number }>(resolve => { releaseCreate = resolve; });
+	const errors: unknown[] = [];
+	const writer = {
+		createNote: (request: { text: string }) => {
+			calls.push(`create:${request.text}`);
+			return createResult;
+		},
+		updateNote: async (request: { noteId: string; text?: string }) => {
+			calls.push(`update:${request.noteId}:${request.text}`);
+			return { note: { id: request.noteId }, contentRevision: 2 };
+		},
+		deleteNote: async (request: { noteId: string }) => { calls.push(`delete:${request.noteId}`); }
+	} as unknown as CaptureWriter;
+	const controller = createCaptureController({
+		state,
+		capture: () => capture,
+		getActiveId: () => capture.id,
+		setActiveId: () => {},
+		saveState: () => { throw new Error("canonical pattern mutation used generic saveState"); },
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => false, stopRecording: async () => {} },
+		publishArchiveState: () => {},
+		publishCaptureHeaderState: () => {},
+		publishNotesState: () => {},
+		publishDialogCommand: () => {},
+		captureWriter: writer,
+		isCanonicalCapture: () => true,
+		reportPersistenceFailure: (_captureId, error) => errors.push(error)
+	});
+
+	controller.commitPatternRemarkDraft({ captureId: capture.id!, patternKey: "AA", text: "first" });
+	controller.commitPatternRemarkDraft({ captureId: capture.id!, patternKey: "AA", text: "latest" });
+	assert.deepEqual(calls, ["create:first"]);
+
+	releaseCreate({ note: { id: "stable-pattern-note" }, contentRevision: 1 });
+	await new Promise(resolve => setTimeout(resolve, 0));
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.deepEqual(calls, ["create:first", "update:stable-pattern-note:latest"]);
+
+	controller.commitPatternRemarkDraft({ captureId: capture.id!, patternKey: "AA", text: "" });
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.deepEqual(calls, ["create:first", "update:stable-pattern-note:latest", "delete:stable-pattern-note"]);
+	assert.equal(capture.patternRemarks?.AA, undefined);
+	assert.deepEqual(errors, []);
+});
+
 test("awaits active recording shutdown before deleting a canonical capture", async () => {
 	const capture: Capture = {
 		id: "delete-after-stop",
