@@ -690,7 +690,9 @@ p {
 	color: var(--ink);
 	text-align: left;
 	cursor: pointer;
-	font: 10px var(--mono);
+	font-family: var(--mono);
+	font-size: 11px;
+	line-height: 1;
 }
 .message-context-menu button:hover,
 .message-context-menu button:focus-visible {
@@ -766,7 +768,8 @@ p {
 	justify-content: space-between;
 	min-height: 30px;
 	padding: 6px 8px;
-	font-size: 9px;
+	font-size: 10px;
+	line-height: 1;
 }
 .capture-context-submenu button:disabled {
 	color: var(--acid);
