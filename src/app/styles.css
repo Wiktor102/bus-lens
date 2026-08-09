@@ -355,30 +355,8 @@ p {
 	stroke-linejoin: round;
 	stroke-width: 1.6;
 }
-.folder-actions {
-	display: flex;
-	flex: 0 0 48px;
-	opacity: 0;
-	transition: opacity 0.15s ease;
-}
-.folder-actions-placeholder {
-	pointer-events: none;
-}
-.folder-header:hover .folder-actions,
-.folder-actions:focus-within {
-	opacity: 1;
-}
-.folder-actions button {
-	width: 24px;
-	height: 26px;
-	padding: 0;
-	border: 0;
-	background: transparent;
-	color: var(--faint);
-	cursor: pointer;
-}
-.folder-actions button:hover {
-	color: var(--ink);
+.capture-folder.context-menu-open .folder-header {
+	border-bottom-color: color-mix(in srgb, var(--acid) 38%, var(--line-soft));
 }
 .folder-captures {
 	padding-top: 3px;
@@ -739,6 +717,9 @@ p {
 }
 .capture-context-menu {
 	width: 220px;
+}
+.folder-context-menu {
+	width: 176px;
 }
 .capture-context-menu > button:first-child {
 	border-bottom-color: var(--line);
