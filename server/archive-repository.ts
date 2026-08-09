@@ -923,7 +923,7 @@ export class ArchiveRepository {
 	// Canonical raw chunks / framing / analysis — PR 4
 	// -----------------------------------------------------------------------
 
-	/** Convert a single JSON capture document into canonical chunks+frames+analysis. Retains backup until verification succeeds. */
+	/** Convert one legacy JSON capture explicitly; capture_documents remains the compatibility source. */
 	convertCaptureToCanonical(id: string): ReturnType<typeof convertDocumentCanonical> {
 		return convertDocumentCanonical(this.database, id, { nowIso: () => this.nowIso(), generateId: () => this.generateId() });
 	}
