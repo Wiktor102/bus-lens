@@ -1232,7 +1232,8 @@ export class CanonicalCaptureCommandService {
 		const rawSections = draft
 			? (JSON.parse(draft.sections_json) as CaptureSection[])
 			: ([{ start: retainedStartOffset, framingMode: "length", frameSize: 3 }] as CaptureSection[]);
-		return normalizeSectionsForConversion(rawSections, stream, 3, this.generateId as () => string, retainedStartOffset);
+		return normalizeSectionsForConversion(rawSections, stream, 3, this.generateId as () => string, retainedStartOffset)
+			.map(section => ({ ...section, id: this.generateId() }));
 	}
 
 	private readFinalizationJob(jobId: string): FinalizationJobState {
