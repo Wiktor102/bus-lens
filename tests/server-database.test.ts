@@ -38,7 +38,7 @@ test("migrations are idempotent and durable document writes do not rewrite other
 	});
 });
 
-test("canonical capture reads preserve JSON metadata and capture sessions after reload", async () => {
+test("canonical capture reads use modeled metadata and do not consult compatibility blobs", async () => {
 	await withTemporaryArchive(async directory => {
 		const path = join(directory, "archive.sqlite");
 		const database = openDatabase(path);
@@ -72,7 +72,7 @@ test("canonical capture reads preserve JSON metadata and capture sessions after 
 		assert.equal(converted?.baudRate, 9600);
 		assert.equal(converted?.inputFormat, "text");
 		assert.deepEqual(converted?.params, [{ key: "Mode", value: "safe" }]);
-		assert.deepEqual(converted?.customMetadata, { operator: "test" });
+		assert.equal(converted?.customMetadata, undefined);
 		assert.deepEqual(converted?.captureSessions, [{ id: "session-1", firstReceivedAt: 100, lastReceivedAt: 200 }]);
 		assert.equal(converted?.byteStream && (converted.byteStream[0] as { sessionId?: string }).sessionId, "session-1");
 
@@ -84,7 +84,7 @@ test("canonical capture reads preserve JSON metadata and capture sessions after 
 		assert.equal(reloaded?.baudRate, 9600);
 		assert.equal(reloaded?.inputFormat, "text");
 		assert.deepEqual(reloaded?.params, [{ key: "Mode", value: "safe" }]);
-		assert.deepEqual(reloaded?.customMetadata, { operator: "test" });
+		assert.equal(reloaded?.customMetadata, undefined);
 		assert.deepEqual(reloaded?.captureSessions, [{ id: "session-1", firstReceivedAt: 100, lastReceivedAt: 200 }]);
 		assert.equal(reloaded?.byteStream && (reloaded.byteStream[0] as { sessionId?: string }).sessionId, "session-1");
 		reopened.close();
