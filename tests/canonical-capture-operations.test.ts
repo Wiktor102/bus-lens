@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	CanonicalCaptureCommandService,
+	CanonicalCaptureConflictError,
 	CanonicalCaptureIdempotencyConflictError
 } from "../server/canonical-capture-command-service.ts";
 import { openDatabase } from "../server/database.ts";
@@ -302,6 +303,56 @@ test("duplicateCapture makes an idempotent full canonical copy with remapped ide
 			() => service.duplicateCapture({ captureId: "duplicate-other", duplicateCaptureId: "duplicate-copy" }),
 			(error: unknown) => error instanceof CanonicalCaptureIdempotencyConflictError
 		);
+	} finally {
+		database.close();
+	}
+});
+
+test("duplicateCapture rejects active sources and allows a finalized copy to start a new session", () => {
+	const database = openDatabase(":memory:");
+	try {
+		const service = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-09T00:00:00.000Z" });
+		service.createCapture({ captureId: "duplicate-recording", framing, inputFormat: "binary" });
+		service.startSession({ captureId: "duplicate-recording", sessionId: "recording-session" });
+		service.appendChunk({
+			captureId: "duplicate-recording",
+			sessionId: "recording-session",
+			requestId: "recording-request",
+			sequence: 0,
+			expectedStartOffset: 0,
+			bytes: [1, 2]
+		});
+
+		assert.throws(
+			() => service.duplicateCapture({ captureId: "duplicate-recording", duplicateCaptureId: "duplicate-recording-copy" }),
+			(error: unknown) =>
+				error instanceof CanonicalCaptureConflictError &&
+					error.message === "capture must be finalized before duplication" &&
+					error.details.captureId === "duplicate-recording" &&
+					error.details.lifecycle === "recording"
+		);
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM captures WHERE id = 'duplicate-recording-copy'").get() as { count: number }).count, 0);
+
+		const append = service.appendChunk({
+			captureId: "duplicate-recording",
+			sessionId: "recording-session",
+			requestId: "recording-request-2",
+			sequence: 1,
+			expectedStartOffset: 2,
+			bytes: [3, 4]
+		});
+		service.finalizeSession({ captureId: "duplicate-recording", sessionId: "recording-session", expectedDataRevision: append.dataRevision });
+
+		service.duplicateCapture({ captureId: "duplicate-recording", duplicateCaptureId: "duplicate-recording-copy" });
+		const copy = service.getCaptureState("duplicate-recording-copy");
+		assert.equal(copy.lifecycle, "finalized");
+		assert.deepEqual(copy.sessions.map(session => session.status), ["finalized"]);
+
+		const newSession = service.startSession({ captureId: "duplicate-recording-copy", sessionId: "copy-session" });
+		assert.equal(newSession.session.status, "recording");
+		assert.equal(newSession.session.id, "copy-session");
+		assert.equal(newSession.session.ordinal, 1);
+		assert.equal(newSession.session.nextRawOffset, copy.byteCount);
 	} finally {
 		database.close();
 	}
