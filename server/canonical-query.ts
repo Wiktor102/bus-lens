@@ -3,7 +3,7 @@ import type { SqliteDatabase } from "./database.ts";
 export const DEFAULT_FRAME_WINDOW_LIMIT = 50;
 export const MAX_FRAME_WINDOW_LIMIT = 200;
 
-export type CanonicalCaptureStatus = "canonical" | "legacy-not-canonicalized" | "canonicalization-failed";
+export type CanonicalCaptureStatus = "canonical" | "legacy-not-canonicalized" | "converting" | "canonicalization-failed";
 
 export type CanonicalCaptureSummary = {
 	id: string;
@@ -62,7 +62,7 @@ type LegacySummaryRow = {
 	folder_id: unknown;
 	created_at: string;
 	updated_at: string;
-	status: "legacy-not-canonicalized" | "canonicalization-failed";
+	status: "legacy-not-canonicalized" | "converting" | "canonicalization-failed";
 };
 
 type FrameRow = {
@@ -155,7 +155,7 @@ export class CanonicalQueryService {
 			 FROM capture_storage
 			 JOIN capture_documents AS documents ON documents.id = capture_storage.capture_id
 			 WHERE capture_storage.capture_id = @captureId
-			   AND capture_storage.status IN ('legacy-not-canonicalized','canonicalization-failed')`
+			   AND capture_storage.status IN ('legacy-not-canonicalized','converting','canonicalization-failed')`
 		).get({ captureId }) as LegacySummaryRow | undefined;
 		return row ? legacySummary(row) : undefined;
 	}
@@ -182,7 +182,7 @@ export class CanonicalQueryService {
 					documents.created_at, documents.updated_at, capture_storage.status
 			 FROM capture_storage
 			 JOIN capture_documents AS documents ON documents.id = capture_storage.capture_id
-			 WHERE capture_storage.status IN ('legacy-not-canonicalized','canonicalization-failed')
+			 WHERE capture_storage.status IN ('legacy-not-canonicalized','converting','canonicalization-failed')
 			 ORDER BY documents.updated_at DESC, documents.id ASC`
 		).all() as LegacySummaryRow[];
 		return [...canonical.map(canonicalSummary), ...legacy.map(legacySummary)].sort(

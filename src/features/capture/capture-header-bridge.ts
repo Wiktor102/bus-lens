@@ -10,6 +10,7 @@ export type CaptureHeaderActions = {
 	duplicate: () => void;
 	clearMessages: () => void;
 	deleteCapture: () => void;
+	upgradeStorage: () => void;
 };
 
 const noopActions: CaptureHeaderActions = {
@@ -20,7 +21,8 @@ const noopActions: CaptureHeaderActions = {
 	openContext: () => {},
 	duplicate: () => {},
 	clearMessages: () => {},
-	deleteCapture: () => {}
+	deleteCapture: () => {},
+	upgradeStorage: () => {}
 };
 
 const captureHeaderStore = createExternalStore<CaptureHeaderSnapshot, CaptureHeaderActions>(

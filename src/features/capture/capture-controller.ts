@@ -53,6 +53,9 @@ export type CaptureControllerDependencies = {
 	captureWriter?: CaptureWriter;
 	isCanonicalCapture?: (captureId: string) => boolean;
 	waitForCaptureWrite?: (captureId: string) => Promise<void>;
+	isCaptureConversionLocked?: (captureId: string) => boolean;
+	setCaptureStorageStatus?: (captureId: string, status: "legacy-not-canonicalized" | "converting" | "canonical" | "canonicalization-failed") => void;
+	openCanonicalization?: (captureId: string) => void;
 	refreshCapture?: (captureId: string) => Promise<Capture>;
 	reportPersistenceFailure?: (captureId: string, error: unknown) => void;
 };
@@ -111,6 +114,16 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function isCanonical(item: Capture | undefined): item is Capture & { id: string } {
 		return Boolean(item?.id && dependencies.captureWriter && dependencies.isCanonicalCapture?.(String(item.id)));
+	}
+
+	function isConversionLocked(item: Capture | undefined): boolean {
+		return Boolean(item?.id && dependencies.isCaptureConversionLocked?.(String(item.id)));
+	}
+
+	function rejectLockedMutation(item: Capture | undefined): boolean {
+		if (!isConversionLocked(item)) return false;
+		dependencies.showToast("Capture conversion is in progress; editing is temporarily disabled");
+		return true;
 	}
 
 	function reportFailure(captureId: string, error: unknown): void {
@@ -446,6 +459,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	}
 
 	function metadataPatch(item: ActiveCapture): void {
+		if (rejectLockedMutation(item)) return;
 		if (!isCanonical(item)) {
 			dependencies.saveState();
 			return;
@@ -469,6 +483,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	}
 
 	function persistFraming(item: ActiveCapture, immediate = false): void {
+		if (rejectLockedMutation(item)) return;
 		if (!isCanonical(item)) {
 			dependencies.saveState(immediate ? { immediate: true } : undefined);
 			return;
@@ -494,6 +509,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	function moveArchiveCapture(captureId: string, folderId: string | null) {
 		const item = state.captures.find(capture => capture.id === captureId);
 		if (!item) return;
+		if (rejectLockedMutation(item)) return;
 		const folderNameById = new Map(state.folders.map(folder => [folder.id, folder.name]));
 		item.folderId = folderId || null;
 		metadataPatch(item);
@@ -549,6 +565,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const c = capture();
 		const noteText = String(rawText || "").trim();
 		if (!c || !noteText) return false;
+		if (rejectLockedMutation(c)) return false;
 		const max = Math.max(1, c.messages.length);
 		const start = Math.max(1, Math.min(max, Number(rawStart) || 1));
 		const end = Math.max(start, Math.min(max, Number(rawEnd) || start));
@@ -589,14 +606,14 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function setCaptureTitle(value: string) {
 		const c = capture();
-		if (!c) return;
+		if (!c || isConversionLocked(c)) return;
 		c.name = value;
 		dependencies.publishCaptureHeaderState();
 	}
 
 	function commitCaptureTitle(value: string) {
 		const c = capture();
-		if (!c) return;
+		if (!c || rejectLockedMutation(c)) return;
 		c.name = value;
 		metadataPatch(c);
 		dependencies.publishArchiveState();
@@ -605,14 +622,14 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function setCaptureDescription(value: string) {
 		const c = capture();
-		if (!c) return;
+		if (!c || isConversionLocked(c)) return;
 		c.description = value;
 		dependencies.publishCaptureHeaderState();
 	}
 
 	function commitCaptureDescription(value: string) {
 		const c = capture();
-		if (!c) return;
+		if (!c || rejectLockedMutation(c)) return;
 		c.description = value;
 		metadataPatch(c);
 		dependencies.publishCaptureHeaderState();
@@ -620,7 +637,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function duplicateActiveCapture() {
 		const source = capture();
-		if (!source) return;
+		if (!source || rejectLockedMutation(source)) return;
 		const copy = structuredClone(source);
 		copy.id = crypto.randomUUID();
 		copy.name += " · copy";
@@ -648,7 +665,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	async function deleteArchiveCapture(captureId: string): Promise<void> {
 		let item = state.captures.find(captureItem => captureItem.id === captureId);
-		if (!item || !dependencies.confirm(`Delete “${item.name}”?`)) return;
+		if (!item || rejectLockedMutation(item) || !dependencies.confirm(`Delete “${item.name}”?`)) return;
 		const deletingActiveCapture = dependencies.getActiveId() === captureId;
 		if (deletingActiveCapture) {
 			try {
@@ -683,7 +700,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function clearActiveCaptureMessages() {
 		const c = capture();
-		if (!c) return;
+		if (!c || rejectLockedMutation(c)) return;
 		if (dependencies.confirm("Clear all raw bytes, messages, and message annotations from this capture?")) {
 			c.byteStream = [];
 			c.messages = [];
@@ -710,6 +727,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			? { name: "Untitled capture", view: "", params: [], baudRate: 115200, folderId: null, id: null }
 			: capture();
 		if (!c) return;
+		if (!creatingNewCapture && rejectLockedMutation(c as ActiveCapture)) return;
 		dependencies.publishDialogCommand({
 			type: "context",
 			mode: creatingNewCapture ? "new" : "edit",
@@ -731,7 +749,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function startSectionAtByte(messageId: string, position: number) {
 		const c = capture();
-		if (!c) return;
+		if (!c || rejectLockedMutation(c)) return;
 		const message = c.messages.find(item => item.id === messageId);
 		if (!message) return;
 		const start = message._rawPositions?.[position];
@@ -766,7 +784,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function updateSectionFraming(sectionId: string, update: SectionFramingUpdate, toast: (section: ActiveCaptureSection) => string) {
 		const c = capture();
-		if (!c) return;
+		if (!c || rejectLockedMutation(c)) return;
 		normalizeSections(c);
 		const section = c.frameSections.find(item => item.id === sectionId);
 		if (!section) return;
@@ -807,7 +825,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function moveSection(sectionId: string, action: SectionMoveAction) {
 		const c = capture();
-		if (!c) return;
+		if (!c || rejectLockedMutation(c)) return;
 		normalizeSections(c);
 		if (!moveSectionStart(c, sectionId, action)) return;
 		rebuildPreview(c);
@@ -826,7 +844,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function deleteSection(sectionId: string) {
 		const c = capture();
-		if (!c) return;
+		if (!c || rejectLockedMutation(c)) return;
 		normalizeSections(c);
 		const index = c.frameSections.findIndex(section => section.id === sectionId);
 		if (index <= 0) return;
@@ -838,7 +856,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function setSectionCollapse(sectionId: string, collapseRuns: boolean) {
 		const c = capture();
-		if (!c) return;
+		if (!c || rejectLockedMutation(c)) return;
 		const section = c.frameSections.find(item => item.id === sectionId);
 		if (!section) return;
 		section.collapseRuns = collapseRuns;
@@ -849,7 +867,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function setSectionCollapsed(sectionId: string, collapsed: boolean) {
 		const c = capture();
-		if (!c) return;
+		if (!c || rejectLockedMutation(c)) return;
 		const section = c.frameSections.find(item => item.id === sectionId);
 		if (!section) return;
 		section.collapsed = Boolean(collapsed);
@@ -869,13 +887,15 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				notes: [],
 				annotations: {}
 			}) as ActiveCapture;
+			c.storageStatus = "canonical";
+			dependencies.setCaptureStorageStatus?.(String(c.id), "canonical");
 			state.captures.unshift(c);
 			dependencies.setActiveId(c.id);
 			// The runtime owns create bookkeeping and the archive-index write.
 			dependencies.saveState({ immediate: true });
 		} else {
 			const c = state.captures.find(item => String(item.id) === String(input.captureId)) || capture();
-			if (!c) return false;
+			if (!c || rejectLockedMutation(c)) return false;
 			Object.assign(c, values);
 			metadataPatch(c);
 		}
@@ -914,7 +934,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	function commitAnnotationDraft(input: AnnotationSaveInput) {
 		if (!annotationTextIsValid(input.text)) return false;
 		const c = state.captures.find(item => String(item.id) === String(input.captureId));
-		if (!c) return false;
+		if (!c || rejectLockedMutation(c)) return false;
 		const details = annotationTargetLabel(c, input.annotationType, input.key);
 		if (!details) return false;
 		const [messageId] = input.key.split(":");
@@ -964,7 +984,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function removeAnnotationDraft(input: AnnotationDeleteInput) {
 		const c = state.captures.find(item => String(item.id) === String(input.captureId));
-		if (!c) return;
+		if (!c || rejectLockedMutation(c)) return;
 		const details = annotationTargetLabel(c, input.annotationType, input.key);
 		if (!details) return;
 		const previous = c.annotations[details.targetKey];
@@ -982,6 +1002,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function publishPatternRemarkDialog(id: string) {
 		const c = capture();
+		if (rejectLockedMutation(c)) return;
 		const patterns = recognizeMessagePatterns(c);
 		const group = patterns.groups.find(item => item.id === id);
 		if (!group || !c) return dependencies.showToast("This sequence is no longer present in the current framing");
@@ -1000,7 +1021,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function commitPatternRemarkDraft(input: PatternRemarkSaveInput) {
 		const c = state.captures.find(item => String(item.id) === String(input.captureId));
-		if (!c) return false;
+		if (!c || rejectLockedMutation(c)) return false;
 		const text = normalizePatternRemarkText(input.text);
 		c.patternRemarks ||= {};
 		const previous = c.patternRemarks[input.patternKey];
@@ -1021,6 +1042,10 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	}
 
 	return {
+		upgradeActiveCapture: () => {
+			const c = capture();
+			if (c?.id) dependencies.openCanonicalization?.(String(c.id));
+		},
 		selectArchiveCapture,
 		toggleArchiveFolder,
 		moveArchiveCapture,

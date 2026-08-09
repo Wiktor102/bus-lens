@@ -161,6 +161,25 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			}
 			if (segments[1] === "captures" && segments[2]) {
 				const captureId = segments[2];
+				if (segments[3] === "canonicalization") {
+					if (!segments[4] && request.method === "GET") {
+						const preflight = repository.getCanonicalizationPreflight(captureId);
+						return preflight.estimatedEligibility === "missing" ? send(response, 404, { error: preflight.error || "Not found" }) : send(response, 200, preflight);
+					}
+					if (!segments[4] && request.method === "POST") {
+						const preflight = repository.getCanonicalizationPreflight(captureId);
+						if (preflight.estimatedEligibility === "missing") return send(response, 404, { error: preflight.error || "Not found" });
+						return send(response, 200, repository.startCanonicalization(captureId));
+					}
+					if (segments[4] === "jobs" && segments[5] && request.method === "GET") {
+						const job = repository.getCanonicalizationJob(captureId, segments[5]);
+						return job ? send(response, 200, job) : send(response, 404, { error: "Not found" });
+					}
+				}
+				if (segments[3] === "legacy-backup" && request.method === "GET") {
+					const backup = repository.getLegacyBackupDocument(captureId);
+					return backup ? send(response, 200, backup) : send(response, 404, { error: "No legacy backup available" });
+				}
 				if (segments[3] === "metadata" && request.method === "PATCH") {
 					const body = documentFrom(await jsonBody(request, maxBodyBytes));
 					const patch = documentFrom(body.patch ?? body) as CaptureMetadataPatch;
@@ -309,8 +328,28 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			// ordinary legacy-capture saves deliberately do not invoke these routes.
 			if (segments[1] === "migrations" && segments[2] === "canonical") {
 				if (request.method === "POST") {
-					const results = repository.convertAllCaptures();
-					return send(response, 200, { results, verified: results.every(r => r.verified) });
+					const ids = repository.listCaptures().map(capture => String(capture.id));
+					const results: unknown[] = [];
+					for (const id of ids) {
+						const preflight = repository.getCanonicalizationPreflight(id);
+						if (preflight.status === "canonical") {
+							results.push({ captureId: id, status: "skipped", reason: "already-canonical", verified: true });
+							continue;
+						}
+						if (preflight.recordingActive) {
+							results.push({ captureId: id, status: "skipped", reason: "recording-active", verified: true });
+							continue;
+						}
+						try {
+							const job = repository.startCanonicalization(id);
+							results.push(job);
+							if (job.status === "failed") break;
+						} catch (error) {
+							results.push({ captureId: id, status: "failed", verified: false, error: error instanceof Error ? error.message : String(error) });
+							break;
+						}
+					}
+					return send(response, 200, { results, verified: results.every(result => (result as { verified?: boolean }).verified === true) });
 				}
 				if (request.method === "GET") {
 					const captures = repository.listCaptures();
@@ -320,8 +359,7 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			}
 			if (segments[1] === "captures" && segments[2] && segments[3] === "convert" && request.method === "POST") {
 				const captureId = segments[2];
-				const result = repository.convertCaptureToCanonical(captureId);
-				return send(response, result.verified ? 200 : 422, result);
+				return send(response, 200, repository.startCanonicalization(captureId));
 			}
 			if (segments[1] === "captures" && segments[2] && segments[3] === "reframe" && request.method === "POST") {
 				const captureId = segments[2];

@@ -49,6 +49,7 @@ export type SerialControllerDependencies = {
 		refreshCapture?: (captureId: string) => Promise<Capture>;
 	};
 	isCanonicalCapture?: (captureId: string) => boolean;
+	isCaptureConversionLocked?: (captureId: string) => boolean;
 	publishPersistenceError?: (error: { captureId: string; message: string } | null) => void;
 };
 
@@ -122,13 +123,19 @@ export function createSerialController(dependencies: SerialControllerDependencie
 
 	function publishState() {
 		const connected = isConnected();
+		const activeCapture = dependencies.capture();
+		const conversionLocked = Boolean(
+			!recording &&
+			activeCapture?.id &&
+			dependencies.isCaptureConversionLocked?.(String(activeCapture.id))
+		);
 		publishTransportSnapshot({
 			connected,
 			recording,
 			connectionLabel: connected ? "Port connected" : "Disconnected",
 			connectLabel: connected ? "Disconnect" : "Connect port",
 			recordLabel: recording ? "Stop capture" : "Start capture",
-			recordDisabled: !connected || !dependencies.capture()
+			recordDisabled: !connected || !activeCapture || conversionLocked
 		});
 		dependencies.publishSendState?.();
 	}
@@ -320,6 +327,8 @@ export function createSerialController(dependencies: SerialControllerDependencie
 					if (capture) Object.assign(capture, refreshed);
 				}
 			} else if (persist) {
+				const capture = captureById(captureId ?? undefined);
+				if (capture) capture.lifecycle = "finalized";
 				dependencies.saveState({ immediate: true });
 			}
 			recordingSessionId = null;
@@ -348,6 +357,10 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		if (recording) {
 			return stopRecording({ notify: true });
 		}
+		if (dependencies.isCaptureConversionLocked?.(String(capture.id))) {
+			dependencies.showToast("Capture conversion is in progress; recording is temporarily disabled");
+			return Promise.resolve();
+		}
 		if (startPromise) return startPromise;
 		const captureId = String(capture.id ?? "");
 		const sessionId = crypto.randomUUID();
@@ -364,6 +377,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			const session = { id: sessionId };
 			capture.captureSessions ||= [];
 			capture.captureSessions.push(session);
+			capture.lifecycle = "recording";
 			recordingCaptureId = captureId;
 			recordingSessionId = session.id;
 			recording = true;

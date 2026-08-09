@@ -16,6 +16,7 @@ import type { SendController } from "../features/send/send-controller.ts";
 import type { SerialController } from "../features/transport/serial-controller.ts";
 import type { ViewStateSnapshot } from "../shared/view-state.ts";
 import { publishArchiveSnapshot } from "../features/archive/archive-bridge.ts";
+import { captureStorageSnapshot, publishCaptureStorageSnapshot } from "../features/capture/capture-storage-bridge.ts";
 
 type ReadyAppState = AppState & {
 	sendHistory: SendHistoryEntry[];
@@ -59,7 +60,8 @@ export function createSnapshotRuntime(dependencies: SnapshotRuntimeDependencies)
 					key: String((parameter as { key?: unknown }).key ?? ""),
 					value: String((parameter as { value?: unknown }).value ?? "")
 				})),
-				messageCount: visibleMessages(item).length
+				messageCount: visibleMessages(item).length,
+				storageStatus: item.storageStatus
 			})),
 			folders: state.folders.map(folder => ({
 				id: String(folder.id),
@@ -105,7 +107,9 @@ export function createSnapshotRuntime(dependencies: SnapshotRuntimeDependencies)
 	}
 
 	function publishCaptureHeaderState(): void {
-		publishCaptureHeaderSnapshot(deriveCaptureHeaderSnapshot(dependencies.capture(), dependencies.getTransport().isRecording()));
+		const capture = dependencies.capture();
+		publishCaptureHeaderSnapshot(deriveCaptureHeaderSnapshot(capture, dependencies.getTransport().isRecording()));
+		publishCaptureStorageSnapshot(captureStorageSnapshot(capture?.id ? String(capture.id) : null, capture?.storageStatus));
 	}
 
 	function publishFramingToolbarState(capture = dependencies.capture()): void {
