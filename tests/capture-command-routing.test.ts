@@ -180,6 +180,99 @@ test("serializes metadata and framing revisions while coalescing the latest opti
 	assert.equal(capture.framingDraftRevision, 2);
 });
 
+test("awaits active recording shutdown before deleting a canonical capture", async () => {
+	const capture: Capture = {
+		id: "delete-after-stop",
+		name: "Delete after stop",
+		messages: [],
+		byteStream: [],
+		frameSections: [],
+		params: [],
+		notes: [],
+		annotations: {},
+		patternRemarks: {},
+		storageStatus: "canonical"
+	};
+	const state = { captures: [capture], folders: [], unfiledCollapsed: false } as unknown as AppState;
+	let activeId: string | null = capture.id!;
+	let releaseStop!: () => void;
+	const calls: string[] = [];
+	const stop = new Promise<void>(resolve => { releaseStop = resolve; });
+	const writer = { delete: async () => { calls.push("delete"); } } as unknown as CaptureWriter;
+	const controller = createCaptureController({
+		state,
+		capture: () => capture,
+		getActiveId: () => activeId,
+		setActiveId: id => { activeId = id ? String(id) : null; },
+		saveState: () => {},
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => true, stopRecording: () => { calls.push("stop"); return stop; } },
+		publishArchiveState: () => {},
+		publishCaptureHeaderState: () => {},
+		publishNotesState: () => {},
+		publishDialogCommand: () => {},
+		captureWriter: writer,
+		isCanonicalCapture: () => true
+	});
+
+	const deletion = controller.deleteArchiveCapture(capture.id!);
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.deepEqual(calls, ["stop"]);
+	assert.deepEqual(state.captures, [capture]);
+	assert.equal(activeId, capture.id);
+
+	releaseStop();
+	await deletion;
+	assert.deepEqual(calls, ["stop", "delete"]);
+	assert.deepEqual(state.captures, []);
+	assert.equal(activeId, null);
+});
+
+test("keeps a canonical capture when recording shutdown fails", async () => {
+	const capture: Capture = {
+		id: "delete-stop-failed",
+		name: "Keep recovery",
+		messages: [],
+		byteStream: [],
+		frameSections: [],
+		params: [],
+		notes: [],
+		annotations: {},
+		patternRemarks: {},
+		storageStatus: "canonical"
+	};
+	const state = { captures: [capture], folders: [], unfiledCollapsed: false } as unknown as AppState;
+	let activeId: string | null = capture.id!;
+	let deleteCalls = 0;
+	const writer = { delete: async () => { deleteCalls++; } } as unknown as CaptureWriter;
+	const controller = createCaptureController({
+		state,
+		capture: () => capture,
+		getActiveId: () => activeId,
+		setActiveId: id => { activeId = id ? String(id) : null; },
+		saveState: () => {},
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => false, stopRecording: async () => { throw new Error("finalize failed"); } },
+		publishArchiveState: () => {},
+		publishCaptureHeaderState: () => {},
+		publishNotesState: () => {},
+		publishDialogCommand: () => {},
+		captureWriter: writer,
+		isCanonicalCapture: () => true
+	});
+
+	await controller.deleteArchiveCapture(capture.id!);
+	assert.equal(deleteCalls, 0);
+	assert.deepEqual(state.captures, [capture]);
+	assert.equal(activeId, capture.id);
+});
+
 test("new capture creation uses runtime bookkeeping and does not replay the create", async () => {
 	const originalFetch = globalThis.fetch;
 	const requests: Array<{ path: string; method: string; body?: unknown }> = [];
