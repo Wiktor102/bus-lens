@@ -90,3 +90,73 @@ test("reconciles deleted captures, folders, queue entries, and history entries",
 		globalThis.fetch = originalFetch;
 	}
 });
+
+test("saveState preserves global persistence without replaying every capture", async () => {
+	const originalFetch = globalThis.fetch;
+	const requests: Array<{ path: string; method: string }> = [];
+	const stored = {
+		captures: [
+			{ id: "capture-one", document: { id: "capture-one", name: "One", messages: [], byteStream: [] } },
+			{ id: "capture-two", document: { id: "capture-two", name: "Two", messages: [], byteStream: [] } }
+		],
+		folders: [],
+		index: { activeId: "capture-one", unfiledCollapsed: false },
+		queue: [],
+		history: [],
+		settings: { send: { delayMs: 100, draft: "", baudRate: 115200 } }
+	};
+	globalThis.fetch = async (input, init) => {
+		const path = String(input);
+		requests.push({ path, method: init?.method || "GET" });
+		if (path.endsWith("/health")) return new Response(null, { status: 204 });
+		if (path.endsWith("/archive")) return new Response(JSON.stringify(stored), { status: 200 });
+		if (path.endsWith("/canonical/captures")) return new Response(JSON.stringify([]), { status: 200 });
+		return new Response(null, { status: 204 });
+	};
+
+	try {
+		const runtime = createAppRuntime();
+		await runtime.ready;
+		requests.length = 0;
+		runtime.saveState({ immediate: true });
+		await new Promise(resolve => setTimeout(resolve, 0));
+
+		assert.equal(requests.some(request => request.path === "/api/captures/capture-one" || request.path === "/api/captures/capture-two"), false);
+		assert.ok(requests.some(request => request.path === "/api/archive-index" && request.method === "PUT"));
+		assert.ok(requests.some(request => request.path === "/api/settings/send" && request.method === "PUT"));
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("saveState creates a new capture through POST /api/captures", async () => {
+	const originalFetch = globalThis.fetch;
+	const requests: Array<{ path: string; method: string; body?: unknown }> = [];
+	globalThis.fetch = async (input, init) => {
+		const path = String(input);
+		requests.push({ path, method: init?.method || "GET", body: init?.body ? JSON.parse(String(init.body)) : undefined });
+		if (path.endsWith("/health")) return new Response(null, { status: 204 });
+		if (path.endsWith("/archive")) {
+			return new Response(JSON.stringify({ captures: [], folders: [], index: { activeId: null, unfiledCollapsed: false }, queue: [], history: [], settings: {} }), { status: 200 });
+		}
+		if (path.endsWith("/canonical/captures")) return new Response(JSON.stringify([]), { status: 200 });
+		return new Response(JSON.stringify({}), { status: 201, headers: { "content-type": "application/json" } });
+	};
+
+	try {
+		const runtime = createAppRuntime();
+		await runtime.ready;
+		runtime.state.captures = [{ id: "created-capture", name: "Created", messages: [], byteStream: [], frameSections: [{ start: 0, framingMode: "length", frameSize: 3 }] }];
+		runtime.setActiveId("created-capture");
+		requests.length = 0;
+		runtime.saveState({ immediate: true });
+		await new Promise(resolve => setTimeout(resolve, 0));
+
+		const create = requests.find(request => request.path === "/api/captures");
+		assert.deepEqual(create && { path: create.path, method: create.method }, { path: "/api/captures", method: "POST" });
+		assert.equal(requests.some(request => request.path === "/api/captures/created-capture" && request.method === "PUT"), false);
+		assert.equal((create?.body as { inputFormat?: string } | undefined)?.inputFormat, "binary");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
