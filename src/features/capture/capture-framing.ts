@@ -79,6 +79,7 @@ export type Capture = Omit<CaptureSummaryData, "notes"> & {
 	name?: string;
 	view?: string;
 	createdAt?: string;
+	updatedAt?: string;
 	baudRate?: number;
 	inputFormat?: string;
 	folderId?: string | null;
@@ -99,11 +100,13 @@ export type Capture = Omit<CaptureSummaryData, "notes"> & {
 	storageStatus?: "legacy-not-canonicalized" | "canonical" | "canonicalization-failed";
 	lifecycle?: string;
 	dataRevision?: number;
+	byteCount?: number;
 	metadataRevision?: number;
 	contentRevision?: number;
 	retainedStartOffset?: number;
 	activeFramingProfileId?: string | null;
 	isRetainedTail?: boolean;
+	framingDraftRevision?: number;
 };
 
 export type PreviewByteRecord = RawByteRecord & { rawPosition: number };

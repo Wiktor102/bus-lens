@@ -28,6 +28,11 @@ import {
 } from "./capture-framing.ts";
 import { moveSection as moveSectionStart, type SectionMoveAction } from "./section-repositioning.ts";
 import { publishDialogCommand } from "../dialogs/dialog-bridge.ts";
+import type {
+	CaptureWriter,
+	CanonicalNoteTarget,
+	FramingSectionRequest
+} from "../../persistence/archive-client.ts";
 
 export type CaptureControllerDependencies = {
 	state: AppState;
@@ -44,9 +49,13 @@ export type CaptureControllerDependencies = {
 	publishCaptureHeaderState: () => void;
 	publishNotesState: (capture?: Capture) => void;
 	publishDialogCommand: typeof publishDialogCommand;
+	captureWriter?: CaptureWriter;
+	isCanonicalCapture?: (captureId: string) => boolean;
+	refreshCapture?: (captureId: string) => Promise<Capture>;
+	reportPersistenceFailure?: (captureId: string, error: unknown) => void;
 };
 
-type AnnotationValue = { text?: unknown; [key: string]: unknown };
+type AnnotationValue = { text?: unknown; noteId?: string; [key: string]: unknown };
 type PatternRemarkValue = { text?: unknown; [key: string]: unknown };
 type ActiveCaptureSection = NormalizedCaptureSection;
 type ActiveCapture = Omit<
@@ -81,6 +90,83 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		return dependencies.capture() as ActiveCapture | undefined;
 	}
 
+	function isCanonical(item: Capture | undefined): item is Capture & { id: string } {
+		return Boolean(item?.id && dependencies.captureWriter && dependencies.isCanonicalCapture?.(String(item.id)));
+	}
+
+	function reportFailure(captureId: string, error: unknown): void {
+		dependencies.reportPersistenceFailure?.(captureId, error);
+	}
+
+	function reconcileFailure(captureId: string, error: unknown, fallback?: () => void): void {
+		reportFailure(captureId, error);
+		if (dependencies.refreshCapture) {
+			void dependencies.refreshCapture(captureId).then(() => dependencies.render()).catch(() => fallback?.());
+		} else fallback?.();
+	}
+
+	function metadataPatch(item: ActiveCapture): void {
+		if (!isCanonical(item)) {
+			dependencies.saveState();
+			return;
+		}
+		void dependencies.captureWriter!.patchMetadata({
+			captureId: item.id,
+			expectedMetadataRevision: item.metadataRevision,
+			patch: {
+				name: String(item.name ?? ""),
+				description: String(item.description ?? ""),
+				controllerView: String(item.view ?? ""),
+				baudRate: Number(item.baudRate ?? 115200),
+				inputFormat: "binary",
+				folderId: item.folderId ?? null,
+				parameters: item.params.flatMap(parameter => {
+					const key = String(parameter.key ?? "").trim();
+					return key ? [{ key, value: String(parameter.value ?? "") }] : [];
+				})
+			}
+		}).then(state => {
+			item.metadataRevision = state.metadataRevision;
+			item.updatedAt = state.updatedAt;
+		}).catch(error => reconcileFailure(item.id, error));
+	}
+
+	function framingRequest(item: ActiveCapture): FramingSectionRequest[] {
+		normalizeSections(item);
+		return item.frameSections.map(section => ({
+			id: section.id,
+			start: section.start,
+			framingMode: section.framingMode,
+			frameSize: section.frameSize,
+			frameMarker: section.frameMarker,
+			markerPosition: section.markerPosition,
+			frameTimeGap: section.frameTimeGap,
+			collapseRuns: section.collapseRuns,
+			collapsed: section.collapsed
+		}));
+	}
+
+	function persistFraming(item: ActiveCapture, immediate = false): void {
+		if (!isCanonical(item)) {
+			dependencies.saveState(immediate ? { immediate: true } : undefined);
+			return;
+		}
+		const sections = framingRequest(item);
+		const operation = dependencies.transport.isRecording()
+			? dependencies.captureWriter!.updateFramingDraft({
+				captureId: item.id,
+				sections,
+				expectedRevision: item.framingDraftRevision
+			}).then(draft => { item.framingDraftRevision = draft.revision; })
+			: dependencies.captureWriter!.reframe({
+				captureId: item.id,
+				sections,
+				expectedActiveProfileId: item.activeFramingProfileId,
+				expectedDataRevision: Number(item.dataRevision ?? 0)
+			}).then(profile => { item.activeFramingProfileId = profile.profileId; });
+		void operation.catch(error => reconcileFailure(item.id, error));
+	}
+
 	function selectArchiveCapture(captureId: string) {
 		dependencies.setActiveId(captureId);
 		dependencies.saveState();
@@ -101,7 +187,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (!item) return;
 		const folderNameById = new Map(state.folders.map(folder => [folder.id, folder.name]));
 		item.folderId = folderId || null;
-		dependencies.saveState();
+		metadataPatch(item);
 		dependencies.publishArchiveState();
 		dependencies.showToast(item.folderId ? `Moved to ${folderNameById.get(item.folderId)}` : "Moved to Unfiled");
 	}
@@ -154,8 +240,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const max = Math.max(1, c.messages.length);
 		const start = Math.max(1, Math.min(max, Number(rawStart) || 1));
 		const end = Math.max(start, Math.min(max, Number(rawEnd) || start));
-		c.notes ||= [];
-		c.notes.push({
+		const notes = c.notes ||= [];
+		notes.push({
 			id: crypto.randomUUID(),
 			type: "sequence",
 			text: noteText,
@@ -164,7 +250,25 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			end,
 			targetLabel: `rows ${start}–${end}`
 		});
-		dependencies.saveState();
+		const optimistic = notes.at(-1)!;
+		if (isCanonical(c) && c.activeFramingProfileId) {
+			void dependencies.captureWriter!.createNote({
+				captureId: c.id,
+				text: noteText,
+				target: {
+					kind: "range",
+					profileId: c.activeFramingProfileId,
+					startOrdinal: start - 1,
+					endOrdinal: end - 1
+				}
+			}).then(result => {
+				optimistic.id = result.note.id;
+				c.contentRevision = result.contentRevision;
+			}).catch(error => reconcileFailure(c.id, error, () => {
+				c.notes = notes.filter(note => note !== optimistic);
+				dependencies.publishNotesState(c);
+			}));
+		} else dependencies.saveState();
 		dependencies.publishNotesState(c);
 		dependencies.renderMessages();
 		dependencies.showToast("Sequence observation added");
@@ -175,7 +279,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const c = capture();
 		if (!c) return;
 		c.name = value;
-		dependencies.saveState();
 		dependencies.publishCaptureHeaderState();
 	}
 
@@ -183,7 +286,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const c = capture();
 		if (!c) return;
 		c.name = value;
-		dependencies.saveState();
+		metadataPatch(c);
 		dependencies.publishArchiveState();
 		dependencies.publishCaptureHeaderState();
 	}
@@ -192,7 +295,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const c = capture();
 		if (!c) return;
 		c.description = value;
-		dependencies.saveState();
 		dependencies.publishCaptureHeaderState();
 	}
 
@@ -200,7 +302,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const c = capture();
 		if (!c) return;
 		c.description = value;
-		dependencies.saveState();
+		metadataPatch(c);
 		dependencies.publishCaptureHeaderState();
 	}
 
@@ -215,7 +317,20 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		copy.annotations = {};
 		state.captures.unshift(copy);
 		dependencies.setActiveId(copy.id);
-		dependencies.saveState();
+		if (isCanonical(source)) {
+			void dependencies.captureWriter!.duplicate({ captureId: source.id, duplicateCaptureId: String(copy.id) })
+				.then(() => dependencies.refreshCapture?.(String(copy.id)))
+				.then(refreshed => {
+					if (refreshed) Object.assign(copy, refreshed);
+					dependencies.render();
+				})
+				.catch(error => {
+					state.captures = state.captures.filter(item => item !== copy);
+					dependencies.setActiveId(source.id);
+					reportFailure(source.id, error);
+					dependencies.render();
+				});
+		} else dependencies.saveState();
 		dependencies.render();
 	}
 
@@ -226,7 +341,13 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (deletingActiveCapture && dependencies.transport.isRecording()) dependencies.transport.stopRecording();
 		state.captures = state.captures.filter(captureItem => captureItem.id !== captureId);
 		if (deletingActiveCapture) dependencies.setActiveId(state.captures[0]?.id || null);
-		dependencies.saveState();
+		if (isCanonical(item)) {
+			void dependencies.captureWriter!.delete(item.id).catch(error => {
+				state.captures.unshift(item);
+				reportFailure(item.id, error);
+				dependencies.render();
+			});
+		} else dependencies.saveState();
 		dependencies.render();
 	}
 
@@ -238,7 +359,12 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			c.messages = [];
 			c.annotations = {};
 			c.patternRemarks = {};
-			dependencies.saveState();
+			if (isCanonical(c)) {
+				void dependencies.captureWriter!.clearData({ captureId: c.id }).then(result => {
+					c.dataRevision = result.dataRevision;
+					c.contentRevision = result.contentRevision;
+				}).catch(error => reconcileFailure(c.id, error));
+			} else dependencies.saveState();
 			dependencies.render();
 		}
 	}
@@ -304,7 +430,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		});
 		normalizeSections(c);
 		rebuildPreview(c);
-		dependencies.saveState();
+		persistFraming(c);
 		dependencies.render();
 	}
 
@@ -316,7 +442,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (!section) return;
 		applySectionFramingSettings(section, update);
 		rebuildPreview(c);
-		dependencies.saveState();
+		persistFraming(c);
 		dependencies.render();
 		dependencies.showToast(toast(section));
 	}
@@ -355,7 +481,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		normalizeSections(c);
 		if (!moveSectionStart(c, sectionId, action)) return;
 		rebuildPreview(c);
-		dependencies.saveState({ immediate: true });
+		persistFraming(c, true);
 		dependencies.render();
 		const label =
 			action === "byte-before"
@@ -376,26 +502,28 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (index <= 0) return;
 		c.frameSections.splice(index, 1);
 		rebuildPreview(c);
-		dependencies.saveState({ immediate: true });
+		persistFraming(c, true);
 		dependencies.render();
 	}
 
 	function setSectionCollapse(sectionId: string, collapseRuns: boolean) {
 		const c = capture();
-		const section = c?.frameSections.find(item => item.id === sectionId);
+		if (!c) return;
+		const section = c.frameSections.find(item => item.id === sectionId);
 		if (!section) return;
 		section.collapseRuns = collapseRuns;
-		dependencies.saveState();
+		persistFraming(c);
 		dependencies.renderMessages();
 		dependencies.showToast(collapseRuns ? "Runs collapse in this section" : "Runs expand in this section");
 	}
 
 	function setSectionCollapsed(sectionId: string, collapsed: boolean) {
 		const c = capture();
-		const section = c?.frameSections.find(item => item.id === sectionId);
+		if (!c) return;
+		const section = c.frameSections.find(item => item.id === sectionId);
 		if (!section) return;
 		section.collapsed = Boolean(collapsed);
-		dependencies.saveState();
+		persistFraming(c);
 		dependencies.renderMessages();
 	}
 
@@ -413,12 +541,38 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			}) as ActiveCapture;
 			state.captures.unshift(c);
 			dependencies.setActiveId(c.id);
+			if (dependencies.captureWriter) {
+				void dependencies.captureWriter.createCapture({
+					captureId: String(c.id),
+					name: String(c.name),
+					description: String(c.description ?? ""),
+					view: String(c.view ?? ""),
+					folderId: c.folderId ?? null,
+					baudRate: Number(c.baudRate ?? 115200),
+					inputFormat: "binary",
+					parameters: c.params.flatMap(parameter => {
+						const key = String(parameter.key ?? "").trim();
+						return key ? [{ key, value: String(parameter.value ?? "") }] : [];
+					}),
+					framing: framingRequest(c)
+				}).then(server => {
+					c.storageStatus = "canonical";
+					c.dataRevision = server.dataRevision;
+					c.metadataRevision = server.metadataRevision;
+					c.contentRevision = server.contentRevision;
+				}).catch(error => {
+					state.captures = state.captures.filter(item => item !== c);
+					reportFailure(String(c.id), error);
+					dependencies.render();
+				});
+			}
 		} else {
 			const c = state.captures.find(item => String(item.id) === String(input.captureId)) || capture();
 			if (!c) return false;
 			Object.assign(c, values);
+			metadataPatch(c);
 		}
-		dependencies.saveState();
+		if (input.mode === "new" && !dependencies.captureWriter) dependencies.saveState();
 		dependencies.render();
 		dependencies.showToast("Capture context saved");
 		return true;
@@ -459,16 +613,43 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const [messageId] = input.key.split(":");
 		const message = c.messages.find(item => item.id === messageId);
 		if (!message) return false;
-		c.annotations[details.targetKey] = {
+		const previous = c.annotations[details.targetKey];
+		const optimistic: AnnotationValue = {
 			text: normalizeAnnotationText(input.text),
 			createdAt: Date.now(),
+			noteId: previous?.noteId,
 			type: input.annotationType,
 			targetLabel:
 				input.annotationType === "byte"
 					? `${signature(message)} · byte ${(details.displayPosition as number) + 1}`
 					: signature(message)
 		};
-		dependencies.saveState();
+		c.annotations[details.targetKey] = optimistic;
+		if (isCanonical(c)) {
+			const positionText = input.key.split(":")[1];
+			const position = positionText === undefined ? null : Number(positionText);
+			const rawOffsets = message.rawOffsets ?? message._rawPositions ?? [];
+			const rawOffset = rawOffsets[position ?? -1];
+			if (input.annotationType === "byte" && rawOffset === undefined) {
+				if (previous) c.annotations[details.targetKey] = previous;
+				else delete c.annotations[details.targetKey];
+				return false;
+			}
+			const target: CanonicalNoteTarget = input.annotationType === "byte"
+				? { kind: "byte", rawOffset: rawOffset! }
+				: { kind: "frame", profileId: c.activeFramingProfileId, frameId: message.id, rawOffsets };
+			const operation = previous?.noteId
+				? dependencies.captureWriter!.updateNote({ captureId: c.id, noteId: previous.noteId, text: String(optimistic.text), target })
+				: dependencies.captureWriter!.createNote({ captureId: c.id, text: String(optimistic.text), target });
+			void operation.then(result => {
+				optimistic.noteId = result.note.id;
+				c.contentRevision = result.contentRevision;
+			}).catch(error => reconcileFailure(c.id, error, () => {
+				if (previous) c.annotations[details.targetKey] = previous;
+				else delete c.annotations[details.targetKey];
+				dependencies.render();
+			}));
+		} else dependencies.saveState();
 		dependencies.render();
 		dependencies.showToast("Annotation saved");
 		return true;
@@ -479,8 +660,15 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (!c) return;
 		const details = annotationTargetLabel(c, input.annotationType, input.key);
 		if (!details) return;
+		const previous = c.annotations[details.targetKey];
 		delete c.annotations[details.targetKey];
-		dependencies.saveState();
+		if (isCanonical(c) && previous?.noteId) {
+			void dependencies.captureWriter!.deleteNote({ captureId: c.id, noteId: previous.noteId })
+				.catch(error => reconcileFailure(c.id, error, () => {
+					c.annotations[details.targetKey] = previous;
+					dependencies.render();
+				}));
+		} else dependencies.saveState();
 		dependencies.render();
 		dependencies.showToast("Annotation removed");
 	}
