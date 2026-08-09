@@ -56,8 +56,10 @@ test("canonical query reads stay bounded and use canonical frame rows", async ()
 
 		const window = queries.getFrameWindow("query-capture", 1, 1);
 		assert.equal(window?.totalFrames, 2);
+		assert.equal(window?.hasMore, false);
 		assert.equal(window?.frames.length, 1);
 		assert.deepEqual(window?.frames[0].bytes, [0x30, 0x40]);
+		assert.equal(queries.getFrameWindow("query-capture", 0, 1)?.hasMore, true);
 		assert.equal(queries.getFrameWindow("query-capture", 0, MAX_FRAME_WINDOW_LIMIT + 1)?.limit, MAX_FRAME_WINDOW_LIMIT);
 		repository.close();
 	});
@@ -89,6 +91,7 @@ test("old JSON captures are visible as legacy and are never materialized by boun
 		const window = queries.getFrameWindow("legacy-query-capture", 0, 20);
 		assert.equal(window?.status, "legacy-not-canonicalized");
 		assert.equal(window?.totalFrames, null);
+		assert.equal(window?.hasMore, false);
 		assert.deepEqual(window?.frames, []);
 		assert.equal("messages" in (window ?? {}), false);
 		repository.close();
