@@ -768,6 +768,40 @@ function noteTargetFromRow(row: NoteRow): CanonicalNoteTarget {
 	return { kind: "capture" };
 }
 
+function safeNoteRawOffset(value: number | null): number | null {
+	return value !== null && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function noteRawOffsets(row: NoteRow): number[] | null {
+	if (!row.raw_offsets_json) return null;
+	try {
+		const parsed = JSON.parse(row.raw_offsets_json) as unknown;
+		if (!Array.isArray(parsed)) return null;
+		const offsets = parsed.map(Number);
+		return offsets.every(offset => Number.isSafeInteger(offset) && offset >= 0) ? offsets : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Return the last raw byte explicitly referenced by a note, when its target
+ * shape carries a raw span. A missing span is deliberately represented as
+ * null: retention must not discard a stable target merely because an older
+ * compatibility row cannot prove where its evidence was stored.
+ */
+function noteRawSpanEnd(row: NoteRow): number | null {
+	if (row.target_kind === "byte") return safeNoteRawOffset(row.raw_offset);
+	const explicitEnd = safeNoteRawOffset(row.end_offset);
+	if (row.target_kind === "frame") {
+		const offsets = noteRawOffsets(row) ?? [];
+		const ends = explicitEnd === null ? offsets : [...offsets, explicitEnd];
+		return ends.length ? Math.max(...ends) : null;
+	}
+	if (row.target_kind === "range" || row.target_kind === "sequence" || row.target_kind === "legacy-sequence") return explicitEnd;
+	return null;
+}
+
 export class CanonicalCaptureCommandService {
 	protected readonly database: SqliteDatabase;
 	protected readonly nowIso: () => string;
@@ -1577,16 +1611,7 @@ export class CanonicalCaptureCommandService {
 			const retainedStartOffset = Math.max(capture.retained_start_offset, Math.max(0, nextRawOffset - CANONICAL_RETENTION_LIMIT));
 			let clearedRetainedNotes = 0;
 			if (retainedStartOffset > capture.retained_start_offset) {
-				clearedRetainedNotes = this.database
-					.prepare(
-						`DELETE FROM stable_notes
-						 WHERE capture_id = @captureId
-						   AND (
-						     (target_kind = 'byte' AND raw_offset < @retainedStartOffset)
-						     OR target_kind IN ('frame', 'range', 'sequence-group', 'sequence', 'pattern', 'legacy-sequence')
-						   )`
-					)
-					.run({ captureId, retainedStartOffset }).changes;
+				clearedRetainedNotes = this.pruneStableNotesOutsideRetainedWindow(captureId, retainedStartOffset);
 			}
 			const receivedTimestamps = flattened.timestamps.filter((_, index) => flattened.directions[index] !== "tx");
 			const firstReceivedAt = receivedTimestamps.length
@@ -2190,6 +2215,36 @@ export class CanonicalCaptureCommandService {
 			)
 			.get({ captureId, rawOffset });
 		if (!row) throw new CanonicalCaptureNotFoundError(`${captureId}/bytes/${rawOffset}`);
+	}
+
+	private pruneStableNotesOutsideRetainedWindow(captureId: string, retainedStartOffset: number): number {
+		const notes = this.database
+			.prepare(
+				`SELECT id, capture_id, text, created_at, updated_at, target_kind, raw_offset, profile_id,
+						raw_offsets_json, start_offset, end_offset, sequence_key, start_row, end_row, sequence_group_id
+				 FROM stable_notes WHERE capture_id = @captureId`
+			)
+			.all({ captureId }) as NoteRow[];
+		const sequenceGroupEndOffsets = new Map<string, number | null>();
+		const deleteNote = this.database.prepare("DELETE FROM stable_notes WHERE capture_id = @captureId AND id = @noteId");
+		let deleted = 0;
+		for (const note of notes) {
+			let rawSpanEnd = noteRawSpanEnd(note);
+			if (note.target_kind === "sequence-group" && rawSpanEnd === null && note.sequence_group_id) {
+				if (!sequenceGroupEndOffsets.has(note.sequence_group_id)) {
+					const occurrence = this.database
+						.prepare("SELECT MAX(end_raw_offset) AS end_raw_offset FROM sequence_occurrences WHERE group_id = @groupId")
+						.get({ groupId: note.sequence_group_id }) as { end_raw_offset: number | null } | undefined;
+					sequenceGroupEndOffsets.set(note.sequence_group_id, occurrence?.end_raw_offset ?? null);
+				}
+				rawSpanEnd = sequenceGroupEndOffsets.get(note.sequence_group_id) ?? null;
+			}
+			// The retained window is inclusive at retainedStartOffset. Delete only
+			// when every known byte in the target's span is before that boundary.
+			if (rawSpanEnd === null || rawSpanEnd >= retainedStartOffset) continue;
+			deleted += deleteNote.run({ captureId, noteId: note.id }).changes;
+		}
+		return deleted;
 	}
 
 	private resolveFrameSpan(request: Omit<FrameVisibilityRequest, "hidden">): {
