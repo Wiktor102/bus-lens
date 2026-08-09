@@ -3,7 +3,7 @@ import type { SqliteDatabase } from "./database.ts";
 export const DEFAULT_FRAME_WINDOW_LIMIT = 50;
 export const MAX_FRAME_WINDOW_LIMIT = 200;
 
-export type CanonicalCaptureStatus = "canonical" | "legacy-not-canonicalized";
+export type CanonicalCaptureStatus = "canonical" | "legacy-not-canonicalized" | "canonicalization-failed";
 
 export type CanonicalCaptureSummary = {
 	id: string;
@@ -62,6 +62,7 @@ type LegacySummaryRow = {
 	folder_id: unknown;
 	created_at: string;
 	updated_at: string;
+	status: "legacy-not-canonicalized" | "canonicalization-failed";
 };
 
 type FrameRow = {
@@ -110,7 +111,7 @@ function canonicalSummary(row: CanonicalSummaryRow): CanonicalCaptureSummary {
 function legacySummary(row: LegacySummaryRow): CanonicalCaptureSummary {
 	return {
 		id: row.id,
-		status: "legacy-not-canonicalized",
+		status: row.status,
 		name: optionalString(row.name) ?? "Untitled capture",
 		lifecycle: optionalString(row.lifecycle),
 		byteCount: nonNegativeInteger(row.byte_count),
@@ -134,23 +135,27 @@ export class CanonicalQueryService {
 
 	private getCanonicalSummary(captureId: string): CanonicalCaptureSummary | undefined {
 		const row = this.database.prepare(
-			`SELECT id, name, lifecycle, byte_count, created_at, updated_at, folder_id
-			 FROM captures WHERE id = @captureId`
+			`SELECT captures.id, captures.name, captures.lifecycle, captures.byte_count,
+			        captures.created_at, captures.updated_at, captures.folder_id
+			 FROM capture_storage
+			 JOIN captures ON captures.id = capture_storage.capture_id
+			 WHERE capture_storage.capture_id = @captureId AND capture_storage.status = 'canonical'`
 		).get({ captureId }) as CanonicalSummaryRow | undefined;
 		return row ? canonicalSummary(row) : undefined;
 	}
 
 	private getLegacySummary(captureId: string): CanonicalCaptureSummary | undefined {
 		const row = this.database.prepare(
-			`SELECT id,
+			`SELECT documents.id,
 					json_extract(document_json, '$.name') AS name,
 					json_extract(document_json, '$.lifecycle') AS lifecycle,
 					json_extract(document_json, '$.byteCount') AS byte_count,
 					json_extract(document_json, '$.folderId') AS folder_id,
-					created_at, updated_at
-			 FROM capture_documents
-			 WHERE id = @captureId
-			   AND NOT EXISTS (SELECT 1 FROM captures WHERE captures.id = capture_documents.id)`
+					documents.created_at, documents.updated_at, capture_storage.status
+			 FROM capture_storage
+			 JOIN capture_documents AS documents ON documents.id = capture_storage.capture_id
+			 WHERE capture_storage.capture_id = @captureId
+			   AND capture_storage.status IN ('legacy-not-canonicalized','canonicalization-failed')`
 		).get({ captureId }) as LegacySummaryRow | undefined;
 		return row ? legacySummary(row) : undefined;
 	}
@@ -161,19 +166,24 @@ export class CanonicalQueryService {
 
 	listCaptureSummaries(): CanonicalCaptureSummary[] {
 		const canonical = this.database.prepare(
-			`SELECT id, name, lifecycle, byte_count, created_at, updated_at, folder_id
-			 FROM captures ORDER BY updated_at DESC, id ASC`
+			`SELECT captures.id, captures.name, captures.lifecycle, captures.byte_count,
+			        captures.created_at, captures.updated_at, captures.folder_id
+			 FROM capture_storage
+			 JOIN captures ON captures.id = capture_storage.capture_id
+			 WHERE capture_storage.status = 'canonical'
+			 ORDER BY captures.updated_at DESC, captures.id ASC`
 		).all() as CanonicalSummaryRow[];
 		const legacy = this.database.prepare(
-			`SELECT id,
+			`SELECT documents.id,
 					json_extract(document_json, '$.name') AS name,
 					json_extract(document_json, '$.lifecycle') AS lifecycle,
 					json_extract(document_json, '$.byteCount') AS byte_count,
 					json_extract(document_json, '$.folderId') AS folder_id,
-					created_at, updated_at
-			 FROM capture_documents
-			 WHERE NOT EXISTS (SELECT 1 FROM captures WHERE captures.id = capture_documents.id)
-			 ORDER BY updated_at DESC, id ASC`
+					documents.created_at, documents.updated_at, capture_storage.status
+			 FROM capture_storage
+			 JOIN capture_documents AS documents ON documents.id = capture_storage.capture_id
+			 WHERE capture_storage.status IN ('legacy-not-canonicalized','canonicalization-failed')
+			 ORDER BY documents.updated_at DESC, documents.id ASC`
 		).all() as LegacySummaryRow[];
 		return [...canonical.map(canonicalSummary), ...legacy.map(legacySummary)].sort(
 			(left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id)
@@ -183,14 +193,15 @@ export class CanonicalQueryService {
 	getCaptureOverview(captureId: string): CanonicalCaptureOverview | undefined {
 		const summary = this.getCaptureSummary(captureId);
 		if (!summary) return undefined;
-		if (summary.status === "legacy-not-canonicalized") {
+		if (summary.status !== "canonical") {
 			return { ...summary, rawByteCount: null, frameCount: null, activeProfile: null };
 		}
 
 		const profile = this.database.prepare(
-			`SELECT id, version, algorithm_version AS algorithmVersion
-			 FROM framing_profiles
-			 WHERE capture_id = @captureId AND is_active = 1
+			`SELECT framing_profiles.id, framing_profiles.version, framing_profiles.algorithm_version AS algorithmVersion
+			 FROM captures
+			 JOIN framing_profiles ON framing_profiles.id = captures.active_framing_profile_id
+			 WHERE captures.id = @captureId
 			 LIMIT 1`
 		).get({ captureId }) as { id: string; version: number; algorithmVersion: number } | undefined;
 		const frameCount = profile
@@ -210,12 +221,14 @@ export class CanonicalQueryService {
 		const boundedLimit = Math.min(limit, MAX_FRAME_WINDOW_LIMIT);
 		const summary = this.getCaptureSummary(captureId);
 		if (!summary) return undefined;
-		if (summary.status === "legacy-not-canonicalized") {
+		if (summary.status !== "canonical") {
 			return { capture: summary, status: summary.status, offset, limit: boundedLimit, totalFrames: null, hasMore: false, frames: [] };
 		}
 
 		const profile = this.database.prepare(
-			"SELECT id FROM framing_profiles WHERE capture_id = @captureId AND is_active = 1 LIMIT 1"
+			`SELECT framing_profiles.id FROM captures
+			 JOIN framing_profiles ON framing_profiles.id = captures.active_framing_profile_id
+			 WHERE captures.id = @captureId LIMIT 1`
 		).get({ captureId }) as { id: string } | undefined;
 		if (!profile) return { capture: summary, status: summary.status, offset, limit: boundedLimit, totalFrames: 0, hasMore: false, frames: [] };
 		const totalFrames = (this.database.prepare("SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId").get({ profileId: profile.id }) as { count: number }).count;
