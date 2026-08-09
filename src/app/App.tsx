@@ -28,6 +28,11 @@ import { getTransportActions, getTransportSnapshot, subscribeToTransport } from 
 import { getNotesActions, getNotesSnapshot, subscribeToNotes } from "../features/notes/notes-bridge";
 import { getToastSnapshot, subscribeToToast } from "../shared/toast-bridge";
 import {
+	getPersistenceErrorActions,
+	getPersistenceErrorSnapshot,
+	subscribeToPersistenceError
+} from "../shared/persistence-error-bridge";
+import {
 	AnnotationDialog,
 	ContextDialog,
 	ExportDialog,
@@ -940,6 +945,28 @@ function Toast({ sendPopupOpen }: { sendPopupOpen: boolean }) {
 	);
 }
 
+function PersistenceErrorBanner() {
+	const snapshot = useSyncExternalStore(
+		subscribeToPersistenceError,
+		getPersistenceErrorSnapshot,
+		getPersistenceErrorSnapshot
+	);
+	if (!snapshot.visible) return null;
+	return (
+		<div className="persistence-error" role="alert">
+			<div>
+				<strong>Capture is not fully stored.</strong>
+				<span>{snapshot.message}</span>
+			</div>
+			<div className="persistence-error-actions">
+				{snapshot.canRetry ? <button className="btn" type="button" onClick={() => getPersistenceErrorActions().retry()}>Retry</button> : null}
+				{snapshot.canExportRecovery ? <button className="btn" type="button" onClick={() => getPersistenceErrorActions().exportRecovery()}>Export recovery JSON</button> : null}
+				<button className="btn" type="button" onClick={() => getPersistenceErrorActions().dismiss()}>Dismiss</button>
+			</div>
+		</div>
+	);
+}
+
 const SIDEBAR_WIDTH_STORAGE_KEY = "bus-lens.sidebar-width";
 const DEFAULT_SIDEBAR_WIDTH = 260;
 const NARROW_SIDEBAR_WIDTH = 210;
@@ -1068,6 +1095,7 @@ function App() {
 		<>
 			<div className="app-shell">
 				<TopBar />
+				<PersistenceErrorBanner />
 				<main
 					className={`workspace ${sidebarResizing ? "sidebar-resizing" : ""}`.trim()}
 					style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}

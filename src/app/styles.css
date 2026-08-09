@@ -2356,6 +2356,29 @@ tr:hover .row-action,
 	bottom: 22px;
 }
 
+.persistence-error {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	padding: 10px 16px;
+	border-bottom: 1px solid #8f3d3d;
+	background: #3a1f22;
+	color: #ffe9e9;
+}
+
+.persistence-error > div:first-child {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.persistence-error-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
 @media (max-width: 900px) {
 	.capture-title-row {
 		align-items: flex-start;
