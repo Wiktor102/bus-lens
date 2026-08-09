@@ -2,6 +2,12 @@ import { publishTransportSnapshot } from "./transport-bridge.ts";
 import type { AppState } from "../../shared/app-state.ts";
 import { recordReceivedByte } from "../capture/capture-summary.ts";
 import { rebuildPreview, type Capture } from "../capture/capture-framing.ts";
+import {
+	CaptureAppendQueue,
+	type AppendCaptureChunkRequest,
+	type AppendCaptureChunkResponse,
+	type CaptureAppendBoundary
+} from "./capture-append-queue.ts";
 
 // A capture remains useful at this size while still fitting comfortably in browser storage.
 export const MAX_CAPTURE_BYTES = 50_000;
@@ -36,9 +42,17 @@ export type SerialControllerDependencies = {
 	stopSendQueue: () => void;
 	publishSendState?: () => void;
 	serial?: SerialProvider;
+	recordingWriter?: {
+		startSession: (captureId: string, sessionId: string) => Promise<CaptureAppendBoundary>;
+		appendChunk: (request: AppendCaptureChunkRequest) => Promise<AppendCaptureChunkResponse>;
+		finalizeSession: (captureId: string, sessionId: string, expectedDataRevision: number) => Promise<unknown>;
+		refreshCapture?: (captureId: string) => Promise<Capture>;
+	};
+	publishPersistenceError?: (error: { captureId: string; message: string } | null) => void;
 };
 
 type PendingLiveByte = {
+	captureId?: string;
 	value: number;
 	timestamp: number;
 	direction: string;
@@ -59,9 +73,38 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 	let recording = false;
 	let recordingSessionId: string | null = null;
+	let recordingCaptureId: string | null = null;
 	let readAbort = false;
 	let pendingLiveBytes: PendingLiveByte[] = [];
 	let liveRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+	let persistenceError: { captureId: string; error: unknown } | null = null;
+	let stopPromise: Promise<void> | null = null;
+	let startPromise: Promise<void> | null = null;
+	const appendQueue = dependencies.recordingWriter
+		? new CaptureAppendQueue(
+				{ appendChunk: request => dependencies.recordingWriter!.appendChunk(request) },
+				{
+					onPersistentError: (captureId, error) => handlePersistenceFailure(captureId, error),
+					onBackpressureChange: (_captureId, active) => {
+						if (!active) publishState();
+					}
+				}
+			)
+		: null;
+
+	function captureById(captureId: string | undefined): Capture | undefined {
+		if (!captureId) return dependencies.capture();
+		return dependencies.state.captures.find(capture => String(capture.id) === captureId) as Capture | undefined;
+	}
+
+	function handlePersistenceFailure(captureId: string, error: unknown): void {
+		persistenceError = { captureId, error };
+		recording = false;
+		const message = error instanceof Error ? error.message : String(error);
+		dependencies.publishPersistenceError?.({ captureId, message });
+		dependencies.showToast("Capture persistence paused — retry or export JSON recovery");
+		publishState();
+	}
 
 	function isConnected() {
 		return Boolean(port);
@@ -114,7 +157,8 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	function flushLiveBytes() {
 		liveRefreshTimer = null;
 		if (!pendingLiveBytes.length) return;
-		const capture = dependencies.capture();
+		const captureId = pendingLiveBytes[0]?.captureId;
+		const capture = captureById(captureId);
 		if (!capture) {
 			pendingLiveBytes = [];
 			return;
@@ -131,10 +175,22 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			}
 		}
 		capture.nextRawOffset = nextRawOffset;
+		if (captureId && appendQueue && recordingSessionId && captureId === recordingCaptureId) {
+			for (const record of pendingLiveBytes) {
+				appendQueue.enqueue(captureId, {
+					timestamp: record.timestamp,
+					direction: record.direction === "tx" ? "tx" : "rx",
+					bytes: [record.value]
+				});
+			}
+			void appendQueue.flush(captureId).catch(() => {
+				// The queue retains the rejected batch and publishes a persistent error.
+			});
+		}
 		pendingLiveBytes = [];
 		const trimmed = trimCapture(capture);
 		rebuildPreview(capture);
-		dependencies.saveState();
+		if (!dependencies.recordingWriter) dependencies.saveState();
 		dependencies.publishCaptureHeaderState();
 		dependencies.publishFramingToolbarState(capture);
 		dependencies.renderMessages();
@@ -147,6 +203,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		const timestamp = performance.timeOrigin + performance.now();
 		for (const value of bytes) {
 			pendingLiveBytes.push({
+				captureId: recordingCaptureId ?? (dependencies.capture()?.id ? String(dependencies.capture()?.id) : undefined),
 				value,
 				timestamp,
 				direction,
@@ -165,6 +222,13 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			reader = port.readable.getReader();
 			try {
 				while (true) {
+					if (recordingCaptureId && appendQueue?.isBackpressured(recordingCaptureId)) {
+						try {
+							await appendQueue.drain(recordingCaptureId);
+						} catch {
+							break;
+						}
+					}
 					const { value, done } = await reader.read();
 					if (done) break;
 					if (recording && value) ingestChunk(value);
@@ -213,10 +277,9 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	}
 
 	async function disconnect({ persist = true }: DisconnectOptions = {}) {
-		flushLiveBytes();
-		recording = false;
-		recordingSessionId = null;
-		if (persist) dependencies.saveState({ immediate: true });
+		if (recording || recordingSessionId) await stopRecording({ notify: false, persist });
+		else flushLiveBytes();
+		if (persist && !dependencies.recordingWriter) dependencies.saveState({ immediate: true });
 		readAbort = true;
 		dependencies.stopSendQueue();
 		try {
@@ -230,36 +293,93 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		publishState();
 	}
 
-	function stopRecording({ notify = false } = {}) {
-		if (!recording) return;
-		flushLiveBytes();
+	function stopRecording({ notify = false, persist = true } = {}): Promise<void> {
+		if (stopPromise) return stopPromise;
+		if (!recording && !recordingSessionId) return Promise.resolve();
+		const captureId = recordingCaptureId;
+		const sessionId = recordingSessionId;
 		recording = false;
-		recordingSessionId = null;
-		dependencies.saveState({ immediate: true });
-		dependencies.publishCaptureHeaderState();
-		publishState();
-		if (notify) dependencies.showToast("Capture saved locally");
+		flushLiveBytes();
+		stopPromise = (async () => {
+			if (captureId && sessionId && appendQueue && dependencies.recordingWriter) {
+				await appendQueue.drain(captureId);
+				const boundary = appendQueue.boundary(captureId);
+				await dependencies.recordingWriter.finalizeSession(captureId, sessionId, boundary.dataRevision);
+				if (dependencies.recordingWriter.refreshCapture) {
+					const refreshed = await dependencies.recordingWriter.refreshCapture(captureId);
+					const capture = captureById(captureId);
+					if (capture) Object.assign(capture, refreshed);
+				}
+			} else if (persist) {
+				dependencies.saveState({ immediate: true });
+			}
+			recordingSessionId = null;
+			recordingCaptureId = null;
+			persistenceError = null;
+			dependencies.publishPersistenceError?.(null);
+			dependencies.publishCaptureHeaderState();
+			publishState();
+			if (notify) dependencies.showToast("Capture finalized and stored");
+		})().catch(error => {
+			if (captureId) handlePersistenceFailure(captureId, error);
+			throw error;
+		}).finally(() => {
+			stopPromise = null;
+		});
+		return stopPromise;
 	}
 
-	function toggleRecording() {
+	function toggleRecording(): Promise<void> {
 		const capture = dependencies.capture();
 		if (!capture) {
 			dependencies.showToast("Create a capture before starting capture");
-			return;
+			return Promise.resolve();
 		}
 		if (recording) {
-			stopRecording({ notify: true });
-			return;
+			return stopRecording({ notify: true });
 		}
-		const session = { id: crypto.randomUUID() };
-		capture.captureSessions ||= [];
-		capture.captureSessions.push(session);
-		recordingSessionId = session.id;
-		recording = true;
-		dependencies.saveState();
-		dependencies.publishCaptureHeaderState();
-		publishState();
-		dependencies.showToast("Capture started");
+		if (startPromise) return startPromise;
+		const captureId = String(capture.id ?? "");
+		const sessionId = crypto.randomUUID();
+		startPromise = (async () => {
+			if (dependencies.recordingWriter && appendQueue) {
+				const boundary = await dependencies.recordingWriter.startSession(captureId, sessionId);
+				appendQueue.start(captureId, boundary);
+			}
+			const session = { id: sessionId };
+			capture.captureSessions ||= [];
+			capture.captureSessions.push(session);
+			recordingCaptureId = captureId;
+			recordingSessionId = session.id;
+			recording = true;
+			persistenceError = null;
+			dependencies.publishPersistenceError?.(null);
+			if (!dependencies.recordingWriter) dependencies.saveState();
+			dependencies.publishCaptureHeaderState();
+			publishState();
+			dependencies.showToast("Capture started");
+		})().catch(error => {
+			handlePersistenceFailure(captureId, error);
+			throw error;
+		}).finally(() => {
+			startPromise = null;
+		});
+		return startPromise;
+	}
+
+	async function retryPersistence(): Promise<void> {
+		if (!persistenceError || !appendQueue) return;
+		const captureId = persistenceError.captureId;
+		persistenceError = null;
+		dependencies.publishPersistenceError?.(null);
+		await appendQueue.retry(captureId);
+		await stopRecording({ notify: true });
+	}
+
+	function recoveryDocument(): Capture | undefined {
+		const captureId = persistenceError?.captureId ?? recordingCaptureId ?? undefined;
+		const capture = captureById(captureId);
+		return capture ? JSON.parse(JSON.stringify(capture)) as Capture : undefined;
 	}
 
 	async function toggleConnection() {
@@ -278,6 +398,10 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		getPort,
 		isConnected,
 		isRecording,
+		hasUnacknowledgedBytes: () => appendQueue?.hasUnacknowledgedBytes() ?? false,
+		getPersistenceError: () => persistenceError?.error ?? null,
+		retryPersistence,
+		recoveryDocument,
 		publishState
 	};
 }
