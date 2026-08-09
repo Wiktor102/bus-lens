@@ -4,12 +4,15 @@ import {
 	convertCaptureDocumentToCanonical as convertDocumentCanonical,
 	createFramingRevision as createCanonicalRevision,
 	getActiveProfile as getCanonicalActiveProfile,
-	getPreviousProfiles as listCanonicalPreviousProfiles,
-	isCaptureConverted as isCanonicalCaptureConverted,
-	updateCanonicalCapture as updateDocumentCanonical
+	getPreviousProfiles as listCanonicalPreviousProfiles
 } from "./canonical.ts";
 
 export type JsonDocument = Record<string, unknown>;
+
+export type CaptureStorageStatus =
+	| "legacy-not-canonicalized"
+	| "canonical"
+	| "canonicalization-failed";
 
 export type DocumentRecord = {
 	id: string;
@@ -83,11 +86,19 @@ type StoredImportRow = {
 type DocumentTable = "capture_documents" | "folders" | "send_queue" | "send_history";
 
 export class RepositoryConflictError extends Error {
-	readonly code = "VERSION_CONFLICT";
+	readonly code: string;
 
-	constructor(message = "The document was changed by another writer") {
+	constructor(message = "The document was changed by another writer", code = "VERSION_CONFLICT") {
 		super(message);
 		this.name = "RepositoryConflictError";
+		this.code = code;
+	}
+}
+
+export class CanonicalCommandRequiredError extends RepositoryConflictError {
+	constructor() {
+		super("Canonical captures must be changed through command-specific endpoints", "canonical-command-required");
+		this.name = "CanonicalCommandRequiredError";
 	}
 }
 
@@ -326,27 +337,48 @@ export class ArchiveRepository {
 			.run({ entityType, entityId, folderId, position });
 	}
 
+	getCaptureStorageStatus(id: string): CaptureStorageStatus | undefined {
+		const row = this.database
+			.prepare("SELECT status FROM capture_storage WHERE capture_id = @id")
+			.get({ id }) as { status: CaptureStorageStatus } | undefined;
+		return row?.status;
+	}
+
+	private markLegacyCapture(id: string): void {
+		this.database
+			.prepare(
+				`INSERT INTO capture_storage (capture_id, status, updated_at, last_error)
+				 VALUES (@captureId, 'legacy-not-canonicalized', @updatedAt, NULL)
+				 ON CONFLICT (capture_id) DO UPDATE SET
+				 status = capture_storage.status,
+				 updated_at = excluded.updated_at`
+			)
+			.run({ captureId: id, updatedAt: this.nowIso() });
+	}
+
 	getCapture(id: string): DocumentRecord | undefined {
-		// Mixed state: prefer canonical synthesis if converted, fallback to JSON document
-		const canonical = this.getCanonicalCapture(id);
-		if (canonical) return canonical;
-		return this.getDocument("capture_documents", id);
+		const status = this.getCaptureStorageStatus(id);
+		if (status === "canonical") return this.getCanonicalCapture(id);
+		if (status === "legacy-not-canonicalized" || status === "canonicalization-failed") {
+			return this.getDocument("capture_documents", id);
+		}
+		return undefined;
 	}
 
 	listCaptures(): DocumentRecord[] {
-		// Mixed state: merge canonical captures (synthesized) and unconverted JSON documents.
-		// Converted captures must remain readable alongside unconverted ones during rollout.
-		const canonicalRows = this.database
-			.prepare("SELECT id, updated_at, created_at FROM captures ORDER BY updated_at DESC, id ASC")
-			.all() as Array<{ id: string; updated_at: string; created_at: string }>;
-		const hasCanonical = canonicalRows.length > 0;
-		const jsonRows = this.listDocuments("capture_documents", "updated_at DESC, id ASC");
-		if (!hasCanonical) return jsonRows;
-		const canonicalIds = new Set(canonicalRows.map(r => r.id));
-		const synthesized: DocumentRecord[] = canonicalRows
-			.map(row => this.getCanonicalCapture(row.id))
+		const storageRows = this.database
+			.prepare("SELECT capture_id, status FROM capture_storage ORDER BY updated_at DESC, capture_id ASC")
+			.all() as Array<{ capture_id: string; status: CaptureStorageStatus }>;
+		const canonicalIds = storageRows.filter(row => row.status === "canonical").map(row => row.capture_id);
+		const legacyIds = storageRows
+			.filter(row => row.status !== "canonical")
+			.map(row => row.capture_id);
+		const synthesized = canonicalIds
+			.map(id => this.getCanonicalCapture(id))
 			.filter((r): r is DocumentRecord => Boolean(r));
-		const unconverted = jsonRows.filter(r => !canonicalIds.has(r.id));
+		const unconverted = legacyIds
+			.map(id => this.getDocument("capture_documents", id))
+			.filter((record): record is DocumentRecord => Boolean(record));
 		// Preserve archive_order ordering as primary sort if available, else fall back to synthesized+unconverted by updated_at
 		const order = this.database
 			.prepare("SELECT entity_id, position FROM archive_order WHERE entity_type='capture' ORDER BY position, entity_id")
@@ -366,26 +398,52 @@ export class ArchiveRepository {
 
 	/** Returns synthesized DocumentRecord from canonical tables if converted, otherwise undefined */
 	getCanonicalCapture(id: string): DocumentRecord | undefined {
-		const cap = this.database.prepare("SELECT id, name, lifecycle, byte_count, created_at, updated_at, folder_id FROM captures WHERE id = @id").get({ id }) as
-			| { id: string; name: string; lifecycle: string; byte_count: number; created_at: string; updated_at: string; folder_id: string | null }
+		if (this.getCaptureStorageStatus(id) !== "canonical") return undefined;
+		const cap = this.database.prepare(
+			`SELECT id, name, description, controller_view, lifecycle, byte_count,
+			        baud_rate, input_format, data_revision, metadata_revision,
+			        content_revision, retained_start_offset, created_at, updated_at,
+			        folder_id, active_framing_profile_id
+			 FROM captures WHERE id = @id`
+		).get({ id }) as
+			| {
+				id: string;
+				name: string;
+				description: string;
+				controller_view: string;
+				lifecycle: string;
+				byte_count: number;
+				baud_rate: number;
+				input_format: string;
+				data_revision: number;
+				metadata_revision: number;
+				content_revision: number;
+				retained_start_offset: number;
+				created_at: string;
+				updated_at: string;
+				folder_id: string | null;
+				active_framing_profile_id: string | null;
+			}
 			| undefined;
 		if (!cap) return undefined;
-		// Canonical tables currently model capture data, but not every JSON metadata
-		// field. Keep the retained document as the metadata source while canonical
-		// values below remain authoritative for reconstructed data.
-		const existingDoc = this.getDocument("capture_documents", id);
-		const originalByteStream = Array.isArray(existingDoc?.document.byteStream) ? existingDoc.document.byteStream : [];
-		const sessionIdsByRawOffset = new Map<number, string>();
-		for (const record of originalByteStream) {
-			if (!isJsonDocument(record)) continue;
-			const rawOffset = Number(record.rawOffset);
-			if (!Number.isSafeInteger(rawOffset) || rawOffset < 0 || typeof record.sessionId !== "string" || !record.sessionId) continue;
-			sessionIdsByRawOffset.set(rawOffset, record.sessionId);
-		}
+		const parameters = this.database
+			.prepare("SELECT key_text, value_text FROM capture_parameters WHERE capture_id = @captureId ORDER BY position")
+			.all({ captureId: id }) as Array<{ key_text: string; value_text: string }>;
+		const byteVisibility = new Map(
+			(this.database
+				.prepare("SELECT raw_offset, hidden FROM raw_byte_visibility WHERE capture_id = @captureId")
+				.all({ captureId: id }) as Array<{ raw_offset: number; hidden: number }>)
+				.map(row => [row.raw_offset, Boolean(row.hidden)])
+		);
 		// Reassemble byteStream from raw_chunks
 		const chunks = this.database
-			.prepare("SELECT bytes, timestamps_json, directions_json, hidden_json, start_offset, session_id, session_ids_json FROM raw_chunks WHERE capture_id = @captureId ORDER BY chunk_index")
-			.all({ captureId: id }) as Array<{
+			.prepare(
+				`SELECT bytes, timestamps_json, directions_json, hidden_json, start_offset, session_id, session_ids_json
+				 FROM raw_chunks
+				 WHERE capture_id = @captureId AND start_offset + byte_count > @retainedStartOffset
+				 ORDER BY chunk_index`
+			)
+			.all({ captureId: id, retainedStartOffset: cap.retained_start_offset }) as Array<{
 			bytes: Buffer;
 			timestamps_json: string;
 			directions_json: string;
@@ -403,13 +461,14 @@ export class ArchiveRepository {
 			const bytes = ch.bytes instanceof Buffer ? [...ch.bytes] : Array.from(new Uint8Array(ch.bytes as unknown as Uint8Array));
 			for (let i = 0; i < bytes.length; i++) {
 				const rawOffset = ch.start_offset + i;
-				const sessionId = sessionIds[i] ?? ch.session_id ?? sessionIdsByRawOffset.get(rawOffset);
+				if (rawOffset < cap.retained_start_offset) continue;
+				const sessionId = sessionIds[i] ?? ch.session_id;
 				byteStream.push({
 					rawOffset,
 					value: bytes[i],
 					timestamp: timestamps[i] ?? 0,
 					direction: directions[i] || "rx",
-					hidden: Boolean(hidden[i]),
+					hidden: byteVisibility.get(rawOffset) ?? Boolean(hidden[i]),
 					...(sessionId ? { sessionId } : {})
 				});
 			}
@@ -417,22 +476,36 @@ export class ArchiveRepository {
 		const canonicalSessions = this.database
 			.prepare("SELECT id, first_received_at, last_received_at FROM capture_sessions WHERE capture_id = @captureId ORDER BY ordinal")
 			.all({ captureId: id }) as Array<{ id: string; first_received_at: number | null; last_received_at: number | null }>;
-		const captureSessions: JsonDocument[] = canonicalSessions.length
-			? canonicalSessions.map(session => ({
+		const captureSessions: JsonDocument[] = canonicalSessions.map(session => ({
 					id: session.id,
 					...(session.first_received_at === null ? {} : { firstReceivedAt: session.first_received_at }),
 					...(session.last_received_at === null ? {} : { lastReceivedAt: session.last_received_at })
-				}))
-			: Array.isArray(existingDoc?.document.captureSessions)
-				? existingDoc.document.captureSessions as JsonDocument[]
-				: [];
+				}));
 		// Active framing profile
 		const activeProfile = this.database
-			.prepare("SELECT id, version, algorithm_version FROM framing_profiles WHERE capture_id = @captureId AND is_active = 1 LIMIT 1")
-			.get({ captureId: id }) as { id: string; version: number; algorithm_version: number } | undefined;
+			.prepare(
+				`SELECT id, version, algorithm_version FROM framing_profiles
+				 WHERE id = @profileId AND capture_id = @captureId LIMIT 1`
+			)
+			.get({ profileId: cap.active_framing_profile_id, captureId: id }) as
+				| { id: string; version: number; algorithm_version: number }
+				| undefined;
 		let frameSections: JsonDocument[] = [];
 		let messages: JsonDocument[] = [];
 		if (activeProfile) {
+			const frameVisibility = new Map(
+				(this.database
+					.prepare(
+						`SELECT start_raw_offset, end_raw_offset, hidden
+						 FROM frame_visibility WHERE capture_id = @captureId AND profile_id = @profileId`
+					)
+					.all({ captureId: id, profileId: activeProfile.id }) as Array<{
+						start_raw_offset: number;
+						end_raw_offset: number;
+						hidden: number;
+					}>)
+					.map(row => [`${row.start_raw_offset}:${row.end_raw_offset}`, Boolean(row.hidden)])
+			);
 			const sections = this.database
 				.prepare(
 					"SELECT id, start_offset, framing_mode, frame_length, marker_bytes, marker_position, time_gap_ms, collapse_runs, collapsed FROM framing_sections WHERE profile_id = @profileId ORDER BY position"
@@ -487,13 +560,14 @@ export class ArchiveRepository {
 				const rawOffsets: number[] = JSON.parse(f.raw_offsets_json) as number[];
 				const bytes: number[] = JSON.parse(f.bytes_json) as number[];
 				const timestamps: number[] = JSON.parse(f.timestamps_json) as number[];
+				const frameVisibilityKey = `${rawOffsets[0] ?? 0}:${rawOffsets.at(-1) ?? 0}`;
 				return {
 					id: f.id,
 					timestamp: timestamps[0] ?? 0,
 					byteTimestamps: timestamps,
 					bytes,
 					directions: JSON.parse(f.directions_json) as string[],
-					hidden: Boolean(f.hidden),
+					hidden: frameVisibility.get(frameVisibilityKey) ?? Boolean(f.hidden),
 					hiddenBytes: bytes.map(() => false),
 					sourceIndex: f.ordinal,
 					sectionId: f.section_id,
@@ -523,8 +597,18 @@ export class ArchiveRepository {
 		const captureNotes: JsonDocument[] = [];
 		const annotations: Record<string, JsonDocument> = {};
 		for (const row of notesRows) {
-			if (row.target_kind === "legacy-sequence") {
-				captureNotes.push({ id: row.id, type: "sequence", text: row.text, createdAt: new Date(row.created_at).getTime(), start: row.start_row, end: row.end_row, targetLabel: `rows ${row.start_row}–${row.end_row}` });
+			if (row.target_kind === "legacy-sequence" || row.target_kind === "range") {
+				captureNotes.push({
+					id: row.id,
+					type: "sequence",
+					text: row.text,
+					createdAt: new Date(row.created_at).getTime(),
+					start: row.start_row,
+					end: row.end_row,
+					startRawOffset: row.start_offset,
+					endRawOffset: row.end_offset,
+					targetLabel: `rows ${row.start_row}–${row.end_row}`
+				});
 			} else if (row.target_kind === "capture") {
 				captureNotes.push({ id: row.id, type: "capture", text: row.text, createdAt: new Date(row.created_at).getTime() });
 			} else if (row.target_kind === "byte") {
@@ -542,13 +626,26 @@ export class ArchiveRepository {
 		}
 
 		const document: JsonDocument = {
-			...(existingDoc?.document ?? {}),
 			id: cap.id,
 			name: cap.name,
+			description: cap.description,
+			view: cap.controller_view,
 			createdAt: cap.created_at,
+			updatedAt: cap.updated_at,
 			lifecycle: cap.lifecycle,
 			byteCount: cap.byte_count,
 			folderId: cap.folder_id,
+			baudRate: cap.baud_rate,
+			inputFormat: cap.input_format,
+			params: parameters.map(parameter => ({ key: parameter.key_text, value: parameter.value_text })),
+			parameters: parameters.map(parameter => ({ key: parameter.key_text, value: parameter.value_text })),
+			storageStatus: "canonical",
+			dataRevision: cap.data_revision,
+			metadataRevision: cap.metadata_revision,
+			contentRevision: cap.content_revision,
+			retainedStartOffset: cap.retained_start_offset,
+			activeFramingProfileId: cap.active_framing_profile_id,
+			isRetainedTail: cap.retained_start_offset > 0,
 			byteStream,
 			frameSections,
 			messages,
@@ -560,7 +657,7 @@ export class ArchiveRepository {
 		};
 		return {
 			id: cap.id,
-			version: existingDoc?.version ?? 1,
+			version: Math.max(1, cap.metadata_revision + cap.content_revision),
 			document,
 			createdAt: cap.created_at,
 			updatedAt: cap.updated_at
@@ -569,16 +666,9 @@ export class ArchiveRepository {
 
 	putCapture(id: string, document: JsonDocument, expectedVersion?: number): DocumentRecord {
 		const transaction = this.database.transaction(() => {
+			if (this.getCaptureStorageStatus(id) === "canonical") throw new CanonicalCommandRequiredError();
 			const record = this.putDocument("capture_documents", id, document, expectedVersion);
-			if (isCanonicalCaptureConverted(this.database, record.id)) {
-				// Converted captures are read from canonical tables. Keep the shadow JSON
-				// row and canonical materialization in the same transaction so a normal
-				// save cannot leave getCapture() serving stale data.
-				updateDocumentCanonical(this.database, record.id, document, {
-					nowIso: () => record.updatedAt,
-					generateId: () => this.generateId()
-				});
-			}
+			this.markLegacyCapture(record.id);
 			const existingOrder = this.database
 				.prepare("SELECT position FROM archive_order WHERE entity_type = 'capture' AND entity_id = @id")
 				.get({ id }) as { position: number } | undefined;
@@ -595,6 +685,7 @@ export class ArchiveRepository {
 
 	deleteCapture(id: string): boolean {
 		const transaction = this.database.transaction(() => {
+			const existed = Boolean(this.getCaptureStorageStatus(id));
 			this.database.prepare("DELETE FROM raw_chunks WHERE capture_id = @id").run({ id });
 			this.database.prepare("DELETE FROM stable_notes WHERE capture_id = @id").run({ id });
 			this.database.prepare("DELETE FROM finalization_jobs WHERE capture_id = @id").run({ id });
@@ -604,7 +695,8 @@ export class ArchiveRepository {
 			this.database.prepare("DELETE FROM captures WHERE id = @id").run({ id });
 			this.database.prepare("DELETE FROM archive_order WHERE entity_type = 'capture' AND entity_id = @id").run({ id });
 			const docDeleted = this.database.prepare("DELETE FROM capture_documents WHERE id = @id").run({ id }).changes > 0;
-			return docDeleted || true;
+			this.database.prepare("DELETE FROM capture_storage WHERE capture_id = @id").run({ id });
+			return docDeleted || existed;
 		});
 		return transaction();
 	}
@@ -933,14 +1025,14 @@ export class ArchiveRepository {
 		const ids = (this.database.prepare("SELECT id FROM capture_documents").all() as Array<{ id: string }>).map(r => r.id);
 		const results: Array<ReturnType<typeof convertDocumentCanonical>> = [];
 		for (const id of ids) {
-			if (isCanonicalCaptureConverted(this.database, id)) continue;
+			if (this.isCaptureConverted(id)) continue;
 			results.push(this.convertCaptureToCanonical(id));
 		}
 		return results;
 	}
 
 	isCaptureConverted(id: string): boolean {
-		return isCanonicalCaptureConverted(this.database, id);
+		return this.getCaptureStorageStatus(id) === "canonical";
 	}
 
 	getCaptureBackup(id: string): { document_json: string; verified: number; verification_report_json: string | null } | undefined {
