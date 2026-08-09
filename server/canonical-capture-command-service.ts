@@ -2701,6 +2701,12 @@ export class CanonicalCaptureCommandService {
 					sourceCaptureId
 				});
 			}
+			if (source.lifecycle !== "finalized") {
+				throw new CanonicalCaptureConflictError("capture must be finalized before duplication", {
+					captureId: sourceCaptureId,
+					lifecycle: source.lifecycle
+				});
+			}
 
 			const profiles = this.database
 				.prepare(
