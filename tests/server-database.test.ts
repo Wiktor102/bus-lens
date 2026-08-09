@@ -66,12 +66,21 @@ test("canonical capture reads use modeled metadata and do not consult compatibil
 		const conversion = repository.convertCaptureToCanonical("capture-metadata");
 		assert.equal(conversion.ok, true);
 		assert.equal(conversion.verified, true);
+		database.prepare(
+			"INSERT INTO framing_drafts (capture_id, revision, sections_json, updated_at) VALUES (@captureId, @revision, @sectionsJson, @updatedAt)"
+		).run({
+			captureId: "capture-metadata",
+			revision: 7,
+			sectionsJson: JSON.stringify([{ start: 0, framingMode: "length", frameSize: 2 }]),
+			updatedAt: "2026-01-01T00:00:00.000Z"
+		});
 		const converted = repository.getCapture("capture-metadata")?.document;
 		assert.equal(converted?.description, "Retain this description");
 		assert.equal(converted?.view, "Overview");
 		assert.equal(converted?.baudRate, 9600);
 		assert.equal(converted?.inputFormat, "text");
 		assert.deepEqual(converted?.params, [{ key: "Mode", value: "safe" }]);
+		assert.equal((converted as { framingDraftRevision?: number }).framingDraftRevision, 7);
 		assert.equal(converted?.customMetadata, undefined);
 		assert.deepEqual(converted?.captureSessions, [{ id: "session-1", firstReceivedAt: 100, lastReceivedAt: 200 }]);
 		assert.equal(converted?.byteStream && (converted.byteStream[0] as { sessionId?: string }).sessionId, "session-1");
@@ -84,6 +93,7 @@ test("canonical capture reads use modeled metadata and do not consult compatibil
 		assert.equal(reloaded?.baudRate, 9600);
 		assert.equal(reloaded?.inputFormat, "text");
 		assert.deepEqual(reloaded?.params, [{ key: "Mode", value: "safe" }]);
+		assert.equal((reloaded as { framingDraftRevision?: number }).framingDraftRevision, 7);
 		assert.equal(reloaded?.customMetadata, undefined);
 		assert.deepEqual(reloaded?.captureSessions, [{ id: "session-1", firstReceivedAt: 100, lastReceivedAt: 200 }]);
 		assert.equal(reloaded?.byteStream && (reloaded.byteStream[0] as { sessionId?: string }).sessionId, "session-1");

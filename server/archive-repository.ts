@@ -490,6 +490,9 @@ export class ArchiveRepository {
 			.get({ profileId: cap.active_framing_profile_id, captureId: id }) as
 				| { id: string; version: number; algorithm_version: number }
 				| undefined;
+		const framingDraft = this.database
+			.prepare("SELECT revision FROM framing_drafts WHERE capture_id = @captureId ORDER BY revision DESC LIMIT 1")
+			.get({ captureId: id }) as { revision: number } | undefined;
 		let frameSections: JsonDocument[] = [];
 		let messages: JsonDocument[] = [];
 		if (activeProfile) {
@@ -643,6 +646,7 @@ export class ArchiveRepository {
 			dataRevision: cap.data_revision,
 			metadataRevision: cap.metadata_revision,
 			contentRevision: cap.content_revision,
+			...(framingDraft ? { framingDraftRevision: framingDraft.revision } : {}),
 			retainedStartOffset: cap.retained_start_offset,
 			activeFramingProfileId: cap.active_framing_profile_id,
 			isRetainedTail: cap.retained_start_offset > 0,
