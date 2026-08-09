@@ -1,9 +1,19 @@
 import {
+	interpretSectionRanges,
+	markerAt as interpretMarkerAt,
+	markerBytes as parseMarkerBytes,
+	type MarkerPosition,
+	type SectionFramingMode,
+	type SectionFramingSettings
+} from "../../domain/framing.ts";
+import {
 	normalizeCaptureSummaryData,
 	type CaptureSummaryData,
 	type FramedMessage,
 	type RawByteRecord
 } from "./capture-summary.ts";
+
+export type { MarkerPosition, SectionFramingMode, SectionFramingSettings } from "../../domain/framing.ts";
 
 export type CaptureNote = {
 	id?: string;
@@ -23,6 +33,9 @@ export type CaptureMessage = FramedMessage & {
 	sectionId?: string;
 	_byteStart?: number;
 	_byteEnd?: number;
+	/** Absolute positions in byteStream, retained when hidden bytes make a frame non-contiguous. */
+	rawOffsets?: number[];
+	/** @deprecated Use rawOffsets. Retained for persisted capture compatibility. */
 	_rawPositions?: number[];
 };
 
@@ -39,17 +52,6 @@ export type CaptureSection = {
 	frameTimeGap?: number;
 	collapseRuns?: boolean;
 	collapsed?: boolean;
-};
-
-export type SectionFramingMode = "length" | "marker" | "time";
-export type MarkerPosition = "start" | "end";
-
-export type SectionFramingSettings = {
-	framingMode: SectionFramingMode;
-	frameSize: number;
-	frameMarker: string;
-	markerPosition: MarkerPosition;
-	frameTimeGap: number;
 };
 
 export type NormalizedCaptureSection = SectionFramingSettings & {
@@ -91,6 +93,8 @@ export type Capture = Omit<CaptureSummaryData, "notes"> & {
 	markerPosition?: string;
 	frameTimeGap?: number;
 	frameSections?: CaptureSection[];
+	/** The next unassigned absolute raw offset. */
+	nextRawOffset?: number;
 };
 
 export type PreviewByteRecord = RawByteRecord & { rawPosition: number };
@@ -189,6 +193,33 @@ export function applySectionFramingSettings(section: CaptureSection, update: Sec
 	delete section.markerConfigured;
 }
 
+function normalizedRawOffset(value: unknown): number | undefined {
+	const offset = Number(value);
+	return Number.isInteger(offset) && offset >= 0 ? offset : undefined;
+}
+
+function firstRawOffset(capture: Capture): number {
+	return capture.byteStream?.[0] ? (normalizedRawOffset(capture.byteStream[0].rawOffset) ?? 0) : 0;
+}
+
+function lastRawOffset(capture: Capture): number {
+	const record = capture.byteStream?.at(-1);
+	return record ? (normalizedRawOffset(record.rawOffset) ?? Math.max(0, (capture.byteStream?.length || 1) - 1)) : 0;
+}
+
+function normalizeRawOffsets(capture: Capture): void {
+	const stream = capture.byteStream || [];
+	let next = normalizedRawOffset(capture.nextRawOffset) ?? 0;
+	stream.forEach(record => {
+		const offset = normalizedRawOffset(record.rawOffset);
+		if (offset !== undefined) next = Math.max(next, offset + 1);
+	});
+	stream.forEach(record => {
+		if (normalizedRawOffset(record.rawOffset) === undefined) record.rawOffset = next++;
+	});
+	capture.nextRawOffset = Math.max(next, ...(stream.map(record => (record.rawOffset || 0) + 1)), 0);
+}
+
 export function normalizeCapture(capture: Capture, generateId = createId): Capture {
 	const legacyPreviewMode = normalizeFramingMode(capture.previewMode);
 	const hasPersistedSections = Array.isArray(capture.frameSections) && capture.frameSections.length > 0;
@@ -225,13 +256,15 @@ export function normalizeCapture(capture: Capture, generateId = createId): Captu
 		record.direction ||= "rx";
 		record.hidden = Boolean(record.hidden);
 	});
+	normalizeRawOffsets(capture);
 	// Older exports stored byte visibility on framed messages rather than raw
 	// byte records. Copy it across before the preview is rebuilt.
 	capture.messages.forEach(message => {
-		if (!Number.isInteger(message._byteStart) && !Array.isArray(message._rawPositions)) return;
+		if (!Number.isInteger(message._byteStart) && !Array.isArray(message.rawOffsets) && !Array.isArray(message._rawPositions)) return;
 		message.hiddenBytes?.forEach((hidden, index) => {
-			const rawPosition = message._rawPositions?.[index] ?? (message._byteStart as number) + index;
-			if (hidden && capture.byteStream?.[rawPosition]) capture.byteStream[rawPosition].hidden = true;
+			const rawPosition = message.rawOffsets?.[index] ?? message._rawPositions?.[index] ?? (message._byteStart as number) + index;
+			const rawByte = capture.byteStream?.find(record => record.rawOffset === rawPosition);
+				if (hidden && rawByte) rawByte.hidden = true;
 		});
 	});
 	if (!hasPersistedSections) {
@@ -259,7 +292,7 @@ function migrateLegacySections(
 	return [
 		{
 			id: generateId(),
-			start: 0,
+			start: firstRawOffset(capture),
 			framingMode: legacyPreviewMode,
 			frameSize: normalizeFrameSize(capture.frameSize),
 			frameMarker: normalizeMarker(capture.frameMarker, markerConfigured),
@@ -272,12 +305,13 @@ function migrateLegacySections(
 }
 
 export function normalizeSections(capture: Capture, generateId = createId): void {
-	const streamLength = capture.byteStream?.length || 0;
+	const firstOffset = firstRawOffset(capture);
+	const lastOffset = lastRawOffset(capture);
 	const byStart = new Map<number, CaptureSection>();
 	(Array.isArray(capture.frameSections) ? capture.frameSections : [])
 		.filter(section => Boolean(section && typeof section === "object"))
 		.forEach(section => {
-			const start = Math.max(0, Math.min(Math.max(0, streamLength - 1), Math.floor(+section.start! || 0)));
+			const start = Math.max(firstOffset, Math.min(lastOffset, Math.floor(+section.start! || firstOffset)));
 			const settings = normalizeSectionFramingSettings(section, DEFAULT_FRAME_SIZE);
 			byStart.set(start, {
 				id: section.id || generateId(),
@@ -287,10 +321,10 @@ export function normalizeSections(capture: Capture, generateId = createId): void
 				collapsed: Boolean(section.collapsed)
 			});
 		});
-	if (!byStart.has(0)) {
-		byStart.set(0, {
+	if (!byStart.has(firstOffset)) {
+		byStart.set(firstOffset, {
 			id: generateId(),
-			start: 0,
+			start: firstOffset,
 			framingMode: "length",
 			frameSize: normalizeFrameSize(capture.frameSize),
 			frameMarker: "",
@@ -308,11 +342,11 @@ export function frameWidth(capture: Capture): number {
 }
 
 export function markerBytes(value: unknown): number[] {
-	return (value === undefined || value === null ? "" : String(value)).match(/[0-9a-f]{2}/gi)?.map(byte => parseInt(byte, 16)) || [];
+	return parseMarkerBytes(value);
 }
 
 export function markerAt(stream: PreviewByteRecord[], index: number, marker: number[]): boolean {
-	return marker.length > 0 && marker.every((value, offset) => stream[index + offset]?.value === value);
+	return interpretMarkerAt(stream, index, marker);
 }
 
 export function frameSectionRanges(
@@ -321,62 +355,12 @@ export function frameSectionRanges(
 	sectionEnd: number,
 	section: CaptureSection | SectionFramingSettings
 ): Array<[number, number]> {
-	const settings = normalizeSectionFramingSettings(section, DEFAULT_FRAME_SIZE);
-	const start = Math.max(0, sectionStart);
-	const end = Math.max(start, Math.min(stream.length, sectionEnd));
-	if (start >= end) return [];
-
-	if (settings.framingMode === "length") {
-		const ranges: Array<[number, number]> = [];
-		for (let offset = start; offset < end; offset += settings.frameSize) {
-			ranges.push([offset, Math.min(offset + settings.frameSize, end)]);
-		}
-		return ranges;
-	}
-
-	if (settings.framingMode === "time") {
-		const ranges: Array<[number, number]> = [];
-		let frameStart = start;
-		for (let index = start + 1; index < end; index++) {
-			if (stream[index].timestamp - stream[index - 1].timestamp < settings.frameTimeGap) continue;
-			ranges.push([frameStart, index]);
-			frameStart = index;
-		}
-		ranges.push([frameStart, end]);
-		return ranges;
-	}
-
-	const marker = markerBytes(settings.frameMarker);
-	if (!marker.length) return [];
-	const markerMatchesAt = (index: number) => index + marker.length <= end && markerAt(stream, index, marker);
-	const ranges: Array<[number, number]> = [];
-	if (settings.markerPosition === "end") {
-		let frameStart = start;
-		let foundMarker = false;
-		for (let index = start; index < end; index++) {
-			if (!markerMatchesAt(index)) continue;
-			foundMarker = true;
-			const markerEnd = index + marker.length;
-			ranges.push([frameStart, markerEnd]);
-			frameStart = markerEnd;
-			index = markerEnd - 1;
-		}
-		if (foundMarker && frameStart < end) ranges.push([frameStart, end]);
-		return ranges;
-	}
-
-	let frameStart = -1;
-	for (let index = start; index < end; index++) {
-		if (!markerMatchesAt(index)) continue;
-		if (frameStart >= 0 && index > frameStart) ranges.push([frameStart, index]);
-		frameStart = index;
-		index += marker.length - 1;
-	}
-	// A section can begin between marker-delimited messages. Until its marker
-	// appears, keep its bytes in one frame instead of dropping the whole section.
-	if (frameStart < 0) return [[start, end]];
-	if (frameStart >= 0 && frameStart < end) ranges.push([frameStart, end]);
-	return ranges;
+	return interpretSectionRanges({
+		stream,
+		start: sectionStart,
+		end: sectionEnd,
+		settings: normalizeSectionFramingSettings(section, DEFAULT_FRAME_SIZE)
+	});
 }
 
 export function rebuildPreview(capture: Capture, generateId = createId): void {
@@ -385,7 +369,7 @@ export function rebuildPreview(capture: Capture, generateId = createId): void {
 	// rendering. This makes every framing mode behave exactly as though the byte
 	// was never captured, while byteStream remains available for export/history.
 	const stream = capture.byteStream!
-		.map((record, rawPosition) => ({ ...record, rawPosition }))
+		.map((record, retainedIndex) => ({ ...record, rawPosition: record.rawOffset ?? retainedIndex }))
 		.filter(record => !record.hidden);
 	const ranges: Array<[number, number, string?]> = [];
 	normalizeSections(capture, generateId);
@@ -405,6 +389,7 @@ export function rebuildPreview(capture: Capture, generateId = createId): void {
 	const oldMessagesByRange = new Map<string, ExistingMessage>(
 		(capture.messages || []).map(message => {
 			const rawPositions =
+				message.rawOffsets ||
 				message._rawPositions ||
 				(Number.isInteger(message._byteStart) ? message.bytes.map((_, index) => message._byteStart! + index) : []);
 			return [rawPositions.join(","), { id: message.id, hidden: Boolean(message.hidden) }];
@@ -428,6 +413,7 @@ export function rebuildPreview(capture: Capture, generateId = createId): void {
 				sectionId,
 				_byteStart: start,
 				_byteEnd: end,
+				rawOffsets: rawPositions,
 				_rawPositions: rawPositions
 			};
 		});

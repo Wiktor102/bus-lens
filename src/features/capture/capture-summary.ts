@@ -1,4 +1,6 @@
 export type RawByteRecord = {
+	/** Absolute byte-stream offset. Legacy records are normalized on load. */
+	rawOffset?: number;
 	value: number;
 	timestamp: number;
 	direction?: string;
