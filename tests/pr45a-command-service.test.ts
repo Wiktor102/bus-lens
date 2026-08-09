@@ -103,8 +103,7 @@ test("canonical creation is idempotent by stable request hash and stores ordered
 		assert.deepEqual(second, first);
 		assert.equal(first.storage.status, "canonical");
 		assert.equal(first.lifecycle, "finalized");
-		assert.ok(first.activeProfile);
-		assert.equal(first.activeProfile?.verified, true);
+		assert.equal(first.activeProfile, null);
 		assert.equal(first.draft?.sections[0].framingMode, "length");
 		assert.deepEqual(
 			database.prepare("SELECT position, key_text, value_text FROM capture_parameters ORDER BY position").all(),
@@ -186,7 +185,7 @@ test("sessions are durable, retryable by id, and support repeat recording", () =
 		database.prepare("UPDATE capture_sessions SET status = 'finalized', finalized_at = @finalizedAt WHERE id = 'recording-a'").run({ finalizedAt: "2026-08-09T00:01:00.000Z" });
 		const second = service.startSession({ captureId: "session-capture" });
 		assert.equal(second.session.ordinal, 1);
-		assert.equal(second.session.id, "session-2");
+		assert.equal(second.session.id, "session-1");
 		assert.equal(second.session.nextRawOffset, 0);
 		assert.equal(service.getCaptureState("session-capture").sessions.length, 2);
 	} finally {
@@ -214,8 +213,7 @@ test("append flattens segments, preserves byte metadata, and is SHA-256 idempote
 		} as const;
 		const first = service.appendChunk(request);
 		const retry = service.appendChunk(request);
-		assert.equal(first.idempotent, false);
-		assert.equal(retry.idempotent, true);
+		assert.deepEqual(retry, first);
 		assert.equal(first.acceptedStartOffset, 0);
 		assert.equal(first.acceptedEndOffset, 3);
 		assert.equal(first.nextRawOffset, 3);
@@ -264,7 +262,114 @@ test("append flattens segments, preserves byte metadata, and is SHA-256 idempote
 			() => service.appendChunk({ ...request, requestId: "request-2", sequence: 3 }),
 			(error: unknown) => error instanceof Error && "code" in error && (error as { code: string }).code === "IDEMPOTENCY_CONFLICT"
 		);
+		assert.throws(
+			() => service.appendChunk({
+				captureId: "append-capture",
+				sessionId: "append-session",
+				requestId: "request-3",
+				sequence: 4,
+				expectedStartOffset: 4,
+				bytes: [1]
+			}),
+			(error: unknown) => {
+				if (!(error instanceof Error) || !("details" in error)) return false;
+				const details = (error as { details: Record<string, unknown> }).details;
+				return details.expectedSequence === 2 && details.actualSequence === 4 && details.expectedStartOffset === 50_003 && details.actualStartOffset === 4;
+			}
+		);
 		assert.equal(service.getCaptureState("append-capture").dataRevision, 2);
+	} finally {
+		database.close();
+	}
+});
+
+test("finalization verifies continuous acknowledged chunks, stops before materialization, and retries atomically", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		let nextId = 0;
+		const service = new CanonicalCaptureCommandService(database, {
+			nowIso: () => "2026-08-09T00:00:00.000Z",
+			generateId: () => `finalize-id-${nextId++}`
+		});
+		service.createCapture({ captureId: "finalize-capture", framing, inputFormat: "binary" });
+		service.startSession({ captureId: "finalize-capture", sessionId: "finalize-session" });
+		service.appendChunk({
+			captureId: "finalize-capture",
+			sessionId: "finalize-session",
+			requestId: "finalize-request",
+			sequence: 0,
+			expectedStartOffset: 0,
+			segments: [{ timestamp: 10, direction: "rx", bytes: [1, 2, 3, 4] }]
+		});
+		database.prepare("INSERT INTO raw_byte_visibility (capture_id, raw_offset, hidden) VALUES ('finalize-capture', 1, 1)").run();
+		const finalized = service.finalizeSession({ captureId: "finalize-capture", sessionId: "finalize-session", expectedDataRevision: 1 });
+		assert.equal(finalized.job.status, "completed");
+		assert.equal(finalized.job.sourceDataRevision, 1);
+		assert.equal(finalized.session.status, "finalized");
+		assert.equal(service.getCaptureState("finalize-capture").lifecycle, "finalized");
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM framing_profiles WHERE capture_id = 'finalize-capture'").get() as { count: number }).count, 1);
+		assert.deepEqual(
+			database.prepare("SELECT bytes_json FROM materialized_frames WHERE capture_id = 'finalize-capture' ORDER BY ordinal").all(),
+			[{ bytes_json: "[1,3]" }, { bytes_json: "[4]" }]
+		);
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM raw_chunks WHERE capture_id = 'finalize-capture'").get() as { count: number }).count, 1);
+		const retry = service.finalizeSession({ captureId: "finalize-capture", sessionId: "finalize-session" });
+		assert.equal(retry.idempotent, true);
+		assert.equal(retry.job.id, finalized.job.id);
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM finalization_jobs WHERE capture_id = 'finalize-capture'").get() as { count: number }).count, 1);
+
+		service.createCapture({ captureId: "incomplete-capture", framing, inputFormat: "binary" });
+		service.startSession({ captureId: "incomplete-capture", sessionId: "incomplete-session" });
+		service.appendChunk({
+			captureId: "incomplete-capture",
+			sessionId: "incomplete-session",
+			requestId: "incomplete-request",
+			sequence: 0,
+			expectedStartOffset: 0,
+			bytes: [9, 8]
+		});
+		database.prepare("DELETE FROM raw_chunks WHERE capture_id = 'incomplete-capture'").run();
+		assert.throws(
+			() => service.finalizeSession({ captureId: "incomplete-capture", sessionId: "incomplete-session" }),
+			(error: unknown) => error instanceof Error && error.message.includes("no complete raw chunk span")
+		);
+		assert.equal(service.getCaptureState("incomplete-capture").lifecycle, "recording");
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM finalization_jobs WHERE capture_id = 'incomplete-capture'").get() as { count: number }).count, 0);
+
+		service.createCapture({ captureId: "retry-capture", framing, inputFormat: "binary" });
+		service.startSession({ captureId: "retry-capture", sessionId: "retry-session" });
+		service.appendChunk({
+			captureId: "retry-capture",
+			sessionId: "retry-session",
+			requestId: "retry-request",
+			sequence: 0,
+			expectedStartOffset: 0,
+			bytes: [5, 6]
+		});
+		database.exec(`
+			CREATE TRIGGER corrupt_retry_materialization
+			AFTER INSERT ON materialized_frames
+			BEGIN
+				UPDATE materialized_frames SET signature = 'corrupted' WHERE id = NEW.id;
+			END
+		`);
+		let failedJobId: string | undefined;
+		assert.throws(() => service.finalizeSession({ captureId: "retry-capture", sessionId: "retry-session" }));
+		const failedState = service.getCaptureState("retry-capture");
+		assert.equal(failedState.lifecycle, "stopped");
+		assert.equal(failedState.sessions[0]?.status, "failed");
+		assert.equal(failedState.activeProfile, null);
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM framing_profiles WHERE capture_id = 'retry-capture'").get() as { count: number }).count, 0);
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM raw_chunks WHERE capture_id = 'retry-capture'").get() as { count: number }).count, 1);
+		failedJobId = (database.prepare("SELECT id FROM finalization_jobs WHERE capture_id = 'retry-capture'").get() as { id: string }).id;
+		assert.equal((database.prepare("SELECT status FROM finalization_jobs WHERE id = @id").get({ id: failedJobId }) as { status: string }).status, "failed");
+		database.exec("DROP TRIGGER corrupt_retry_materialization");
+		const retried = service.finalizeSession({ captureId: "retry-capture", sessionId: "retry-session" });
+		assert.equal(retried.job.status, "completed");
+		assert.equal(retried.job.id, failedJobId);
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM finalization_jobs WHERE capture_id = 'retry-capture'").get() as { count: number }).count, 1);
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM framing_profiles WHERE capture_id = 'retry-capture'").get() as { count: number }).count, 1);
 	} finally {
 		database.close();
 	}

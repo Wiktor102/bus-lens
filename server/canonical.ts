@@ -21,7 +21,7 @@ import {
 // Reuse capture normalization/preview so converted frames stay byte-identical
 // to the JSON-document interpretation. Dynamic import would be circular, so we
 // inline the minimal helpers needed to keep the comparison deterministic.
-type RawByteRecord = {
+export type RawByteRecord = {
 	value: number;
 	timestamp: number;
 	direction?: string;
@@ -30,7 +30,7 @@ type RawByteRecord = {
 	rawOffset?: number;
 };
 
-type CaptureSection = {
+export type CaptureSection = {
 	id?: string;
 	start?: number;
 	framingMode?: string;
@@ -200,7 +200,7 @@ function normalizeSectionSettings(section: CaptureSection) {
 	};
 }
 
-type NormalizedSection = {
+export type NormalizedSection = {
 	id: string;
 	start: number;
 	framingMode: "length" | "marker" | "time";
@@ -212,13 +212,14 @@ type NormalizedSection = {
 	collapsed: boolean;
 };
 
-function normalizeSectionsForConversion(
+export function normalizeSectionsForConversion(
 	sections: CaptureSection[],
 	byteStream: RawByteRecord[],
 	fallbackFrameSize = 3,
-	generateSectionId: () => string = randomUUID as unknown as () => string
+	generateSectionId: () => string = randomUUID as unknown as () => string,
+	firstOffsetOverride = 0
 ): NormalizedSection[] {
-	const firstOffset = byteStream[0]?.rawOffset ?? 0;
+	const firstOffset = byteStream[0]?.rawOffset ?? firstOffsetOverride;
 	const lastOffset = byteStream.at(-1)?.rawOffset ?? 0;
 	const byStart = new Map<number, CaptureSection>();
 	(sections || [])
@@ -275,7 +276,7 @@ function signatureForMessage(message: FramedMessage): string {
 	return visibleEntries(message).map(({ value }) => hexByte(value)).join(" ");
 }
 
-type ExistingMessage = {
+export type ExistingMessage = {
 	id?: string;
 	sectionId?: string;
 	hidden?: boolean;
@@ -563,6 +564,36 @@ function normalizeDocumentForConversion(
 }
 
 type MaterializedFrame = ReturnType<typeof materializeFramesFromStream>[number];
+
+export type CanonicalMaterialization = {
+	stream: Array<RawByteRecord & { rawOffset: number }>;
+	sections: NormalizedSection[];
+	frames: ReturnType<typeof materializeFramesFromStream>;
+	signatures: ReturnType<typeof countSignatures>;
+	stats: ReturnType<typeof deriveAnalysisStatistics>;
+	patterns: ReturnType<typeof recognizeRepeatedPatterns>;
+};
+
+/**
+ * Build the complete canonical derived view from one raw stream. Callers may
+ * pass a stream whose `hidden` flags already include independent visibility
+ * overrides; this helper never reads persistence or mutates the stream.
+ */
+export function buildCanonicalMaterialization(
+	stream: Array<RawByteRecord & { rawOffset: number }>,
+	sections: NormalizedSection[],
+	options: { generateId?: () => string; existingMessages?: readonly ExistingMessage[] } = {}
+): CanonicalMaterialization {
+	const generateId = (options.generateId ?? randomUUID) as unknown as () => string;
+	const frames = materializeFramesFromStream(stream, sections, generateId, options.existingMessages ?? []);
+	const analysisFrames = frames.map(frame => ({ signature: frame.signature, bytes: frame.bytes }));
+	const stats = deriveAnalysisStatistics(analysisFrames);
+	const signatures = countSignatures(analysisFrames.map(frame => frame.signature));
+	const patterns = recognizeRepeatedPatterns(
+		frames.map((frame, index) => ({ signature: frame.signature, originalIndex: index, sectionId: frame.sectionId }))
+	);
+	return { stream, sections, frames, signatures, stats, patterns };
+}
 type SectionBoundary = { id: string; start: number; mode: string };
 
 type PersistedConversion = {
@@ -1770,6 +1801,195 @@ export type ReframingInputSection = {
 	collapseRuns?: boolean;
 	collapsed?: boolean;
 };
+
+/**
+ * Persist all immutable derived rows for a profile. The caller owns the
+ * transaction and the profile row; activation is deliberately separate so a
+ * caller can verify every row before swapping the active profile.
+ */
+export function persistCanonicalMaterializationRows(
+	database: SqliteDatabase,
+	captureId: string,
+	profileId: string,
+	profileVersion: number,
+	materialization: CanonicalMaterialization,
+	generateId: () => string = randomUUID as unknown as () => string
+): void {
+	const { sections, frames, signatures, stats, patterns } = materialization;
+	for (let i = 0; i < sections.length; i++) {
+		const section = sections[i];
+		database
+			.prepare(
+				`INSERT INTO framing_sections
+				 (id, profile_id, capture_id, start_offset, position, framing_mode, frame_length,
+				  marker_bytes, marker_position, time_gap_ms, collapse_runs, collapsed)
+				 VALUES (@id, @profileId, @captureId, @startOffset, @position, @framingMode,
+				  @frameLength, @markerBytes, @markerPosition, @timeGapMs, @collapseRuns, @collapsed)`
+			)
+			.run({
+				id: section.id,
+				profileId,
+				captureId,
+				startOffset: section.start,
+				position: i,
+				framingMode: section.framingMode,
+				frameLength: section.framingMode === "length" ? section.frameSize : null,
+				markerBytes: section.framingMode === "marker" ? JSON.stringify(parseMarkerBytes(section.frameMarker)) : null,
+				markerPosition: section.framingMode === "marker" ? section.markerPosition : null,
+				timeGapMs: section.framingMode === "time" ? section.frameTimeGap : null,
+				collapseRuns: section.collapseRuns ? 1 : 0,
+				collapsed: section.collapsed ? 1 : 0
+			});
+	}
+
+	for (const frame of frames) {
+		database
+			.prepare(
+				`INSERT INTO materialized_frames
+				 (id, capture_id, profile_id, profile_version, ordinal, section_id, raw_offsets_json,
+				  bytes_json, timestamps_json, directions_json, hidden, signature)
+				 VALUES (@id, @captureId, @profileId, @profileVersion, @ordinal, @sectionId,
+				  @rawOffsetsJson, @bytesJson, @timestampsJson, @directionsJson, @hidden, @signature)`
+			)
+			.run({
+				id: frame.id,
+				captureId,
+				profileId,
+				profileVersion,
+				ordinal: frame.ordinal,
+				sectionId: frame.sectionId,
+				rawOffsetsJson: JSON.stringify(frame.rawOffsets),
+				bytesJson: JSON.stringify(frame.bytes),
+				timestampsJson: JSON.stringify(frame.timestamps),
+				directionsJson: JSON.stringify(frame.directions),
+				hidden: frame.hidden ? 1 : 0,
+				signature: frame.signature
+			});
+	}
+
+	for (const [signature, count] of signatures.entries()) {
+		database
+			.prepare("INSERT INTO frame_signatures (profile_id, signature, count) VALUES (@profileId, @signature, @count)")
+			.run({ profileId, signature, count });
+	}
+	for (const transition of stats.transitions) {
+		database
+			.prepare(
+				"INSERT INTO frame_transitions (profile_id, from_signature, to_signature, count, diffs) VALUES (@profileId, @fromSignature, @toSignature, @count, @diffs)"
+			)
+			.run({
+				profileId,
+				fromSignature: transition.from,
+				toSignature: transition.to,
+				count: transition.count,
+				diffs: transition.diffs
+			});
+	}
+	for (let position = 0; position < stats.vocabulary.length; position++) {
+		for (const entry of stats.vocabulary[position] as Array<{ value: number; count: number }>) {
+			database
+				.prepare("INSERT INTO byte_statistics (profile_id, position, value, count) VALUES (@profileId, @position, @value, @count)")
+				.run({ profileId, position, value: entry.value, count: entry.count });
+		}
+	}
+	for (let position = 0; position < stats.bitVariance.length; position++) {
+		for (const cell of stats.bitVariance[position] as Array<{ bit: number; percentage: number; variance: string }>) {
+			database
+				.prepare(
+					"INSERT INTO bit_statistics (profile_id, position, bit, percentage, variance) VALUES (@profileId, @position, @bit, @percentage, @variance)"
+				)
+				.run({ profileId, position, bit: cell.bit, percentage: cell.percentage, variance: cell.variance });
+		}
+	}
+	for (let groupIndex = 0; groupIndex < patterns.groups.length; groupIndex++) {
+		const group = patterns.groups[groupIndex];
+		const groupId = generateId();
+		database
+			.prepare(
+				`INSERT INTO sequence_groups (id, capture_id, profile_id, key_text, signatures_json, score, length)
+				 VALUES (@id, @captureId, @profileId, @keyText, @signaturesJson, @score, @length)`
+			)
+			.run({
+				id: groupId,
+				captureId,
+				profileId,
+				keyText: group.key,
+				signaturesJson: JSON.stringify(group.signatures),
+				score: group.score,
+				length: group.length
+			});
+		const membersByOccurrence = new Map<number, Array<{ occurrenceIndex: number; offset: number; originalIndex: number }>>();
+		for (const member of patterns.membership) {
+			if (member.groupIndex !== groupIndex) continue;
+			const members = membersByOccurrence.get(member.occurrenceIndex) || [];
+			members.push(member);
+			membersByOccurrence.set(member.occurrenceIndex, members);
+		}
+		for (const [occurrenceIndex, members] of membersByOccurrence.entries()) {
+			members.sort((left, right) => left.offset - right.offset);
+			const startOrdinal = members[0].originalIndex;
+			const startRawOffset = frames[members[0].originalIndex]?.rawOffsets[0] ?? 0;
+			const endRawOffset = frames[members[members.length - 1].originalIndex]?.rawOffsets.at(-1) ?? startRawOffset;
+			for (const member of members) {
+				database
+					.prepare(
+						`INSERT INTO sequence_occurrences
+						 (group_id, occurrence_index, offset, start_frame_ordinal, start_raw_offset, end_raw_offset, length)
+						 VALUES (@groupId, @occurrenceIndex, @offset, @startFrameOrdinal, @startRawOffset, @endRawOffset, @length)`
+					)
+					.run({
+						groupId,
+						occurrenceIndex,
+						offset: member.offset,
+						startFrameOrdinal: startOrdinal,
+						startRawOffset,
+						endRawOffset,
+						length: group.length
+					});
+			}
+		}
+	}
+}
+
+/** Verify rows after persistence, before a caller activates the profile. */
+export function verifyCanonicalMaterializationRows(
+	database: SqliteDatabase,
+	profileId: string,
+	materialization: CanonicalMaterialization
+): { ok: boolean; details?: string } {
+	const rows = database
+		.prepare(
+			"SELECT ordinal, section_id, raw_offsets_json, bytes_json, timestamps_json, directions_json, hidden, signature FROM materialized_frames WHERE profile_id = @profileId ORDER BY ordinal"
+		)
+		.all({ profileId }) as Array<{
+			ordinal: number;
+			section_id: string;
+			raw_offsets_json: string;
+			bytes_json: string;
+			timestamps_json: string;
+			directions_json: string;
+			hidden: number;
+			signature: string;
+		}>;
+	if (rows.length !== materialization.frames.length) return { ok: false, details: "materialized frame count mismatch" };
+	for (let index = 0; index < rows.length; index++) {
+		const expected = materialization.frames[index];
+		const actual = rows[index];
+		if (
+			actual.ordinal !== expected.ordinal ||
+			actual.section_id !== expected.sectionId ||
+			JSON.stringify(JSON.parse(actual.raw_offsets_json)) !== JSON.stringify(expected.rawOffsets) ||
+			JSON.stringify(JSON.parse(actual.bytes_json)) !== JSON.stringify(expected.bytes) ||
+			JSON.stringify(JSON.parse(actual.timestamps_json)) !== JSON.stringify(expected.timestamps) ||
+			JSON.stringify(JSON.parse(actual.directions_json)) !== JSON.stringify(expected.directions) ||
+			Boolean(actual.hidden) !== expected.hidden ||
+			actual.signature !== expected.signature
+		) {
+			return { ok: false, details: `materialized frame ${index} mismatch` };
+		}
+	}
+	return { ok: true };
+}
 
 export function createFramingRevision(
 	database: SqliteDatabase,
