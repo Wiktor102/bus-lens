@@ -17,7 +17,7 @@ import { registerTransportActions } from "../features/transport/transport-bridge
 import { getViewStateSnapshot } from "../shared/view-state-bridge.ts";
 
 export type ControllerLifecycle = {
-	beforeUnload: () => void;
+	beforeUnload: (event?: { preventDefault: () => void; returnValue?: string }) => void;
 };
 
 let initializedController: ControllerLifecycle | undefined;
@@ -200,6 +200,7 @@ export function initializeController(): ControllerLifecycle {
 		beforeUnload: createBeforeUnloadHandler({
 			beginUnload: runtime.beginUnload,
 			flushLiveBytes: transport.flushLiveBytes,
+			hasUnacknowledgedBytes: transport.hasUnacknowledgedBytes,
 			getPort: transport.getPort,
 			disconnect: transport.disconnect
 		})

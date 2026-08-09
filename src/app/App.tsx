@@ -1050,7 +1050,7 @@ function App() {
 			.then(({ initializeController }) => {
 				if (disposed) return;
 				const lifecycle = initializeController();
-				const handleBeforeUnload = () => lifecycle.beforeUnload();
+				const handleBeforeUnload = (event: BeforeUnloadEvent) => lifecycle.beforeUnload(event);
 				window.addEventListener("beforeunload", handleBeforeUnload);
 				removeBeforeUnload = () => window.removeEventListener("beforeunload", handleBeforeUnload);
 			})
