@@ -799,7 +799,8 @@ export type VerificationReport = {
 
 function verifyMessageVisibility(
 	originalDoc: CaptureDocument,
-	frames: ReadonlyArray<ReturnType<typeof materializeFramesFromStream>[number]>
+	frames: ReadonlyArray<ReturnType<typeof materializeFramesFromStream>[number]>,
+	retainedStartOffset?: number
 ): boolean {
 	const legacyMessages = (Array.isArray(originalDoc.messages) ? originalDoc.messages : []) as ExistingMessage[];
 	if (!legacyMessages.length) return true;
@@ -820,6 +821,13 @@ function verifyMessageVisibility(
 			if (Boolean(message.hidden)) return false;
 			continue;
 		}
+		if (retainedStartOffset !== undefined) {
+			const hasRetainedBytes = rawOffsets.some(offset => offset >= retainedStartOffset);
+			const hasEvictedBytes = rawOffsets.some(offset => offset < retainedStartOffset);
+			// A frame straddling the rolling boundary is intentionally rebuilt from
+			// the retained suffix, so there is no legacy frame identity to compare.
+			if (!hasRetainedBytes || (hasEvictedBytes && hasRetainedBytes)) continue;
+		}
 		const frame = framesByRawOffsets.get(rawOffsetsKey(rawOffsets)) || framesByRawSpan.get(rawSpanKey(rawOffsets) || "");
 		if (!frame) {
 			if (Boolean(message.hidden)) return false;
@@ -833,12 +841,17 @@ function verifyMessageVisibility(
 function verifyConversion(
 	originalDoc: CaptureDocument,
 	normalized: CaptureDocument,
-	persisted: PersistedConversion
+	persisted: PersistedConversion,
+	options: {
+		sourceMessages?: Array<FramedMessage & { id?: string; sectionId?: string; rawOffsets?: number[]; _rawPositions?: number[] }>;
+		expectedSections?: NormalizedSection[];
+		retainedStartOffset?: number;
+	} = {}
 ): VerificationReport {
 	// A document with an explicit messages array gives us an independent legacy
 	// source to validate. Raw-only documents have no message source, so their
 	// normalized framing is the source representation for this comparison.
-	const sourceMessages = (Array.isArray(originalDoc.messages) && originalDoc.messages.length > 0 ? originalDoc.messages : normalized.messages || []) as Array<
+	const sourceMessages = (options.sourceMessages || (Array.isArray(originalDoc.messages) && originalDoc.messages.length > 0 ? originalDoc.messages : normalized.messages || [])) as Array<
 		FramedMessage & { id?: string; sectionId?: string }
 	>;
 	const expectedMessages = sourceMessages.length;
@@ -862,9 +875,9 @@ function verifyConversion(
 				(expected.rawOffset ?? index) === actual.rawOffset
 			);
 		});
-	const messageVisibilityOk = verifyMessageVisibility(originalDoc, persisted.frames);
+	const messageVisibilityOk = verifyMessageVisibility(originalDoc, persisted.frames, options.retainedStartOffset);
 
-	const expectedSections = ((normalized.frameSections as NormalizedSection[]) || []).map(s => ({
+	const expectedSections = (options.expectedSections || (normalized.frameSections as NormalizedSection[]) || []).map(s => ({
 		id: s.id,
 		start: s.start,
 		mode: s.framingMode
@@ -992,10 +1005,127 @@ export function lifecycleForDocument(doc: CaptureDocument): string {
 	return "finalized";
 }
 
-function discardVerifiedCaptureBackup(database: SqliteDatabase, captureId: string): void {
-	// capture_documents remains the UI-compatible JSON source; once canonical
-	// rows are verified, retaining another full JSON copy is unnecessary.
-	database.prepare("DELETE FROM capture_backups WHERE capture_id = @captureId AND verified = 1").run({ captureId });
+const LEGACY_STORAGE_STATUS = "legacy-not-canonicalized" as const;
+const CANONICAL_STORAGE_STATUS = "canonical" as const;
+const CANONICALIZATION_FAILED_STORAGE_STATUS = "canonicalization-failed" as const;
+const CANONICAL_RETENTION_LIMIT = 50_000;
+
+type LegacyParameter = { key: string; value: string };
+
+function readCaptureStorageStatus(database: SqliteDatabase, captureId: string): string | undefined {
+	const row = database
+		.prepare("SELECT status FROM capture_storage WHERE capture_id = @captureId")
+		.get({ captureId }) as { status: string } | undefined;
+	return row?.status;
+}
+
+function ensureLegacyCaptureStorage(
+	database: SqliteDatabase,
+	captureId: string,
+	createdAt: string,
+	updatedAt: string
+): void {
+	database
+		.prepare(
+			`INSERT INTO capture_storage (capture_id, status, created_at, updated_at, last_error)
+			 VALUES (@captureId, @status, @createdAt, @updatedAt, NULL)
+			 ON CONFLICT (capture_id) DO NOTHING`
+		)
+		.run({ captureId, status: LEGACY_STORAGE_STATUS, createdAt, updatedAt });
+}
+
+function legacyParameters(document: CaptureDocument): LegacyParameter[] {
+	if (!Array.isArray(document.params)) return [];
+	return document.params.map((candidate, position) => {
+		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+			throw new Error(`capture parameter ${position} must be an object`);
+		}
+		const parameter = candidate as Record<string, unknown>;
+		const key = String(parameter.key ?? "").trim();
+		if (!key) throw new Error(`capture parameter ${position} has no key`);
+		return { key, value: String(parameter.value ?? "") };
+	});
+}
+
+function positiveLegacyBaudRate(document: CaptureDocument): number | null {
+	const value = Number((document as Record<string, unknown>).baudRate);
+	return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function canonicalMetadata(document: CaptureDocument): {
+	description: string;
+	controllerView: string;
+	baudRate: number | null;
+	inputFormat: string;
+} {
+	const source = document as Record<string, unknown>;
+	return {
+		description: String(source.description ?? ""),
+		controllerView: String(source.controllerView ?? source.view ?? ""),
+		baudRate: positiveLegacyBaudRate(document),
+		inputFormat: String(source.inputFormat ?? "")
+	};
+}
+
+function markCanonicalizationFailed(
+	database: SqliteDatabase,
+	captureId: string,
+	error: string,
+	nowIso: () => string
+): void {
+	try {
+		const transaction = database.transaction(() => {
+			const now = nowIso();
+			database
+				.prepare(
+					`INSERT INTO capture_storage (capture_id, status, created_at, updated_at, last_error)
+					 VALUES (@captureId, @status, @createdAt, @updatedAt, @error)
+					 ON CONFLICT (capture_id) DO UPDATE SET
+						 status = excluded.status,
+						 updated_at = excluded.updated_at,
+						 last_error = excluded.last_error
+					 WHERE capture_storage.status <> @canonicalStatus`
+				)
+				.run({
+					captureId,
+					status: CANONICALIZATION_FAILED_STORAGE_STATUS,
+					createdAt: now,
+					updatedAt: now,
+					error,
+					canonicalStatus: CANONICAL_STORAGE_STATUS
+				});
+
+			const canonicalCapture = database.prepare("SELECT id FROM captures WHERE id = @captureId").get({ captureId });
+			if (canonicalCapture) {
+				database
+					.prepare(
+						`INSERT INTO finalization_jobs (id, capture_id, status, created_at, updated_at, error, verified)
+						 VALUES (@id, @captureId, 'failed', @createdAt, @updatedAt, @error, 0)
+						 ON CONFLICT (id) DO UPDATE SET
+							status = 'failed', updated_at = excluded.updated_at, error = excluded.error, verified = 0`
+					)
+					.run({ id: `conv-${captureId}`, captureId, createdAt: now, updatedAt: now, error });
+			}
+		});
+		transaction();
+	} catch {
+		// The conversion error is the useful result. Failure bookkeeping must not
+		// hide it when an older database is missing an optional canonical table.
+	}
+}
+
+function sourceMessagesFromFrames(
+	frames: ReadonlyArray<ReturnType<typeof materializeFramesFromStream>[number]>
+): Array<FramedMessage & { id: string; sectionId: string; rawOffsets: number[]; _rawPositions: number[] }> {
+	return frames.map(frame => ({
+		id: frame.id,
+		sectionId: frame.sectionId,
+		bytes: frame.bytes,
+		rawOffsets: frame.rawOffsets,
+		_rawPositions: frame.rawOffsets,
+		hidden: frame.hidden,
+		hiddenBytes: frame.bytes.map(() => false)
+	}));
 }
 
 export function convertCaptureDocumentToCanonical(
@@ -1007,41 +1137,65 @@ export function convertCaptureDocumentToCanonical(
 	const generateId = (options.generateId ?? randomUUID) as unknown as () => string;
 	const algorithmVersion = options.algorithmVersion ?? 1;
 
-	const row = database.prepare("SELECT document_json FROM capture_documents WHERE id = @id").get({ id: captureId }) as
-		| { document_json: string }
+	// Only the explicit storage row can authorize canonical reads. A canonical
+	// row without that status is incidental/partial state and must not short-
+	// circuit the legacy conversion.
+	if (readCaptureStorageStatus(database, captureId) === CANONICAL_STORAGE_STATUS) {
+		return { captureId, ok: true, verified: true, report: null as unknown as VerificationReport };
+	}
+
+	const row = database.prepare("SELECT document_json, created_at, updated_at FROM capture_documents WHERE id = @id").get({ id: captureId }) as
+		| { document_json: string; created_at: string; updated_at: string }
 		| undefined;
-	if (!row) return { captureId, ok: false, verified: false, report: null as unknown as VerificationReport, error: "capture document not found" };
+	if (!row) {
+		return { captureId, ok: false, verified: false, report: null as unknown as VerificationReport, error: "capture document not found" };
+	}
 
 	let doc: CaptureDocument;
 	try {
 		doc = JSON.parse(row.document_json) as CaptureDocument;
 	} catch (e) {
-		return { captureId, ok: false, verified: false, report: null as unknown as VerificationReport, error: String(e) };
+		const error = String(e);
+		markCanonicalizationFailed(database, captureId, error, nowIso);
+		return { captureId, ok: false, verified: false, report: null as unknown as VerificationReport, error };
 	}
 
-	// Already converted? Check canonical captures table
-	const existingCanonical = database.prepare("SELECT id FROM captures WHERE id = @id").get({ id: captureId }) as { id: string } | undefined;
-	if (existingCanonical) {
-		discardVerifiedCaptureBackup(database, captureId);
-		return { captureId, ok: true, verified: true, report: null as unknown as VerificationReport };
+	try {
+		ensureLegacyCaptureStorage(database, captureId, row.created_at, row.updated_at);
+	} catch (e) {
+		const error = String(e);
+		markCanonicalizationFailed(database, captureId, error, nowIso);
+		return { captureId, ok: false, verified: false, report: null as unknown as VerificationReport, error };
 	}
 
 	// Normalize and materialize BEFORE touching DB, so failed conversion leaves JSON active
 	let normalized: CaptureDocument;
 	let stream: Array<RawByteRecord & { rawOffset: number }>;
+	let activeStream: Array<RawByteRecord & { rawOffset: number }>;
 	let sections: NormalizedSection[];
 	let frames: ReturnType<typeof materializeFramesFromStream>;
 	let signatures: Map<string, number>;
 	let stats: ReturnType<typeof deriveAnalysisStatistics>;
 	let patterns: ReturnType<typeof recognizeRepeatedPatterns>;
 	let byteCount: number;
+	let retainedStartOffset: number;
+	let parameters: LegacyParameter[];
 	let report: VerificationReport;
 	try {
 		normalized = normalizeDocumentForConversion(doc, generateId);
 		stream = (normalized.byteStream as Array<RawByteRecord & { rawOffset: number }>);
-		sections = normalized.frameSections as unknown as NormalizedSection[];
 		byteCount = stream.length;
-		frames = materializeFramesFromStream(stream, sections, generateId, normalized.messages || []);
+		const lastRawOffset = stream.at(-1)?.rawOffset ?? -1;
+		retainedStartOffset = Math.max(0, lastRawOffset + 1 - CANONICAL_RETENTION_LIMIT);
+		activeStream = stream.filter(record => record.rawOffset >= retainedStartOffset);
+		sections = normalizeSectionsForConversion(
+			normalized.frameSections as unknown as CaptureSection[],
+			activeStream,
+			normalizeFrameSize(normalized.frameSize),
+			generateId,
+			retainedStartOffset
+		);
+		frames = materializeFramesFromStream(activeStream, sections, generateId, normalized.messages || []);
 		// Derive analysis from frames
 		const analysisFrames = frames.map(f => ({ signature: f.signature, bytes: f.bytes }));
 		stats = deriveAnalysisStatistics(analysisFrames);
@@ -1049,16 +1203,21 @@ export function convertCaptureDocumentToCanonical(
 		patterns = recognizeRepeatedPatterns(
 			frames.map((f, idx) => ({ signature: f.signature, originalIndex: idx, sectionId: f.sectionId }))
 		);
-			report = verifyConversion(doc, normalized, {
+		parameters = legacyParameters(doc);
+		report = verifyConversion(doc, normalized, {
 				byteCount,
 				byteStream: stream,
 				captureSessions: (normalized.captureSessions || []) as CaptureSessionRecord[],
 				sections: sections.map(section => ({ id: section.id, start: section.start, mode: section.framingMode })),
-			frames,
-			signatures,
-			stats,
-			patterns
-		});
+				frames,
+				signatures,
+				stats,
+				patterns
+			}, {
+				sourceMessages: activeStream.length === stream.length ? undefined : sourceMessagesFromFrames(frames),
+				expectedSections: sections,
+				retainedStartOffset: activeStream.length === stream.length ? undefined : retainedStartOffset
+			});
 	} catch (e) {
 		report = {
 			messageCount: { expected: 0, actual: 0, ok: false },
@@ -1074,67 +1233,82 @@ export function convertCaptureDocumentToCanonical(
 			overallOk: false,
 			details: String(e)
 		};
-		return { captureId, ok: false, verified: false, report, error: String(e) };
+		const error = String(e);
+		markCanonicalizationFailed(database, captureId, error, nowIso);
+		return { captureId, ok: false, verified: false, report, error };
 	}
 
 	if (!report.overallOk) {
-		// Leave JSON active; mark job failed
-		try {
-			const tx = database.transaction(() => {
-				database
-					.prepare(
-						`INSERT INTO finalization_jobs (id, capture_id, status, created_at, updated_at, error, verified)
-						 VALUES (@id, @captureId, 'failed', @createdAt, @updatedAt, @error, 0)
-						 ON CONFLICT (id) DO UPDATE SET status='failed', updated_at=excluded.updated_at, error=excluded.error`
-					)
-					.run({
-						id: `conv-${captureId}`,
-						captureId,
-						createdAt: nowIso(),
-						updatedAt: nowIso(),
-						error: report.details || "verification failed"
-					});
-			});
-			tx();
-		} catch {}
-		return { captureId, ok: false, verified: false, report, error: report.details };
+		const error = report.details || "verification failed";
+		markCanonicalizationFailed(database, captureId, error, nowIso);
+		return { captureId, ok: false, verified: false, report, error };
 	}
 
 	// Verification succeeded — now perform atomic canonical writes + backup
 	try {
 		const transaction = database.transaction(() => {
 			const now = nowIso();
+			// Rows under a non-canonical storage status are not authoritative. Clear
+			// any incidental/failed canonical materialization before rebuilding it.
+			database.prepare("DELETE FROM captures WHERE id = @id").run({ id: captureId });
+			const metadata = canonicalMetadata(doc);
 			// captures
 			database
 				.prepare(
-					`INSERT INTO captures (id, name, lifecycle, byte_count, created_at, updated_at, folder_id)
-					 VALUES (@id, @name, @lifecycle, @byteCount, @createdAt, @updatedAt, @folderId)`
+					`INSERT INTO captures
+					 (id, name, description, controller_view, baud_rate, input_format, lifecycle, byte_count,
+					  created_at, updated_at, folder_id, data_revision, metadata_revision, content_revision,
+					  retained_start_offset)
+					 VALUES (@id, @name, @description, @controllerView, @baudRate, @inputFormat, @lifecycle, @byteCount,
+					  @createdAt, @updatedAt, @folderId, 1, 1, 1, @retainedStartOffset)`
 				)
 				.run({
 					id: captureId,
 					name: String(doc.name || "Untitled capture"),
+					description: metadata.description,
+					controllerView: metadata.controllerView,
+					baudRate: metadata.baudRate,
+					inputFormat: metadata.inputFormat,
 					lifecycle: lifecycleForDocument(doc),
 					byteCount,
 					createdAt: String(doc.createdAt || now),
 					updatedAt: now,
-					folderId: doc.folderId ? String(doc.folderId) : null
+					folderId: doc.folderId ? String(doc.folderId) : null,
+					retainedStartOffset
 				});
+
+			const insertParameter = database.prepare(
+				"INSERT INTO capture_parameters (capture_id, position, key_text, value_text) VALUES (@captureId, @position, @keyText, @valueText)"
+			);
+			parameters.forEach((parameter, position) =>
+				insertParameter.run({ captureId, position, keyText: parameter.key, valueText: parameter.value })
+			);
 
 			// Session records preserve explicit capture-session metadata, including
 			// sessions that have no bytes after filtering. Per-byte identities are
 			// stored separately on each raw chunk below.
 			const captureSessions = (normalized.captureSessions || []) as CaptureSessionRecord[];
+			const sessionNextRawOffset = new Map<string, number>();
+			for (const record of stream) {
+				if (!record.sessionId) continue;
+				sessionNextRawOffset.set(record.sessionId, Math.max(sessionNextRawOffset.get(record.sessionId) ?? 0, record.rawOffset + 1));
+			}
 			for (let ordinal = 0; ordinal < captureSessions.length; ordinal++) {
 				const session = captureSessions[ordinal];
 				database
 					.prepare(
-						`INSERT INTO capture_sessions (capture_id, ordinal, id, first_received_at, last_received_at)
-						 VALUES (@captureId, @ordinal, @id, @firstReceivedAt, @lastReceivedAt)`
+						`INSERT INTO capture_sessions
+						 (capture_id, ordinal, id, status, finalized_at, next_chunk_sequence, next_raw_offset,
+						  first_received_at, last_received_at)
+						 VALUES (@captureId, @ordinal, @id, 'finalized', @finalizedAt, 0, @nextRawOffset,
+						  @firstReceivedAt, @lastReceivedAt)`
 					)
 					.run({
 						captureId,
 						ordinal,
 						id: session.id,
+						finalizedAt: now,
+						nextRawOffset: sessionNextRawOffset.get(session.id) ?? 0,
 						firstReceivedAt: session.firstReceivedAt ?? null,
 						lastReceivedAt: session.lastReceivedAt ?? null
 					});
@@ -1165,21 +1339,22 @@ export function convertCaptureDocumentToCanonical(
 
 			// framing profile v1 active
 			const profileId = generateId();
-			database
-				.prepare(
-					`INSERT INTO framing_profiles (id, capture_id, version, algorithm_version, is_active, created_at, updated_at)
-					 VALUES (@id, @captureId, 1, @algorithmVersion, 1, @createdAt, @updatedAt)`
-				)
-				.run({
-					id: profileId,
-					captureId,
-					algorithmVersion,
-					createdAt: now,
-					updatedAt: now
-				});
-
-			// update captures.active_framing_profile_id
-			database.prepare("UPDATE captures SET active_framing_profile_id = @profileId WHERE id = @id").run({ profileId, id: captureId });
+				database
+					.prepare(
+						`INSERT INTO framing_profiles
+						 (id, capture_id, version, algorithm_version, is_active, created_at, updated_at,
+						  source_data_revision, retained_start_offset, verified)
+						 VALUES (@id, @captureId, 1, @algorithmVersion, 0, @createdAt, @updatedAt,
+						  1, @retainedStartOffset, 0)`
+					)
+					.run({
+						id: profileId,
+						captureId,
+						algorithmVersion,
+						createdAt: now,
+						updatedAt: now,
+						retainedStartOffset
+					});
 
 			// sections
 			for (let i = 0; i < sections.length; i++) {
@@ -1334,8 +1509,65 @@ export function convertCaptureDocumentToCanonical(
 
 			// Verify the rows that will become authoritative, rather than only the
 			// in-memory materialization used to populate them.
-			report = verifyConversion(doc, normalized, readPersistedConversion(database, captureId, profileId));
+			report = verifyConversion(doc, normalized, readPersistedConversion(database, captureId, profileId), {
+				sourceMessages: activeStream.length === stream.length ? undefined : sourceMessagesFromFrames(frames),
+				expectedSections: sections,
+				retainedStartOffset: activeStream.length === stream.length ? undefined : retainedStartOffset
+			});
 			if (!report.overallOk) throw new Error(report.details || "canonical conversion verification failed");
+
+			// Keep the raw chunk BLOBs immutable while exposing the legacy visibility
+			// state through the Phase 2.5 override tables.
+			const insertRawVisibility = database.prepare(
+				"INSERT INTO raw_byte_visibility (capture_id, raw_offset, hidden) VALUES (@captureId, @rawOffset, @hidden)"
+			);
+			for (const record of stream) {
+				insertRawVisibility.run({ captureId, rawOffset: record.rawOffset, hidden: record.hidden ? 1 : 0 });
+			}
+			const insertFrameVisibility = database.prepare(
+				`INSERT INTO frame_visibility
+				 (capture_id, profile_id, start_raw_offset, end_raw_offset, hidden)
+				 VALUES (@captureId, @profileId, @startRawOffset, @endRawOffset, @hidden)`
+			);
+			for (const frame of frames) {
+				const startRawOffset = frame.rawOffsets[0];
+				const endRawOffset = frame.rawOffsets.at(-1);
+				if (startRawOffset === undefined || endRawOffset === undefined) continue;
+				insertFrameVisibility.run({
+					captureId,
+					profileId,
+					startRawOffset,
+					endRawOffset,
+					hidden: frame.hidden ? 1 : 0
+				});
+			}
+
+			database.prepare("UPDATE framing_profiles SET verified = 1, is_active = 1, updated_at = @updatedAt WHERE id = @profileId").run({
+				profileId,
+				updatedAt: now
+			});
+			database.prepare("UPDATE captures SET active_framing_profile_id = @profileId WHERE id = @captureId").run({ captureId, profileId });
+
+			// The recovery copy is written only after every canonical row has been
+			// read back and verified. It is the one durable JSON recovery row; normal
+			// canonical reads do not consult it.
+			database
+				.prepare(
+					`INSERT INTO capture_backups
+					 (capture_id, document_json, migrated_at, verified, verification_report_json)
+					 VALUES (@captureId, @documentJson, @migratedAt, 1, @reportJson)
+					 ON CONFLICT (capture_id) DO UPDATE SET
+						 document_json = excluded.document_json,
+						 migrated_at = excluded.migrated_at,
+						 verified = 1,
+						 verification_report_json = excluded.verification_report_json`
+				)
+				.run({
+					captureId,
+					documentJson: row.document_json,
+					migratedAt: now,
+					reportJson: JSON.stringify(report)
+				});
 
 			// stable notes: map capture.notes and annotations
 			const notes = (doc.notes as Array<Record<string, unknown>>) || [];
@@ -1439,17 +1671,40 @@ export function convertCaptureDocumentToCanonical(
 			// finalization job completed
 			database
 				.prepare(
-					`INSERT INTO finalization_jobs (id, capture_id, status, created_at, updated_at, verified)
-					 VALUES (@id, @captureId, 'completed', @createdAt, @updatedAt, 1)
-					 ON CONFLICT (id) DO UPDATE SET status='completed', updated_at=excluded.updated_at, verified=1`
+					`INSERT INTO finalization_jobs
+					 (id, capture_id, status, created_at, updated_at, profile_id, data_revision,
+					  source_data_revision, completed_at, error, verified)
+					 VALUES (@id, @captureId, 'completed', @createdAt, @updatedAt, @profileId, 1,
+					  1, @completedAt, NULL, 1)
+					 ON CONFLICT (id) DO UPDATE SET
+						 status = 'completed',
+						 updated_at = excluded.updated_at,
+						 profile_id = excluded.profile_id,
+						 data_revision = excluded.data_revision,
+						 source_data_revision = excluded.source_data_revision,
+						 completed_at = excluded.completed_at,
+						error = NULL,
+						 verified = 1`
 				)
-				.run({ id: `conv-${captureId}`, captureId, createdAt: now, updatedAt: now });
-			discardVerifiedCaptureBackup(database, captureId);
+				.run({ id: `conv-${captureId}`, captureId, profileId, createdAt: now, updatedAt: now, completedAt: now });
+
+			// Switch authority last. If any canonical write, verification, backup, or
+			// document deletion fails, SQLite rolls the entire conversion back.
+			database.prepare("DELETE FROM capture_documents WHERE id = @captureId").run({ captureId });
+			database
+				.prepare(
+					`UPDATE capture_storage
+					 SET status = @status, updated_at = @updatedAt, last_error = NULL
+					 WHERE capture_id = @captureId`
+				)
+				.run({ captureId, status: CANONICAL_STORAGE_STATUS, updatedAt: now });
 		});
 		transaction();
 		return { captureId, ok: true, verified: true, report };
 	} catch (e) {
-		return { captureId, ok: false, verified: false, report, error: String(e) };
+		const error = e instanceof Error ? e.message : String(e);
+		markCanonicalizationFailed(database, captureId, error, nowIso);
+		return { captureId, ok: false, verified: false, report, error };
 	}
 }
 
@@ -2239,8 +2494,7 @@ export function createFramingRevision(
 // Helpers for mixed-state reads
 // ---------------------------------------------------------------------------
 export function isCaptureConverted(database: SqliteDatabase, captureId: string): boolean {
-	const row = database.prepare("SELECT id FROM captures WHERE id = @id").get({ id: captureId }) as { id: string } | undefined;
-	return Boolean(row);
+	return readCaptureStorageStatus(database, captureId) === CANONICAL_STORAGE_STATUS;
 }
 
 export function getActiveProfile(database: SqliteDatabase, captureId: string): { id: string; version: number } | undefined {

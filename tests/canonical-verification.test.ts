@@ -64,6 +64,11 @@ test("conversion verification compares rebuilt frames with the original messages
 		assert.equal(result.report.signaturesOk, false);
 		assert.equal(result.report.overallOk, false);
 		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM captures").get() as { count: number }).count, 0);
+		assert.deepEqual(database.prepare("SELECT status, last_error FROM capture_storage WHERE capture_id = 'capture-1'").get(), {
+			status: "canonicalization-failed",
+			last_error: result.error
+		});
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM capture_documents WHERE id = 'capture-1'").get() as { count: number }).count, 1);
 	} finally {
 		database.close();
 	}
@@ -86,6 +91,8 @@ test("conversion verification re-reads persisted canonical frames", () => {
 		assert.equal(result.verified, false);
 		assert.equal(result.report.overallOk, false);
 		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM captures").get() as { count: number }).count, 0);
+		assert.equal((database.prepare("SELECT status FROM capture_storage WHERE capture_id = 'capture-1'").get() as { status: string }).status, "canonicalization-failed");
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM capture_documents WHERE id = 'capture-1'").get() as { count: number }).count, 1);
 	} finally {
 		database.close();
 	}
