@@ -279,9 +279,10 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 				}
 				if (segments[3] === "duplicate" && request.method === "POST") {
 					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					const duplicateCaptureId = body.duplicateCaptureId ?? body.id;
 					return send(response, 201, commandService.duplicateCapture({
 						captureId,
-						duplicateCaptureId: body.id === undefined ? undefined : String(body.id)
+						duplicateCaptureId: duplicateCaptureId === undefined ? undefined : String(duplicateCaptureId)
 					}));
 				}
 				if (!segments[3] && request.method === "DELETE" && commandService.getStorageStatus(captureId).status === "canonical") {

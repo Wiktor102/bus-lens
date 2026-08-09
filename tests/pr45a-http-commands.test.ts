@@ -781,7 +781,7 @@ test("HTTP clear data preserves metadata and capture notes, while duplicate and 
 
 		const duplicate = await request("/api/captures/ops-capture/duplicate", {
 			method: "POST",
-			body: { id: "ops-copy" }
+			body: { duplicateCaptureId: "ops-copy" }
 		});
 		status(duplicate, 201);
 		const duplicateBody = record(duplicate.body);
