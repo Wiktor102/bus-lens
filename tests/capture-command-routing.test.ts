@@ -85,6 +85,101 @@ test("canonical optimistic mutations route through dedicated commands", async ()
 	assert.deepEqual(capture.byteStream, []);
 });
 
+test("serializes metadata and framing revisions while coalescing the latest optimistic state", async () => {
+	const capture: Capture = {
+		id: "queued-capture",
+		name: "Before",
+		description: "",
+		view: "",
+		baudRate: 115200,
+		inputFormat: "binary",
+		storageStatus: "canonical",
+		lifecycle: "finalized",
+		dataRevision: 2,
+		metadataRevision: 0,
+		contentRevision: 4,
+		framingDraftRevision: 0,
+		activeFramingProfileId: "profile-1",
+		byteStream: [
+			{ rawOffset: 0, value: 1, timestamp: 1, direction: "rx" },
+			{ rawOffset: 1, value: 2, timestamp: 2, direction: "rx" }
+		],
+		messages: [{ id: "frame-1", timestamp: 1, bytes: [1, 2], rawOffsets: [0, 1], _rawPositions: [0, 1] }],
+		frameSections: [{ id: "section-1", start: 0, framingMode: "length", frameSize: 2 }],
+		params: [],
+		notes: [],
+		annotations: {},
+		patternRemarks: {}
+	};
+	const metadataRequests: Array<{ expectedMetadataRevision?: number; patch: Record<string, unknown> }> = [];
+	const framingRequests: Array<{ expectedRevision?: number; sections: readonly Record<string, unknown>[] }> = [];
+	let releaseMetadata!: (value: { metadataRevision: number; updatedAt: string }) => void;
+	let releaseFraming!: (value: { revision: number; sections: readonly Record<string, unknown>[]; updatedAt: string }) => void;
+	const firstMetadata = new Promise<{ metadataRevision: number; updatedAt: string }>(resolve => { releaseMetadata = resolve; });
+	const firstFraming = new Promise<{ revision: number; sections: readonly Record<string, unknown>[]; updatedAt: string }>(resolve => { releaseFraming = resolve; });
+	const writer = {
+		patchMetadata: (request: { expectedMetadataRevision?: number; patch: Record<string, unknown> }) => {
+			metadataRequests.push(request);
+			return metadataRequests.length === 1
+				? firstMetadata
+				: Promise.resolve({ metadataRevision: 2, updatedAt: "metadata-2" });
+		},
+		updateFramingDraft: (request: { expectedRevision?: number; sections: readonly Record<string, unknown>[] }) => {
+			framingRequests.push(request);
+			return framingRequests.length === 1
+				? firstFraming
+				: Promise.resolve({ revision: 2, sections: request.sections, updatedAt: "framing-2" });
+		}
+	} as unknown as CaptureWriter;
+	const state = { captures: [capture], folders: [], unfiledCollapsed: false } as unknown as AppState;
+	const controller = createCaptureController({
+		state,
+		capture: () => capture,
+		getActiveId: () => "queued-capture",
+		setActiveId: () => {},
+		saveState: () => { throw new Error("canonical mutation used generic saveState"); },
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => true, stopRecording: async () => {} },
+		publishArchiveState: () => {},
+		publishCaptureHeaderState: () => {},
+		publishNotesState: () => {},
+		publishDialogCommand: () => {},
+		captureWriter: writer,
+		isCanonicalCapture: () => true,
+		refreshCapture: async () => capture,
+		reportPersistenceFailure: (_captureId, error) => { throw error; }
+	});
+
+	controller.commitCaptureTitle("Title");
+	controller.commitCaptureDescription("Description");
+	assert.equal(metadataRequests.length, 1);
+	assert.equal(metadataRequests[0]?.expectedMetadataRevision, 0);
+	releaseMetadata({ metadataRevision: 1, updatedAt: "metadata-1" });
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.equal(metadataRequests.length, 2);
+	assert.equal(metadataRequests[1]?.expectedMetadataRevision, 1);
+	assert.equal(metadataRequests[1]?.patch.name, "Title");
+	assert.equal(metadataRequests[1]?.patch.description, "Description");
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.equal(capture.metadataRevision, 2);
+
+	controller.setSectionFrameSize("section-1", 1);
+	controller.setSectionFrameSize("section-1", 4);
+	assert.equal(framingRequests.length, 1);
+	assert.equal(framingRequests[0]?.expectedRevision, 0);
+	assert.equal(framingRequests[0]?.sections[0]?.frameSize, 1);
+	releaseFraming({ revision: 1, sections: framingRequests[0]?.sections || [], updatedAt: "framing-1" });
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.equal(framingRequests.length, 2);
+	assert.equal(framingRequests[1]?.expectedRevision, 1);
+	assert.equal(framingRequests[1]?.sections[0]?.frameSize, 4);
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.equal(capture.framingDraftRevision, 2);
+});
+
 test("new capture creation uses runtime bookkeeping and does not replay the create", async () => {
 	const originalFetch = globalThis.fetch;
 	const requests: Array<{ path: string; method: string; body?: unknown }> = [];

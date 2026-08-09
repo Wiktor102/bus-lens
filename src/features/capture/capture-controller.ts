@@ -73,6 +73,12 @@ type ActiveCapture = Omit<
 
 type ActiveAppState = Pick<AppState, "folders" | "unfiledCollapsed"> & { captures: ActiveCapture[] };
 
+type CaptureWriteQueue = {
+	metadataPending: boolean;
+	framingPending: boolean;
+	running: Promise<void> | null;
+};
+
 function formatTime(ms: number): string {
 	return new Date(ms).toLocaleTimeString("en-GB", {
 		hour: "2-digit",
@@ -85,6 +91,7 @@ function formatTime(ms: number): string {
 
 export function createCaptureController(dependencies: CaptureControllerDependencies) {
 	const state = dependencies.state as ActiveAppState;
+	const captureWriteQueues = new Map<string, CaptureWriteQueue>();
 
 	function capture(): ActiveCapture | undefined {
 		return dependencies.capture() as ActiveCapture | undefined;
@@ -105,12 +112,14 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		} else fallback?.();
 	}
 
-	function metadataPatch(item: ActiveCapture): void {
-		if (!isCanonical(item)) {
-			dependencies.saveState();
-			return;
-		}
-		void dependencies.captureWriter!.patchMetadata({
+	function captureById(captureId: string): ActiveCapture | undefined {
+		return state.captures.find(item => String(item.id) === captureId);
+	}
+
+	async function writeMetadata(captureId: string): Promise<void> {
+		const item = captureById(captureId);
+		if (!item || !isCanonical(item)) return;
+		const result = await dependencies.captureWriter!.patchMetadata({
 			captureId: item.id,
 			expectedMetadataRevision: item.metadataRevision,
 			patch: {
@@ -125,10 +134,79 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 					return key ? [{ key, value: String(parameter.value ?? "") }] : [];
 				})
 			}
-		}).then(state => {
-			item.metadataRevision = state.metadataRevision;
-			item.updatedAt = state.updatedAt;
-		}).catch(error => reconcileFailure(item.id, error));
+		});
+		item.metadataRevision = result.metadataRevision;
+		item.updatedAt = result.updatedAt;
+	}
+
+	async function writeFraming(captureId: string): Promise<void> {
+		const item = captureById(captureId);
+		if (!item || !isCanonical(item)) return;
+		const sections = framingRequest(item);
+		if (dependencies.transport.isRecording()) {
+			const draft = await dependencies.captureWriter!.updateFramingDraft({
+				captureId: item.id,
+				sections,
+				expectedRevision: item.framingDraftRevision
+			});
+			item.framingDraftRevision = draft.revision;
+		} else {
+			const profile = await dependencies.captureWriter!.reframe({
+				captureId: item.id,
+				sections,
+				expectedActiveProfileId: item.activeFramingProfileId,
+				expectedDataRevision: Number(item.dataRevision ?? 0)
+			});
+			item.activeFramingProfileId = profile.profileId;
+		}
+	}
+
+	function drainCaptureWrites(captureId: string, queue: CaptureWriteQueue): Promise<void> {
+		if (queue.running) return queue.running;
+		queue.running = (async () => {
+			while (queue.metadataPending || queue.framingPending) {
+				if (queue.metadataPending) {
+					queue.metadataPending = false;
+					try {
+						await writeMetadata(captureId);
+					} catch (error) {
+						queue.metadataPending = false;
+						queue.framingPending = false;
+						reconcileFailure(captureId, error);
+					}
+				}
+				if (queue.framingPending) {
+					queue.framingPending = false;
+					try {
+						await writeFraming(captureId);
+					} catch (error) {
+						queue.metadataPending = false;
+						queue.framingPending = false;
+						reconcileFailure(captureId, error);
+					}
+				}
+			}
+		})().finally(() => {
+			queue.running = null;
+			if (!queue.metadataPending && !queue.framingPending) captureWriteQueues.delete(captureId);
+		});
+		return queue.running;
+	}
+
+	function queueCaptureWrite(captureId: string, kind: "metadata" | "framing"): void {
+		const queue = captureWriteQueues.get(captureId) || { metadataPending: false, framingPending: false, running: null };
+		captureWriteQueues.set(captureId, queue);
+		if (kind === "metadata") queue.metadataPending = true;
+		else queue.framingPending = true;
+		void drainCaptureWrites(captureId, queue);
+	}
+
+	function metadataPatch(item: ActiveCapture): void {
+		if (!isCanonical(item)) {
+			dependencies.saveState();
+			return;
+		}
+		queueCaptureWrite(item.id, "metadata");
 	}
 
 	function framingRequest(item: ActiveCapture): FramingSectionRequest[] {
@@ -369,9 +447,9 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		}
 	}
 
-	function deleteActiveCapture() {
+	async function deleteActiveCapture(): Promise<void> {
 		const activeId = dependencies.getActiveId();
-		if (activeId) deleteArchiveCapture(activeId);
+		if (activeId) await deleteArchiveCapture(activeId);
 	}
 
 	function publishContextDialog(isNew = false) {
