@@ -137,34 +137,32 @@ export function ContextDialog() {
 								<input
 									placeholder="Parameter"
 									value={parameter.key}
-									onChange={event =>
+									onChange={event => {
+										const key = event.currentTarget.value;
 										setDraft(current =>
 											current
 												? {
 														...current,
-														parameters: updateContextParameter(current.parameters, parameter.id, {
-															key: event.currentTarget.value
-														})
+														parameters: updateContextParameter(current.parameters, parameter.id, { key })
 													}
 												: current
 											)
-									}
+									}}
 								/>
 								<input
 									placeholder="Value"
 									value={parameter.value}
-									onChange={event =>
+									onChange={event => {
+										const value = event.currentTarget.value;
 										setDraft(current =>
 											current
 												? {
 														...current,
-														parameters: updateContextParameter(current.parameters, parameter.id, {
-															value: event.currentTarget.value
-														})
+														parameters: updateContextParameter(current.parameters, parameter.id, { value })
 													}
 												: current
 											)
-									}
+									}}
 								/>
 								<button
 									type="button"
