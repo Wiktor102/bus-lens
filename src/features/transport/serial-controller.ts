@@ -277,8 +277,14 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	}
 
 	async function disconnect({ persist = true }: DisconnectOptions = {}) {
-		if (recording || recordingSessionId) await stopRecording({ notify: false, persist });
-		else flushLiveBytes();
+		if (!persist) {
+			flushLiveBytes();
+			recording = false;
+		} else if (recording || recordingSessionId) {
+			await stopRecording({ notify: false, persist: true });
+		} else {
+			flushLiveBytes();
+		}
 		if (persist && !dependencies.recordingWriter) dependencies.saveState({ immediate: true });
 		readAbort = true;
 		dependencies.stopSendQueue();

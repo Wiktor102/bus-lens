@@ -34,3 +34,38 @@ test("does not disconnect when no serial port is open", () => {
 
 	assert.equal(disconnected, false);
 });
+
+test("warns before unload when captured bytes are not acknowledged", () => {
+	let prevented = false;
+	const event = {
+		preventDefault: () => { prevented = true; },
+		returnValue: "unchanged"
+	};
+	const handleBeforeUnload = createBeforeUnloadHandler({
+		beginUnload: () => {},
+		flushLiveBytes: () => {},
+		hasUnacknowledgedBytes: () => true,
+		getPort: () => null,
+		disconnect: () => {}
+	});
+
+	handleBeforeUnload(event);
+
+	assert.equal(prevented, true);
+	assert.equal(event.returnValue, "");
+});
+
+test("does not imply unload persistence when every append is acknowledged", () => {
+	let prevented = false;
+	const handleBeforeUnload = createBeforeUnloadHandler({
+		beginUnload: () => {},
+		flushLiveBytes: () => {},
+		hasUnacknowledgedBytes: () => false,
+		getPort: () => null,
+		disconnect: () => {}
+	});
+
+	handleBeforeUnload({ preventDefault: () => { prevented = true; } });
+
+	assert.equal(prevented, false);
+});
