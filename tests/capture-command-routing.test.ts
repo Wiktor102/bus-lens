@@ -242,6 +242,92 @@ test("uses reloaded annotation note IDs for canonical update and delete commands
 	assert.deepEqual(calls, ["update:stable-frame-note", "delete:stable-frame-note"]);
 });
 
+test("routes canonical pattern remarks and folder changes through commands", async () => {
+	const capture: Capture = {
+		id: "canonical-folder-capture",
+		name: "Canonical",
+		description: "",
+		view: "",
+		baudRate: 115200,
+		metadataRevision: 0,
+		folderId: "folder-1",
+		messages: [],
+		byteStream: [],
+		frameSections: [],
+		params: [],
+		notes: [],
+		annotations: {},
+		patternRemarks: {},
+		storageStatus: "canonical"
+	};
+	const state = {
+		captures: [capture],
+		folders: [{ id: "folder-1", name: "To delete", collapsed: false, createdAt: "now" }],
+		unfiledCollapsed: false
+	} as unknown as AppState;
+	const noteCalls: string[] = [];
+	const metadataRequests: Array<{ patch: Record<string, unknown>; expectedMetadataRevision?: number }> = [];
+	const writer = {
+		createNote: async (request: { text: string; target: { kind: string; sequenceKey?: string } }) => {
+			noteCalls.push(`create:${request.target.kind}:${request.target.sequenceKey}`);
+			return {
+				note: { id: "pattern-note", captureId: capture.id!, text: request.text, createdAt: "now", updatedAt: null, target: { kind: "pattern" as const, sequenceKey: request.target.sequenceKey! } },
+			contentRevision: 1
+		};
+		},
+		updateNote: async (request: { noteId: string; text?: string }) => {
+			noteCalls.push(`update:${request.noteId}`);
+			return {
+				note: { id: request.noteId, captureId: capture.id!, text: request.text || "", createdAt: "now", updatedAt: "now", target: { kind: "pattern" as const, sequenceKey: "AA" } },
+			contentRevision: 2
+		};
+		},
+		deleteNote: async (request: { noteId: string }) => { noteCalls.push(`delete:${request.noteId}`); },
+		patchMetadata: async (request: { patch: Record<string, unknown>; expectedMetadataRevision?: number }) => {
+			metadataRequests.push(request);
+			return { metadataRevision: (request.expectedMetadataRevision ?? 0) + 1, updatedAt: "metadata-updated" };
+		}
+	} as unknown as CaptureWriter;
+	const controller = createCaptureController({
+		state,
+		capture: () => capture,
+		getActiveId: () => capture.id,
+		setActiveId: () => {},
+		saveState: () => {},
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => false, stopRecording: async () => {} },
+		publishArchiveState: () => {},
+		publishCaptureHeaderState: () => {},
+		publishNotesState: () => {},
+		publishDialogCommand: () => {},
+		captureWriter: writer,
+		isCanonicalCapture: () => true,
+		refreshCapture: async () => capture
+	});
+
+	assert.equal(controller.commitPatternRemarkDraft({ captureId: capture.id!, patternKey: "AA", text: "first" }), true);
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.deepEqual(noteCalls, ["create:pattern:AA"]);
+	assert.equal((capture.patternRemarks?.AA as { noteId?: string }).noteId, "pattern-note");
+
+	controller.commitPatternRemarkDraft({ captureId: capture.id!, patternKey: "AA", text: "second" });
+	await new Promise(resolve => setTimeout(resolve, 0));
+	controller.commitPatternRemarkDraft({ captureId: capture.id!, patternKey: "AA", text: "" });
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.deepEqual(noteCalls, ["create:pattern:AA", "update:pattern-note", "delete:pattern-note"]);
+	assert.equal(capture.patternRemarks?.AA, undefined);
+
+	controller.deleteFolder("folder-1");
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.equal(metadataRequests.length, 1);
+	assert.equal(metadataRequests[0]?.expectedMetadataRevision, 0);
+	assert.equal(metadataRequests[0]?.patch.folderId, null);
+	assert.equal(capture.folderId, null);
+});
+
 test("awaits active recording shutdown before deleting a canonical capture", async () => {
 	const capture: Capture = {
 		id: "delete-after-stop",

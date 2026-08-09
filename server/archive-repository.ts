@@ -622,7 +622,7 @@ export class ArchiveRepository {
 		// Retrieve patternRemarks from stable_notes where target_kind='pattern' to reconstitute
 		const patternRemarks: Record<string, JsonDocument> = {};
 		for (const row of notesRows) {
-			if (row.target_kind === "pattern" && row.sequence_key) patternRemarks[row.sequence_key] = { text: row.text, updatedAt: new Date(row.created_at).getTime() };
+			if (row.target_kind === "pattern" && row.sequence_key) patternRemarks[row.sequence_key] = { noteId: row.id, text: row.text, updatedAt: new Date(row.created_at).getTime() };
 		}
 
 		const document: JsonDocument = {
