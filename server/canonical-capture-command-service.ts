@@ -2465,16 +2465,749 @@ export class CanonicalCaptureCommandService {
 		return { contentRevision: transaction() as number };
 	}
 
-	clearCaptureData(_request: ClearCaptureDataRequest): ClearCaptureDataResponse {
-		throw new Error("CanonicalCaptureCommandService.clearCaptureData is not implemented");
+	clearCaptureData(request: ClearCaptureDataRequest): ClearCaptureDataResponse {
+		const captureId = requiredString(request.captureId, "captureId");
+		const transaction = this.database.transaction(() => {
+			const capture = this.database
+				.prepare("SELECT byte_count, data_revision, content_revision FROM captures WHERE id = @captureId")
+				.get({ captureId }) as
+				| { byte_count: number; data_revision: number; content_revision: number }
+				| undefined;
+			if (!capture) throw new CanonicalCaptureNotFoundError(captureId);
+			this.requireCanonicalStorage(captureId);
+
+			// Framing drafts, parameters, canonical metadata, and capture-level notes
+			// are the durable operator context for a capture. Everything below is
+			// evidence or a derived/materialized view of that evidence.
+			this.database.prepare("DELETE FROM raw_chunk_requests WHERE capture_id = @captureId").run({ captureId });
+			this.database.prepare("DELETE FROM raw_chunks WHERE capture_id = @captureId").run({ captureId });
+			this.database.prepare("DELETE FROM capture_sessions WHERE capture_id = @captureId").run({ captureId });
+			this.database.prepare("DELETE FROM raw_byte_visibility WHERE capture_id = @captureId").run({ captureId });
+			this.database.prepare("DELETE FROM frame_visibility WHERE capture_id = @captureId").run({ captureId });
+			this.database
+				.prepare("DELETE FROM stable_notes WHERE capture_id = @captureId AND target_kind <> 'capture'")
+				.run({ captureId });
+			this.database.prepare("DELETE FROM finalization_jobs WHERE capture_id = @captureId").run({ captureId });
+			// The canonical schema cascades sections, frames, statistics, and
+			// sequence analysis from the profile rows.
+			this.database.prepare("DELETE FROM framing_profiles WHERE capture_id = @captureId").run({ captureId });
+
+			const updated = this.database
+				.prepare(
+					`UPDATE captures
+					 SET active_framing_profile_id = NULL,
+						 byte_count = 0,
+						 retained_start_offset = 0,
+						 lifecycle = 'finalized',
+						 data_revision = data_revision + 1,
+						 content_revision = content_revision + 1,
+						 updated_at = @updatedAt
+					 WHERE id = @captureId
+					 RETURNING data_revision, content_revision`
+				)
+				.get({ captureId, updatedAt: this.nowIso() }) as
+				| { data_revision: number; content_revision: number }
+				| undefined;
+			if (!updated) throw new CanonicalCaptureNotFoundError(captureId);
+			return {
+				captureId,
+				dataRevision: updated.data_revision,
+				contentRevision: updated.content_revision,
+				clearedByteCount: capture.byte_count
+			} satisfies ClearCaptureDataResponse;
+		});
+		return transaction() as ClearCaptureDataResponse;
 	}
 
-	duplicateCapture(_request: DuplicateCaptureRequest): DuplicateCaptureResponse {
-		throw new Error("CanonicalCaptureCommandService.duplicateCapture is not implemented");
+	duplicateCapture(request: DuplicateCaptureRequest): DuplicateCaptureResponse {
+		const sourceCaptureId = requiredString(request.captureId, "captureId");
+		const requestedDuplicateId = request.duplicateCaptureId ?? request.id;
+		const duplicateCaptureId = requiredString(requestedDuplicateId ?? this.generateId(), "duplicateCaptureId");
+		const duplicateRequestHash = sha256Hex(
+			stableSerialize({ operation: "duplicateCapture", sourceCaptureId, duplicateCaptureId })
+		);
+
+		type SourceProfile = {
+			id: string;
+			version: number;
+			algorithm_version: number;
+			is_active: number;
+			created_at: string;
+			updated_at: string;
+			source_data_revision: number;
+			retained_start_offset: number;
+			verified: number;
+		};
+		type SourceSection = {
+			id: string;
+			profile_id: string;
+			start_offset: number;
+			position: number;
+			framing_mode: string;
+			frame_length: number | null;
+			marker_bytes: string | null;
+			marker_position: string | null;
+			time_gap_ms: number | null;
+			collapse_runs: number;
+			collapsed: number;
+		};
+		type SourceFrame = {
+			id: string;
+			profile_id: string;
+			profile_version: number;
+			ordinal: number;
+			section_id: string;
+			raw_offsets_json: string;
+			bytes_json: string;
+			timestamps_json: string;
+			directions_json: string;
+			hidden: number;
+			signature: string;
+		};
+		type SourceSession = {
+			ordinal: number;
+			id: string;
+			first_received_at: number | null;
+			last_received_at: number | null;
+			status: string;
+			started_at: string | null;
+			finalized_at: string | null;
+			next_chunk_sequence: number;
+			next_raw_offset: number;
+		};
+		type SourceRawChunk = {
+			chunk_index: number;
+			start_offset: number;
+			byte_count: number;
+			bytes: Buffer;
+			timestamps_json: string;
+			directions_json: string;
+			hidden_json: string;
+			session_id: string | null;
+			session_ids_json: string;
+		};
+		type SourceRequest = {
+			request_id: string;
+			session_id: string;
+			sequence: number;
+			expected_start_offset: number;
+			payload_hash: string;
+			accepted_start_offset: number;
+			accepted_end_offset: number;
+			next_raw_offset: number;
+			next_sequence: number;
+			data_revision: number;
+			created_at: string;
+		};
+		type SourceDraft = {
+			revision: number;
+			sections_json: string;
+			source_data_revision: number;
+			created_at: string;
+			updated_at: string;
+		};
+		type SourceVisibility = {
+			raw_offset: number;
+		hidden: number;
+		};
+		type SourceFrameVisibility = {
+			profile_id: string;
+			start_raw_offset: number;
+			end_raw_offset: number;
+			hidden: number;
+		};
+		type SourceNote = {
+			id: string;
+			text: string;
+			created_at: string;
+			updated_at: string | null;
+			target_kind: string;
+			raw_offset: number | null;
+			profile_id: string | null;
+			raw_offsets_json: string | null;
+			start_offset: number | null;
+			end_offset: number | null;
+			sequence_key: string | null;
+			start_row: number | null;
+			end_row: number | null;
+			message_id: string | null;
+			byte_position: number | null;
+			frame_id: string | null;
+			sequence_group_id: string | null;
+		};
+		type SourceJob = {
+			id: string;
+			session_id: string | null;
+			profile_id: string | null;
+			status: string;
+			created_at: string;
+			updated_at: string;
+			error: string | null;
+			verified: number;
+			data_revision: number;
+			source_data_revision: number | null;
+			attempt_count: number;
+			next_attempt_at: string | null;
+			lease_token: string | null;
+			lease_expires_at: string | null;
+			started_at: string | null;
+			completed_at: string | null;
+		};
+
+		const transaction = this.database.transaction(() => {
+			const source = this.database
+				.prepare(
+					`SELECT id, name, description, controller_view, baud_rate, input_format, lifecycle, byte_count,
+							created_at, updated_at, folder_id, data_revision, metadata_revision, content_revision,
+							retained_start_offset, active_framing_profile_id
+					 FROM captures WHERE id = @captureId`
+				)
+				.get({ captureId: sourceCaptureId }) as CaptureRow | undefined;
+			if (!source) throw new CanonicalCaptureNotFoundError(sourceCaptureId);
+			this.requireCanonicalStorage(sourceCaptureId);
+
+			const target = this.database
+				.prepare("SELECT id, create_request_hash FROM captures WHERE id = @captureId")
+				.get({ captureId: duplicateCaptureId }) as { id: string; create_request_hash: string | null } | undefined;
+			if (target) {
+				if (target.create_request_hash === duplicateRequestHash) {
+					this.requireCanonicalStorage(duplicateCaptureId);
+					return duplicateCaptureId;
+				}
+				throw new CanonicalCaptureIdempotencyConflictError("duplicate capture id already exists", {
+					captureId: duplicateCaptureId,
+					sourceCaptureId,
+					expectedRequestHash: duplicateRequestHash,
+					actualRequestHash: target.create_request_hash
+				});
+			}
+			if (duplicateCaptureId === sourceCaptureId) {
+				throw new CanonicalCaptureIdempotencyConflictError("duplicate capture id must differ from source capture", {
+					captureId: duplicateCaptureId,
+					sourceCaptureId
+				});
+			}
+			const occupiedCompatibilityRow = this.database
+				.prepare(
+					`SELECT 1 FROM capture_storage WHERE capture_id = @captureId
+					 UNION ALL SELECT 1 FROM capture_documents WHERE id = @captureId
+					 UNION ALL SELECT 1 FROM capture_backups WHERE capture_id = @captureId
+					 LIMIT 1`
+				)
+				.get({ captureId: duplicateCaptureId });
+			if (occupiedCompatibilityRow) {
+				throw new CanonicalCaptureIdempotencyConflictError("duplicate capture id is already reserved", {
+					captureId: duplicateCaptureId,
+					sourceCaptureId
+				});
+			}
+
+			const profiles = this.database
+				.prepare(
+					`SELECT id, version, algorithm_version, is_active, created_at, updated_at,
+							source_data_revision, retained_start_offset, verified
+					 FROM framing_profiles WHERE capture_id = @captureId ORDER BY version`
+				)
+				.all({ captureId: sourceCaptureId }) as SourceProfile[];
+			const profileIds = profiles.map(profile => profile.id);
+			const sections = this.database
+				.prepare(
+					`SELECT id, profile_id, start_offset, position, framing_mode, frame_length, marker_bytes,
+							marker_position, time_gap_ms, collapse_runs, collapsed
+					 FROM framing_sections WHERE capture_id = @captureId ORDER BY profile_id, position`
+				)
+				.all({ captureId: sourceCaptureId }) as SourceSection[];
+			const frames = this.database
+				.prepare(
+					`SELECT id, profile_id, profile_version, ordinal, section_id, raw_offsets_json, bytes_json,
+							timestamps_json, directions_json, hidden, signature
+					 FROM materialized_frames WHERE capture_id = @captureId ORDER BY profile_version, ordinal`
+				)
+				.all({ captureId: sourceCaptureId }) as SourceFrame[];
+			const sessions = this.database
+				.prepare(
+					`SELECT ordinal, id, first_received_at, last_received_at, status, started_at, finalized_at,
+							next_chunk_sequence, next_raw_offset
+					 FROM capture_sessions WHERE capture_id = @captureId ORDER BY ordinal`
+				)
+				.all({ captureId: sourceCaptureId }) as SourceSession[];
+			const rawChunks = this.database
+				.prepare(
+					`SELECT chunk_index, start_offset, byte_count, bytes, timestamps_json, directions_json,
+							hidden_json, session_id, session_ids_json
+					 FROM raw_chunks WHERE capture_id = @captureId ORDER BY chunk_index`
+				)
+				.all({ captureId: sourceCaptureId }) as SourceRawChunk[];
+			const rawRequests = this.database
+				.prepare(
+					`SELECT request_id, session_id, sequence, expected_start_offset, payload_hash,
+							accepted_start_offset, accepted_end_offset, next_raw_offset, next_sequence,
+							data_revision, created_at
+					 FROM raw_chunk_requests WHERE capture_id = @captureId ORDER BY rowid`
+				)
+				.all({ captureId: sourceCaptureId }) as SourceRequest[];
+			const drafts = this.database
+				.prepare(
+					`SELECT revision, sections_json, source_data_revision, created_at, updated_at
+					 FROM framing_drafts WHERE capture_id = @captureId ORDER BY revision`
+				)
+				.all({ captureId: sourceCaptureId }) as SourceDraft[];
+			const byteVisibility = this.database
+				.prepare("SELECT raw_offset, hidden FROM raw_byte_visibility WHERE capture_id = @captureId ORDER BY raw_offset")
+				.all({ captureId: sourceCaptureId }) as SourceVisibility[];
+			const frameVisibility = this.database
+				.prepare(
+					`SELECT profile_id, start_raw_offset, end_raw_offset, hidden
+					 FROM frame_visibility WHERE capture_id = @captureId ORDER BY profile_id, start_raw_offset, end_raw_offset`
+				)
+				.all({ captureId: sourceCaptureId }) as SourceFrameVisibility[];
+			const notes = this.database
+				.prepare(
+					`SELECT id, text, created_at, updated_at, target_kind, raw_offset, profile_id,
+							raw_offsets_json, start_offset, end_offset, sequence_key, start_row, end_row,
+							message_id, byte_position, frame_id, sequence_group_id
+					 FROM stable_notes WHERE capture_id = @captureId ORDER BY created_at, id`
+				)
+				.all({ captureId: sourceCaptureId }) as SourceNote[];
+			const jobs = this.database
+				.prepare(
+					`SELECT id, session_id, profile_id, status, created_at, updated_at, error, verified,
+							data_revision, source_data_revision, attempt_count, next_attempt_at, lease_token,
+							lease_expires_at, started_at, completed_at
+					 FROM finalization_jobs WHERE capture_id = @captureId ORDER BY created_at, id`
+				)
+				.all({ captureId: sourceCaptureId }) as SourceJob[];
+
+			const analysisFrameSignatures = this.database
+				.prepare("SELECT profile_id, signature, count FROM frame_signatures WHERE profile_id IN (SELECT id FROM framing_profiles WHERE capture_id = @captureId)")
+				.all({ captureId: sourceCaptureId }) as Array<{ profile_id: string; signature: string; count: number }>;
+			const analysisTransitions = this.database
+				.prepare("SELECT profile_id, from_signature, to_signature, count, diffs FROM frame_transitions WHERE profile_id IN (SELECT id FROM framing_profiles WHERE capture_id = @captureId)")
+				.all({ captureId: sourceCaptureId }) as Array<{ profile_id: string; from_signature: string; to_signature: string; count: number; diffs: number }>;
+			const analysisByteStatistics = this.database
+				.prepare("SELECT profile_id, position, value, count FROM byte_statistics WHERE profile_id IN (SELECT id FROM framing_profiles WHERE capture_id = @captureId)")
+				.all({ captureId: sourceCaptureId }) as Array<{ profile_id: string; position: number; value: number; count: number }>;
+			const analysisBitStatistics = this.database
+				.prepare("SELECT profile_id, position, bit, percentage, variance FROM bit_statistics WHERE profile_id IN (SELECT id FROM framing_profiles WHERE capture_id = @captureId)")
+				.all({ captureId: sourceCaptureId }) as Array<{ profile_id: string; position: number; bit: number; percentage: number; variance: string }>;
+			const sequenceGroups = this.database
+				.prepare("SELECT id, profile_id, key_text, signatures_json, score, length FROM sequence_groups WHERE capture_id = @captureId ORDER BY profile_id, id")
+				.all({ captureId: sourceCaptureId }) as Array<{ id: string; profile_id: string; key_text: string; signatures_json: string; score: number; length: number }>;
+			const sequenceOccurrences = this.database
+				.prepare(
+					`SELECT group_id, occurrence_index, offset, start_frame_ordinal, start_raw_offset, end_raw_offset, length
+					 FROM sequence_occurrences WHERE group_id IN (SELECT id FROM sequence_groups WHERE capture_id = @captureId)
+					 ORDER BY group_id, occurrence_index, offset`
+				)
+				.all({ captureId: sourceCaptureId }) as Array<{
+					group_id: string;
+					occurrence_index: number;
+					offset: number;
+					start_frame_ordinal: number;
+					start_raw_offset: number;
+					end_raw_offset: number;
+					length: number;
+				}>;
+
+			const sourceIdentityIds = new Set<string>([
+				sourceCaptureId,
+				...profileIds,
+				...sections.map(section => section.id),
+				...frames.map(frame => frame.id),
+				...sessions.map(session => session.id),
+				...notes.map(note => note.id),
+				...jobs.map(job => job.id),
+				...sequenceGroups.map(group => group.id),
+				...rawRequests.map(rawRequest => rawRequest.request_id)
+			]);
+			const allocatedIds = new Set(sourceIdentityIds);
+			const identityTables = [
+				"captures",
+				"framing_profiles",
+				"framing_sections",
+				"materialized_frames",
+				"sequence_groups",
+				"stable_notes",
+				"finalization_jobs",
+				"capture_sessions"
+			] as const;
+			const idTaken = (id: string): boolean => identityTables.some(table => Boolean(this.database.prepare(`SELECT 1 FROM ${table} WHERE id = @id LIMIT 1`).get({ id })));
+			const freshId = (field: string): string => {
+				for (let attempt = 0; attempt < 100; attempt += 1) {
+					const candidate = requiredString(this.generateId(), field);
+					if (allocatedIds.has(candidate) || idTaken(candidate)) continue;
+					allocatedIds.add(candidate);
+					return candidate;
+				}
+				throw new CanonicalCaptureConflictError(`could not allocate a fresh ${field}`, { sourceCaptureId });
+			};
+			allocatedIds.add(duplicateCaptureId);
+
+			const profileIdsBySource = new Map(profiles.map(profile => [profile.id, freshId("profileId")]));
+			const sectionIdsBySource = new Map<string, string>();
+			const freshSectionId = (sourceId: string | null | undefined): string => {
+				if (sourceId && sectionIdsBySource.has(sourceId)) return sectionIdsBySource.get(sourceId)!;
+				const id = freshId("sectionId");
+				if (sourceId) sectionIdsBySource.set(sourceId, id);
+				return id;
+			};
+			sections.forEach(section => freshSectionId(section.id));
+			const frameIdsBySource = new Map(frames.map(frame => [frame.id, freshId("frameId")]));
+			const sessionIdsBySource = new Map(sessions.map(session => [session.id, freshId("sessionId")]));
+			const noteIdsBySource = new Map(notes.map(note => [note.id, freshId("noteId")]));
+			const groupIdsBySource = new Map(sequenceGroups.map(group => [group.id, freshId("sequenceGroupId")]));
+			const jobIdsBySource = new Map(jobs.map(job => [job.id, freshId("finalizationJobId")]));
+			const requestIdsBySource = new Map(rawRequests.map(rawRequest => [rawRequest.request_id, freshId("requestId")]));
+			const sourceSectionId = (id: string): string => sectionIdsBySource.get(id) ?? freshSectionId(id);
+			const sourceProfileId = (id: string | null): string | null => (id === null ? null : profileIdsBySource.get(id) ?? null);
+			const sourceSessionId = (id: string | null): string | null => (id === null ? null : sessionIdsBySource.get(id) ?? null);
+			const sourceFrameId = (id: string | null): string | null => (id === null ? null : frameIdsBySource.get(id) ?? null);
+			const sourceGroupId = (id: string | null): string | null => (id === null ? null : groupIdsBySource.get(id) ?? null);
+
+			const cloneDraftSections = (sectionsJson: string): string => {
+				const parsed: unknown = JSON.parse(sectionsJson);
+				if (!Array.isArray(parsed)) return sectionsJson;
+				return JSON.stringify(
+					parsed.map(section => {
+						if (!isRecord(section)) return section;
+						const sourceId = typeof section.id === "string" && section.id.trim() ? section.id : undefined;
+						return { ...section, id: freshSectionId(sourceId) };
+					})
+				);
+			};
+
+			const now = this.nowIso();
+			this.database
+				.prepare(
+					`INSERT INTO captures
+					 (id, name, description, controller_view, baud_rate, input_format, lifecycle, byte_count,
+					  created_at, updated_at, folder_id, data_revision, metadata_revision, content_revision,
+					  retained_start_offset, create_request_hash, active_framing_profile_id)
+					 VALUES (@id, @name, @description, @controllerView, @baudRate, @inputFormat, @lifecycle, @byteCount,
+					  @createdAt, @updatedAt, @folderId, @dataRevision, @metadataRevision, @contentRevision,
+					  @retainedStartOffset, @createRequestHash, @activeProfileId)`
+				)
+				.run({
+					id: duplicateCaptureId,
+					name: `${source.name} · copy`,
+					description: source.description,
+					controllerView: source.controller_view,
+					baudRate: source.baud_rate,
+					inputFormat: source.input_format,
+					lifecycle: source.lifecycle,
+					byteCount: source.byte_count,
+					createdAt: now,
+					updatedAt: now,
+					folderId: source.folder_id,
+					dataRevision: source.data_revision,
+					metadataRevision: source.metadata_revision,
+					contentRevision: source.content_revision,
+					retainedStartOffset: source.retained_start_offset,
+					createRequestHash: duplicateRequestHash,
+					activeProfileId: source.active_framing_profile_id ? profileIdsBySource.get(source.active_framing_profile_id) ?? null : null
+				});
+			this.database
+				.prepare("INSERT INTO capture_storage (capture_id, status, created_at, updated_at, last_error) VALUES (@captureId, @status, @createdAt, @updatedAt, NULL)")
+				.run({ captureId: duplicateCaptureId, status: CANONICAL_STORAGE_STATUS, createdAt: now, updatedAt: now });
+
+			const insertParameter = this.database.prepare(
+				"INSERT INTO capture_parameters (capture_id, position, key_text, value_text) VALUES (@captureId, @position, @keyText, @valueText)"
+			);
+			const parameters = this.database
+				.prepare("SELECT position, key_text, value_text FROM capture_parameters WHERE capture_id = @captureId ORDER BY position")
+				.all({ captureId: sourceCaptureId }) as Array<{ position: number; key_text: string; value_text: string }>;
+			parameters.forEach(parameter =>
+				insertParameter.run({ captureId: duplicateCaptureId, position: parameter.position, keyText: parameter.key_text, valueText: parameter.value_text })
+			);
+
+			const insertDraft = this.database.prepare(
+				`INSERT INTO framing_drafts (capture_id, revision, sections_json, source_data_revision, created_at, updated_at)
+				 VALUES (@captureId, @revision, @sectionsJson, @sourceDataRevision, @createdAt, @updatedAt)`
+			);
+			drafts.forEach(draft =>
+				insertDraft.run({
+					captureId: duplicateCaptureId,
+					revision: draft.revision,
+					sectionsJson: cloneDraftSections(draft.sections_json),
+					sourceDataRevision: draft.source_data_revision,
+					createdAt: draft.created_at,
+					updatedAt: draft.updated_at
+				})
+			);
+
+			const insertSession = this.database.prepare(
+				`INSERT INTO capture_sessions
+				 (capture_id, ordinal, id, first_received_at, last_received_at, status, started_at, finalized_at, next_chunk_sequence, next_raw_offset)
+				 VALUES (@captureId, @ordinal, @id, @firstReceivedAt, @lastReceivedAt, @status, @startedAt, @finalizedAt, @nextChunkSequence, @nextRawOffset)`
+			);
+			sessions.forEach(session =>
+				insertSession.run({
+					captureId: duplicateCaptureId,
+					ordinal: session.ordinal,
+					id: sessionIdsBySource.get(session.id),
+					firstReceivedAt: session.first_received_at,
+					lastReceivedAt: session.last_received_at,
+					status: session.status,
+					startedAt: session.started_at,
+					finalizedAt: session.finalized_at,
+					nextChunkSequence: session.next_chunk_sequence,
+					nextRawOffset: session.next_raw_offset
+				})
+			);
+
+			const insertRawChunk = this.database.prepare(
+				`INSERT INTO raw_chunks
+				 (capture_id, chunk_index, start_offset, byte_count, bytes, timestamps_json, directions_json, hidden_json, session_id, session_ids_json)
+				 VALUES (@captureId, @chunkIndex, @startOffset, @byteCount, @bytes, @timestampsJson, @directionsJson, @hiddenJson, @sessionId, @sessionIdsJson)`
+			);
+			rawChunks.forEach(chunk => {
+				const sourceSessionIds = JSON.parse(chunk.session_ids_json || "[]") as Array<string | null>;
+				insertRawChunk.run({
+					captureId: duplicateCaptureId,
+					chunkIndex: chunk.chunk_index,
+					startOffset: chunk.start_offset,
+					byteCount: chunk.byte_count,
+					bytes: chunk.bytes,
+					timestampsJson: chunk.timestamps_json,
+					directionsJson: chunk.directions_json,
+					hiddenJson: chunk.hidden_json,
+					sessionId: sourceSessionId(chunk.session_id),
+					sessionIdsJson: JSON.stringify(sourceSessionIds.map(sourceSessionId))
+				});
+			});
+
+			const insertRequest = this.database.prepare(
+				`INSERT INTO raw_chunk_requests
+				 (capture_id, request_id, session_id, sequence, expected_start_offset, payload_hash, accepted_start_offset,
+				  accepted_end_offset, next_raw_offset, next_sequence, data_revision, created_at)
+				 VALUES (@captureId, @requestId, @sessionId, @sequence, @expectedStartOffset, @payloadHash, @acceptedStartOffset,
+				  @acceptedEndOffset, @nextRawOffset, @nextSequence, @dataRevision, @createdAt)`
+			);
+			rawRequests.forEach(rawRequest =>
+				insertRequest.run({
+					captureId: duplicateCaptureId,
+					requestId: requestIdsBySource.get(rawRequest.request_id),
+					sessionId: sessionIdsBySource.get(rawRequest.session_id),
+					sequence: rawRequest.sequence,
+					expectedStartOffset: rawRequest.expected_start_offset,
+					payloadHash: rawRequest.payload_hash,
+					acceptedStartOffset: rawRequest.accepted_start_offset,
+					acceptedEndOffset: rawRequest.accepted_end_offset,
+					nextRawOffset: rawRequest.next_raw_offset,
+					nextSequence: rawRequest.next_sequence,
+					dataRevision: rawRequest.data_revision,
+					createdAt: rawRequest.created_at
+				})
+			);
+
+			const insertProfile = this.database.prepare(
+				`INSERT INTO framing_profiles
+				 (id, capture_id, version, algorithm_version, is_active, created_at, updated_at, source_data_revision, retained_start_offset, verified)
+				 VALUES (@id, @captureId, @version, @algorithmVersion, @isActive, @createdAt, @updatedAt, @sourceDataRevision, @retainedStartOffset, @verified)`
+			);
+			profiles.forEach(profile =>
+				insertProfile.run({
+					id: profileIdsBySource.get(profile.id),
+					captureId: duplicateCaptureId,
+					version: profile.version,
+					algorithmVersion: profile.algorithm_version,
+					isActive: profile.is_active,
+					createdAt: profile.created_at,
+					updatedAt: profile.updated_at,
+					sourceDataRevision: profile.source_data_revision,
+					retainedStartOffset: profile.retained_start_offset,
+					verified: profile.verified
+				})
+			);
+
+			const insertSection = this.database.prepare(
+				`INSERT INTO framing_sections
+				 (id, profile_id, capture_id, start_offset, position, framing_mode, frame_length, marker_bytes, marker_position, time_gap_ms, collapse_runs, collapsed)
+				 VALUES (@id, @profileId, @captureId, @startOffset, @position, @framingMode, @frameLength, @markerBytes, @markerPosition, @timeGapMs, @collapseRuns, @collapsed)`
+			);
+			sections.forEach(section =>
+				insertSection.run({
+					id: sourceSectionId(section.id),
+					profileId: profileIdsBySource.get(section.profile_id),
+					captureId: duplicateCaptureId,
+					startOffset: section.start_offset,
+					position: section.position,
+					framingMode: section.framing_mode,
+					frameLength: section.frame_length,
+					markerBytes: section.marker_bytes,
+					markerPosition: section.marker_position,
+					timeGapMs: section.time_gap_ms,
+					collapseRuns: section.collapse_runs,
+					collapsed: section.collapsed
+				})
+			);
+
+			const insertFrame = this.database.prepare(
+				`INSERT INTO materialized_frames
+				 (id, capture_id, profile_id, profile_version, ordinal, section_id, raw_offsets_json, bytes_json, timestamps_json, directions_json, hidden, signature)
+				 VALUES (@id, @captureId, @profileId, @profileVersion, @ordinal, @sectionId, @rawOffsetsJson, @bytesJson, @timestampsJson, @directionsJson, @hidden, @signature)`
+			);
+			frames.forEach(frame =>
+				insertFrame.run({
+					id: frameIdsBySource.get(frame.id),
+					captureId: duplicateCaptureId,
+					profileId: profileIdsBySource.get(frame.profile_id),
+					profileVersion: frame.profile_version,
+					ordinal: frame.ordinal,
+					sectionId: sourceSectionId(frame.section_id),
+					rawOffsetsJson: frame.raw_offsets_json,
+					bytesJson: frame.bytes_json,
+					timestampsJson: frame.timestamps_json,
+					directionsJson: frame.directions_json,
+					hidden: frame.hidden,
+					signature: frame.signature
+				})
+			);
+
+			const insertFrameSignature = this.database.prepare("INSERT INTO frame_signatures (profile_id, signature, count) VALUES (@profileId, @signature, @count)");
+			analysisFrameSignatures.forEach(row => insertFrameSignature.run({ profileId: profileIdsBySource.get(row.profile_id), signature: row.signature, count: row.count }));
+			const insertTransition = this.database.prepare("INSERT INTO frame_transitions (profile_id, from_signature, to_signature, count, diffs) VALUES (@profileId, @fromSignature, @toSignature, @count, @diffs)");
+			analysisTransitions.forEach(row => insertTransition.run({ profileId: profileIdsBySource.get(row.profile_id), fromSignature: row.from_signature, toSignature: row.to_signature, count: row.count, diffs: row.diffs }));
+			const insertByteStatistic = this.database.prepare("INSERT INTO byte_statistics (profile_id, position, value, count) VALUES (@profileId, @position, @value, @count)");
+			analysisByteStatistics.forEach(row => insertByteStatistic.run({ profileId: profileIdsBySource.get(row.profile_id), position: row.position, value: row.value, count: row.count }));
+			const insertBitStatistic = this.database.prepare("INSERT INTO bit_statistics (profile_id, position, bit, percentage, variance) VALUES (@profileId, @position, @bit, @percentage, @variance)");
+			analysisBitStatistics.forEach(row => insertBitStatistic.run({ profileId: profileIdsBySource.get(row.profile_id), position: row.position, bit: row.bit, percentage: row.percentage, variance: row.variance }));
+
+			const insertGroup = this.database.prepare(
+				`INSERT INTO sequence_groups (id, capture_id, profile_id, key_text, signatures_json, score, length)
+				 VALUES (@id, @captureId, @profileId, @keyText, @signaturesJson, @score, @length)`
+			);
+			sequenceGroups.forEach(group =>
+				insertGroup.run({
+					id: groupIdsBySource.get(group.id),
+					captureId: duplicateCaptureId,
+					profileId: profileIdsBySource.get(group.profile_id),
+					keyText: group.key_text,
+					signaturesJson: group.signatures_json,
+					score: group.score,
+					length: group.length
+				})
+			);
+			const insertOccurrence = this.database.prepare(
+				`INSERT INTO sequence_occurrences
+				 (group_id, occurrence_index, offset, start_frame_ordinal, start_raw_offset, end_raw_offset, length)
+				 VALUES (@groupId, @occurrenceIndex, @offset, @startFrameOrdinal, @startRawOffset, @endRawOffset, @length)`
+			);
+			sequenceOccurrences.forEach(occurrence =>
+				insertOccurrence.run({
+					groupId: groupIdsBySource.get(occurrence.group_id),
+					occurrenceIndex: occurrence.occurrence_index,
+					offset: occurrence.offset,
+					startFrameOrdinal: occurrence.start_frame_ordinal,
+					startRawOffset: occurrence.start_raw_offset,
+					endRawOffset: occurrence.end_raw_offset,
+					length: occurrence.length
+				})
+			);
+
+			const insertByteVisibility = this.database.prepare("INSERT INTO raw_byte_visibility (capture_id, raw_offset, hidden) VALUES (@captureId, @rawOffset, @hidden)");
+			byteVisibility.forEach(row => insertByteVisibility.run({ captureId: duplicateCaptureId, rawOffset: row.raw_offset, hidden: row.hidden }));
+			const insertFrameVisibility = this.database.prepare(
+				"INSERT INTO frame_visibility (capture_id, profile_id, start_raw_offset, end_raw_offset, hidden) VALUES (@captureId, @profileId, @startRawOffset, @endRawOffset, @hidden)"
+			);
+			frameVisibility.forEach(row => insertFrameVisibility.run({ captureId: duplicateCaptureId, profileId: profileIdsBySource.get(row.profile_id), startRawOffset: row.start_raw_offset, endRawOffset: row.end_raw_offset, hidden: row.hidden }));
+
+			const insertNote = this.database.prepare(
+				`INSERT INTO stable_notes
+				 (id, capture_id, text, created_at, updated_at, target_kind, raw_offset, profile_id, raw_offsets_json,
+				  start_offset, end_offset, sequence_key, start_row, end_row, message_id, byte_position, frame_id, sequence_group_id)
+				 VALUES (@id, @captureId, @text, @createdAt, @updatedAt, @targetKind, @rawOffset, @profileId, @rawOffsetsJson,
+				  @startOffset, @endOffset, @sequenceKey, @startRow, @endRow, @messageId, @bytePosition, @frameId, @sequenceGroupId)`
+			);
+			notes.forEach(note =>
+				insertNote.run({
+					id: noteIdsBySource.get(note.id),
+					captureId: duplicateCaptureId,
+					text: note.text,
+					createdAt: note.created_at,
+					updatedAt: note.updated_at,
+					targetKind: note.target_kind,
+					rawOffset: note.raw_offset,
+					profileId: sourceProfileId(note.profile_id),
+					rawOffsetsJson: note.raw_offsets_json,
+					startOffset: note.start_offset,
+					endOffset: note.end_offset,
+					sequenceKey: note.sequence_key,
+					startRow: note.start_row,
+					endRow: note.end_row,
+					messageId: note.message_id,
+					bytePosition: note.byte_position,
+					frameId: sourceFrameId(note.frame_id),
+					sequenceGroupId: sourceGroupId(note.sequence_group_id)
+				})
+			);
+
+			const insertJob = this.database.prepare(
+				`INSERT INTO finalization_jobs
+				 (id, capture_id, session_id, profile_id, status, created_at, updated_at, error, verified, data_revision,
+				  source_data_revision, attempt_count, next_attempt_at, lease_token, lease_expires_at, started_at, completed_at)
+				 VALUES (@id, @captureId, @sessionId, @profileId, @status, @createdAt, @updatedAt, @error, @verified, @dataRevision,
+				  @sourceDataRevision, @attemptCount, @nextAttemptAt, @leaseToken, @leaseExpiresAt, @startedAt, @completedAt)`
+			);
+			jobs.forEach(job =>
+				insertJob.run({
+					id: jobIdsBySource.get(job.id),
+					captureId: duplicateCaptureId,
+					sessionId: sourceSessionId(job.session_id),
+					profileId: sourceProfileId(job.profile_id),
+					status: job.status,
+					createdAt: job.created_at,
+					updatedAt: job.updated_at,
+					error: job.error,
+					verified: job.verified,
+					dataRevision: job.data_revision,
+					sourceDataRevision: job.source_data_revision,
+					attemptCount: job.attempt_count,
+					nextAttemptAt: job.next_attempt_at,
+					leaseToken: job.lease_token,
+					leaseExpiresAt: job.lease_expires_at,
+					startedAt: job.started_at,
+					completedAt: job.completed_at
+				})
+			);
+
+			return duplicateCaptureId;
+		});
+
+		const captureId = transaction() as string;
+		const state = this.getCaptureState(captureId);
+		return {
+			sourceCaptureId,
+			captureId,
+			name: state.name,
+			dataRevision: state.dataRevision,
+			metadataRevision: state.metadataRevision,
+			contentRevision: state.contentRevision
+		};
 	}
 
-	deleteCapture(_captureId: string): DeleteCaptureResponse {
-		throw new Error("CanonicalCaptureCommandService.deleteCapture is not implemented");
+	deleteCapture(captureIdValue: string): DeleteCaptureResponse {
+		const captureId = requiredString(captureIdValue, "captureId");
+		const transaction = this.database.transaction(() => {
+			const capture = this.database.prepare("SELECT id FROM captures WHERE id = @captureId").get({ captureId });
+			if (!capture) throw new CanonicalCaptureNotFoundError(captureId);
+			this.requireCanonicalStorage(captureId);
+
+			// captures owns the canonical child graph; foreign-key cascades remove
+			// chunks, sessions, profiles, materializations, analysis, notes, and jobs.
+			this.database.prepare("DELETE FROM captures WHERE id = @captureId").run({ captureId });
+			this.database.prepare("DELETE FROM capture_storage WHERE capture_id = @captureId").run({ captureId });
+			this.database.prepare("DELETE FROM archive_order WHERE entity_type = 'capture' AND entity_id = @captureId").run({ captureId });
+			this.database
+				.prepare("UPDATE archive_state SET active_capture_id = NULL, updated_at = @updatedAt WHERE active_capture_id = @captureId")
+				.run({ captureId, updatedAt: this.nowIso() });
+			// These compatibility rows are not FK children of captures. Remove only
+			// the deleted capture's rows so another capture remains untouched.
+			this.database.prepare("DELETE FROM capture_documents WHERE id = @captureId").run({ captureId });
+			this.database.prepare("DELETE FROM capture_backups WHERE capture_id = @captureId").run({ captureId });
+			return { captureId, deleted: true } satisfies DeleteCaptureResponse;
+		});
+		return transaction() as DeleteCaptureResponse;
 	}
 
 }
