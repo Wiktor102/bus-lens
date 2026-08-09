@@ -41,11 +41,31 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	return response.status === 204 ? (undefined as T) : (await response.json() as T);
 }
 
+function documentWithId<T extends object>(record: { id?: string; document: T }): T {
+	const id = record.id || (record.document as { id?: unknown }).id;
+	return id ? { ...record.document, id } as T : record.document;
+}
+
 export class ArchiveClient {
 	async health(): Promise<void> { await request("/health"); }
 	async load(): Promise<AppState> {
-		const archive = await request<{ captures: Array<{ document: Capture }>; folders: Array<{ document: StoredFolder }>; index: { activeId: string | null; unfiledCollapsed: boolean }; queue: Array<{ document: unknown }>; history: Array<{ document: unknown }>; settings: Record<string, unknown> }>("/archive");
-		return { captures: archive.captures.map(item => item.document), folders: archive.folders.map(item => item.document), activeId: archive.index.activeId, unfiledCollapsed: archive.index.unfiledCollapsed, sendQueue: archive.queue.map(item => item.document) as AppState["sendQueue"], sendHistory: archive.history.map(item => item.document) as AppState["sendHistory"], sendSettings: archive.settings.send as AppState["sendSettings"] };
+		const archive = await request<{
+			captures: Array<{ id?: string; document: Capture }>;
+			folders: Array<{ id?: string; document: StoredFolder }>;
+			index: { activeId: string | null; unfiledCollapsed: boolean };
+			queue: Array<{ id?: string; document: Record<string, unknown> }>;
+			history: Array<{ id?: string; document: Record<string, unknown> }>;
+			settings: Record<string, unknown>;
+		}>("/archive");
+		return {
+			captures: archive.captures.map(documentWithId),
+			folders: archive.folders.map(documentWithId),
+			activeId: archive.index.activeId,
+			unfiledCollapsed: archive.index.unfiledCollapsed,
+			sendQueue: archive.queue.map(documentWithId) as AppState["sendQueue"],
+			sendHistory: archive.history.map(documentWithId) as AppState["sendHistory"],
+			sendSettings: archive.settings.send as AppState["sendSettings"]
+		};
 	}
 	async migrate(archive: AppState): Promise<MigrationReport> {
 		const fingerprint = await archiveFingerprint(archive);
@@ -55,11 +75,15 @@ export class ArchiveClient {
 	}
 	async saveCapture(capture: Capture): Promise<void> { await request(`/captures/${encodeURIComponent(String(capture.id))}`, { method: "PUT", body: JSON.stringify(capture) }); }
 	async saveFolder(folder: StoredFolder): Promise<void> { await request(`/folders/${encodeURIComponent(folder.id)}`, { method: "PUT", body: JSON.stringify(folder) }); }
+	async deleteCapture(captureId: string): Promise<void> { await request(`/captures/${encodeURIComponent(captureId)}`, { method: "DELETE" }); }
+	async deleteFolder(folderId: string): Promise<void> { await request(`/folders/${encodeURIComponent(folderId)}`, { method: "DELETE" }); }
+	async deleteQueueItem(queueItemId: string): Promise<void> { await request(`/queue/${encodeURIComponent(queueItemId)}`, { method: "DELETE" }); }
+	async deleteHistoryItem(historyItemId: string): Promise<void> { await request(`/history/${encodeURIComponent(historyItemId)}`, { method: "DELETE" }); }
 	async saveArchiveIndex(state: AppState, activeId: string | null | undefined): Promise<void> {
 		await request("/archive-index", { method: "PUT", body: JSON.stringify({ activeId: activeId ?? null, unfiledCollapsed: Boolean(state.unfiledCollapsed), captures: state.captures.map((capture, position) => ({ id: capture.id, folderId: capture.folderId ?? null, position })), folders: state.folders.map((folder, position) => ({ id: folder.id, position })) }) });
 	}
 	async saveSendState(state: AppState): Promise<void> {
-		await Promise.all((state.sendQueue ?? []).map(item => request(`/queue/${encodeURIComponent(String(item.id))}`, { method: "PUT", body: JSON.stringify(item) })));
+		await Promise.all((state.sendQueue ?? []).map((item, index) => request(`/queue/${encodeURIComponent(String(item.id ?? `queue-${index}`))}`, { method: "PUT", body: JSON.stringify(item) })));
 		await Promise.all((state.sendHistory ?? []).map((item, index) => request(`/history/${encodeURIComponent(String(item.id ?? `history-${index}`))}`, { method: "PUT", body: JSON.stringify(item) })));
 	}
 	async saveSettings(settings: Partial<SendSettings> | undefined): Promise<void> { await request("/settings/send", { method: "PUT", body: JSON.stringify(settings ?? {}) }); }

@@ -80,11 +80,6 @@ function resolveDependencies(dependencies: StateDependencies = {}): ResolvedStat
 
 export function normalizeSendState(target: AppState, dependencies: StateDependencies = {}): void {
 	const { generateId, now } = resolveDependencies(dependencies);
-	target.sendHistory = Array.isArray(target.sendHistory)
-		? target.sendHistory
-				.filter(item => Array.isArray(item.bytes) && item.bytes.length)
-				.slice(0, MAX_SEND_HISTORY)
-		: [];
 	target.sendQueue = Array.isArray(target.sendQueue)
 		? target.sendQueue
 				.filter(item => Array.isArray(item.bytes) && item.bytes.length)
@@ -93,6 +88,12 @@ export function normalizeSendState(target: AppState, dependencies: StateDependen
 					bytes: item.bytes!.map(Number),
 					createdAt: item.createdAt || now()
 				}))
+		: [];
+	target.sendHistory = Array.isArray(target.sendHistory)
+		? target.sendHistory
+				.filter(item => Array.isArray(item.bytes) && item.bytes.length)
+				.slice(0, MAX_SEND_HISTORY)
+				.map(item => ({ ...item, id: item.id || generateId() }))
 		: [];
 	const savedDelay = Number(target.sendSettings?.delayMs);
 	target.sendSettings = {
