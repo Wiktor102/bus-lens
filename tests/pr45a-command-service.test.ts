@@ -142,3 +142,32 @@ test("metadata patches increment only metadata revision and replace parameters i
 		database.close();
 	}
 });
+
+test("sessions are durable, retryable by id, and support repeat recording", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		let nextId = 0;
+		const service = new CanonicalCaptureCommandService(database, {
+			nowIso: () => "2026-08-09T00:00:00.000Z",
+			generateId: () => `session-${nextId++}`
+		});
+		service.createCapture({ captureId: "session-capture" });
+		const first = service.startSession({ captureId: "session-capture", sessionId: "recording-a" });
+		const retry = service.startSession({ captureId: "session-capture", sessionId: "recording-a" });
+		assert.deepEqual(retry, first);
+		assert.equal(first.session.status, "recording");
+		assert.equal(first.session.nextChunkSequence, 0);
+		assert.equal(first.session.nextRawOffset, 0);
+		assert.throws(() => service.startSession({ captureId: "session-capture", sessionId: "recording-b" }));
+
+		database.prepare("UPDATE capture_sessions SET status = 'finalized', finalized_at = @finalizedAt WHERE id = 'recording-a'").run({ finalizedAt: "2026-08-09T00:01:00.000Z" });
+		const second = service.startSession({ captureId: "session-capture" });
+		assert.equal(second.session.ordinal, 1);
+		assert.equal(second.session.id, "session-0");
+		assert.equal(second.session.nextRawOffset, 0);
+		assert.equal(service.getCaptureState("session-capture").sessions.length, 2);
+	} finally {
+		database.close();
+	}
+});

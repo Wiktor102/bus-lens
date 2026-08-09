@@ -809,6 +809,42 @@ export class CanonicalCaptureCommandService {
 		};
 	}
 
+	private readSession(captureId: string, sessionId: string): CaptureSessionState {
+		const row = this.database
+			.prepare(
+				`SELECT capture_id, ordinal, id, status, first_received_at, last_received_at, started_at, finalized_at,
+						next_chunk_sequence, next_raw_offset
+				 FROM capture_sessions WHERE capture_id = @captureId AND id = @sessionId`
+			)
+			.get({ captureId, sessionId }) as
+			| {
+					capture_id: string;
+					ordinal: number;
+					id: string;
+					status: string;
+					first_received_at: number | null;
+					last_received_at: number | null;
+					started_at: string | null;
+					finalized_at: string | null;
+					next_chunk_sequence: number;
+					next_raw_offset: number;
+				}
+			| undefined;
+		if (!row) throw new CanonicalCaptureNotFoundError(`session ${sessionId} in capture ${captureId}`);
+		return {
+			captureId: row.capture_id,
+			ordinal: row.ordinal,
+			id: row.id,
+			status: row.status,
+			firstReceivedAt: row.first_received_at,
+			lastReceivedAt: row.last_received_at,
+			startedAt: row.started_at,
+			finalizedAt: row.finalized_at,
+			nextChunkSequence: row.next_chunk_sequence,
+			nextRawOffset: row.next_raw_offset
+		};
+	}
+
 	patchMetadata(_request: PatchMetadataRequest): CaptureState {
 		const captureId = requiredString(_request.captureId, "captureId");
 		if (!isRecord(_request.patch)) throw new CanonicalCaptureValidationError("metadata patch must be an object");
@@ -890,8 +926,81 @@ export class CanonicalCaptureCommandService {
 		return this.getCaptureState(captureId);
 	}
 
-	startSession(_request: StartSessionRequest): StartSessionResponse {
-		throw new Error("CanonicalCaptureCommandService.startSession is not implemented");
+	startSession(request: StartSessionRequest): StartSessionResponse {
+		const captureId = requiredString(request.captureId, "captureId");
+		const requestedSessionId = request.sessionId === undefined ? undefined : requiredString(request.sessionId, "sessionId");
+		const startedAt = isoFrom(request.startedAt, this.nowIso());
+		const transaction = this.database.transaction(() => {
+			const capture = this.database
+				.prepare("SELECT byte_count, data_revision FROM captures WHERE id = @captureId")
+				.get({ captureId }) as { byte_count: number; data_revision: number } | undefined;
+			if (!capture) throw new CanonicalCaptureNotFoundError(captureId);
+			const storage = this.database
+				.prepare("SELECT status FROM capture_storage WHERE capture_id = @captureId")
+				.get({ captureId }) as { status: string } | undefined;
+			if (!storage) throw new CanonicalCaptureConflictError("capture storage status is not explicit", { captureId });
+
+			if (requestedSessionId) {
+				const existing = this.database
+					.prepare("SELECT id, status FROM capture_sessions WHERE capture_id = @captureId AND id = @sessionId")
+					.get({ captureId, sessionId: requestedSessionId }) as { id: string; status: string } | undefined;
+				if (existing) {
+					if (existing.status === "recording") return { sessionId: existing.id, dataRevision: capture.data_revision };
+					throw new CanonicalCaptureConflictError("session id has already been finalized", {
+						captureId,
+						sessionId: requestedSessionId,
+						status: existing.status
+					});
+				}
+			}
+
+			const active = this.database
+				.prepare(
+					"SELECT id, status FROM capture_sessions WHERE capture_id = @captureId AND status IN ('recording','finalizing') ORDER BY ordinal DESC LIMIT 1"
+				)
+				.get({ captureId }) as { id: string; status: string } | undefined;
+			if (active) {
+				throw new CanonicalCaptureConflictError("capture already has an active recording session", {
+					captureId,
+					activeSessionId: active.id,
+					activeSessionStatus: active.status
+				});
+			}
+			const ordinalRow = this.database
+				.prepare("SELECT COALESCE(MAX(ordinal), -1) AS ordinal FROM capture_sessions WHERE capture_id = @captureId")
+				.get({ captureId }) as { ordinal: number };
+			const offsetRow = this.database
+				.prepare("SELECT COALESCE(MAX(next_raw_offset), 0) AS next_raw_offset FROM capture_sessions WHERE capture_id = @captureId")
+				.get({ captureId }) as { next_raw_offset: number };
+			const sessionId = requestedSessionId ?? requiredString(this.generateId(), "sessionId");
+			const nextRawOffset = Math.max(capture.byte_count, offsetRow.next_raw_offset);
+			this.database
+				.prepare(
+					`INSERT INTO capture_sessions
+					 (capture_id, ordinal, id, status, started_at, finalized_at, next_chunk_sequence, next_raw_offset,
+					  first_received_at, last_received_at)
+					 VALUES (@captureId, @ordinal, @sessionId, 'recording', @startedAt, NULL, 0, @nextRawOffset, NULL, NULL)`
+				)
+				.run({
+					captureId,
+					ordinal: ordinalRow.ordinal + 1,
+					sessionId,
+					startedAt,
+					nextRawOffset
+				});
+			const updatedAt = this.nowIso();
+			this.database.prepare("UPDATE captures SET lifecycle = 'recording', updated_at = @updatedAt WHERE id = @captureId").run({ captureId, updatedAt });
+			this.database
+				.prepare("UPDATE capture_storage SET status = @status, updated_at = @updatedAt, last_error = NULL WHERE capture_id = @captureId")
+				.run({ captureId, status: CANONICAL_STORAGE_STATUS, updatedAt });
+			return { sessionId, dataRevision: capture.data_revision };
+		});
+		const result = transaction() as { sessionId: string; dataRevision: number };
+		return {
+			captureId,
+			session: this.readSession(captureId, result.sessionId),
+			dataRevision: result.dataRevision
+		};
 	}
 
 	appendChunk(_request: AppendChunkRequest): AppendChunkResponse {
