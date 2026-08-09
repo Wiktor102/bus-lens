@@ -1413,9 +1413,9 @@ export function convertCaptureDocumentToCanonical(
 					 ON CONFLICT (id) DO UPDATE SET status='completed', updated_at=excluded.updated_at, verified=1`
 				)
 				.run({ id: `conv-${captureId}`, captureId, createdAt: now, updatedAt: now });
+			discardVerifiedCaptureBackup(database, captureId);
 		});
 		transaction();
-		discardVerifiedCaptureBackup(database, captureId);
 		return { captureId, ok: true, verified: true, report };
 	} catch (e) {
 		return { captureId, ok: false, verified: false, report, error: String(e) };
