@@ -180,6 +180,68 @@ test("serializes metadata and framing revisions while coalescing the latest opti
 	assert.equal(capture.framingDraftRevision, 2);
 });
 
+test("uses reloaded annotation note IDs for canonical update and delete commands", async () => {
+	const capture: Capture = {
+		id: "reloaded-annotation",
+		name: "Annotated",
+		activeFramingProfileId: "profile-1",
+		messages: [{ id: "frame-1", timestamp: 1, bytes: [1, 2], rawOffsets: [10, 11], _rawPositions: [10, 11] }],
+		byteStream: [
+			{ rawOffset: 10, value: 1, timestamp: 1, direction: "rx" },
+			{ rawOffset: 11, value: 2, timestamp: 2, direction: "rx" }
+		],
+		frameSections: [{ id: "section-1", start: 10, framingMode: "length", frameSize: 2 }],
+		params: [],
+		notes: [],
+		annotations: {
+			"frame-1": { noteId: "stable-frame-note", text: "before", type: "message", createdAt: 1 }
+		},
+		patternRemarks: {},
+		storageStatus: "canonical"
+	};
+	const calls: string[] = [];
+	const writer = {
+		createNote: async () => { throw new Error("reloaded annotation must not be created again"); },
+		updateNote: async (request: { noteId: string; text?: unknown }) => {
+			calls.push(`update:${request.noteId}`);
+			return {
+				note: { id: request.noteId, captureId: capture.id!, text: String(request.text), createdAt: "now", updatedAt: "now", target: { kind: "capture" as const } },
+				contentRevision: 2
+			};
+		},
+		deleteNote: async (request: { noteId: string }) => { calls.push(`delete:${request.noteId}`); }
+	} as unknown as CaptureWriter;
+	const state = { captures: [capture], folders: [], unfiledCollapsed: false } as unknown as AppState;
+	const controller = createCaptureController({
+		state,
+		capture: () => capture,
+		getActiveId: () => capture.id,
+		setActiveId: () => {},
+		saveState: () => { throw new Error("canonical annotation used generic saveState"); },
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => false, stopRecording: async () => {} },
+		publishArchiveState: () => {},
+		publishCaptureHeaderState: () => {},
+		publishNotesState: () => {},
+		publishDialogCommand: () => {},
+		captureWriter: writer,
+		isCanonicalCapture: () => true,
+		refreshCapture: async () => capture
+	});
+
+	assert.equal(controller.commitAnnotationDraft({ captureId: capture.id!, annotationType: "message", key: "frame-1", text: "after" }), true);
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.deepEqual(calls, ["update:stable-frame-note"]);
+	assert.equal((capture.annotations?.["frame-1"] as { noteId?: string }).noteId, "stable-frame-note");
+
+	controller.removeAnnotationDraft({ captureId: capture.id!, annotationType: "message", key: "frame-1" });
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.deepEqual(calls, ["update:stable-frame-note", "delete:stable-frame-note"]);
+});
+
 test("awaits active recording shutdown before deleting a canonical capture", async () => {
 	const capture: Capture = {
 		id: "delete-after-stop",
