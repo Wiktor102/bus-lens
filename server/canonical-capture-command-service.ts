@@ -1575,6 +1575,19 @@ export class CanonicalCaptureCommandService {
 				});
 			const nextDataRevision = capture.data_revision + 1;
 			const retainedStartOffset = Math.max(capture.retained_start_offset, Math.max(0, nextRawOffset - CANONICAL_RETENTION_LIMIT));
+			let clearedRetainedNotes = 0;
+			if (retainedStartOffset > capture.retained_start_offset) {
+				clearedRetainedNotes = this.database
+					.prepare(
+						`DELETE FROM stable_notes
+						 WHERE capture_id = @captureId
+						   AND (
+						     (target_kind = 'byte' AND raw_offset < @retainedStartOffset)
+						     OR target_kind IN ('frame', 'range', 'sequence-group', 'sequence', 'pattern', 'legacy-sequence')
+						   )`
+					)
+					.run({ captureId, retainedStartOffset }).changes;
+			}
 			const receivedTimestamps = flattened.timestamps.filter((_, index) => flattened.directions[index] !== "tx");
 			const firstReceivedAt = receivedTimestamps.length
 				? Math.min(session.first_received_at ?? Number.POSITIVE_INFINITY, ...receivedTimestamps)
@@ -1616,10 +1629,12 @@ export class CanonicalCaptureCommandService {
 				.prepare(
 					`UPDATE captures
 					 SET byte_count = byte_count + @byteCount, data_revision = @dataRevision,
-						 retained_start_offset = @retainedStartOffset, updated_at = @updatedAt
+						 retained_start_offset = @retainedStartOffset,
+						 content_revision = content_revision + CASE WHEN @clearedRetainedNotes > 0 THEN 1 ELSE 0 END,
+						 updated_at = @updatedAt
 					 WHERE id = @captureId`
 				)
-				.run({ captureId, byteCount: flattened.bytes.length, dataRevision: nextDataRevision, retainedStartOffset, updatedAt: this.nowIso() });
+				.run({ captureId, byteCount: flattened.bytes.length, dataRevision: nextDataRevision, retainedStartOffset, clearedRetainedNotes, updatedAt: this.nowIso() });
 			this.database
 				.prepare("UPDATE capture_storage SET updated_at = @updatedAt, last_error = NULL WHERE capture_id = @captureId")
 				.run({ captureId, updatedAt: this.nowIso() });

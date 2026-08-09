@@ -639,3 +639,68 @@ test("reframe materialization failure rolls back the new profile and leaves the 
 		database.close();
 	}
 });
+
+test("retention advances the presentation boundary without deleting acknowledged raw evidence", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		const service = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-09T00:00:00.000Z" });
+		service.createCapture({
+			captureId: "retained-tail",
+			inputFormat: "binary",
+			framing: [{ start: 0, framingMode: "length", frameSize: 50_000 }]
+		});
+		service.startSession({ captureId: "retained-tail", sessionId: "retained-session" });
+		service.appendChunk({
+			captureId: "retained-tail",
+			sessionId: "retained-session",
+			requestId: "retained-head",
+			sequence: 0,
+			expectedStartOffset: 0,
+			bytes: [1, 2, 3]
+		});
+		service.createNote({ captureId: "retained-tail", noteId: "capture-note", text: "keep", target: { kind: "capture" } });
+		service.createNote({ captureId: "retained-tail", noteId: "expired-byte-note", text: "rolls off", target: { kind: "byte", rawOffset: 1 } });
+		const acknowledgement = service.appendChunk({
+			captureId: "retained-tail",
+			sessionId: "retained-session",
+			requestId: "retained-window",
+			sequence: 1,
+			expectedStartOffset: 3,
+			bytes: new Uint8Array(50_000).fill(0x5a)
+		});
+
+		assert.equal(acknowledgement.nextRawOffset, 50_003);
+		assert.equal(service.getCaptureState("retained-tail").retainedStartOffset, 3);
+		assert.deepEqual(
+			database.prepare("SELECT id, target_kind FROM stable_notes WHERE capture_id = 'retained-tail' ORDER BY id").all(),
+			[{ id: "capture-note", target_kind: "capture" }]
+		);
+		assert.deepEqual(
+			database.prepare("SELECT start_offset, byte_count, length(bytes) AS stored_bytes FROM raw_chunks WHERE capture_id = 'retained-tail' ORDER BY chunk_index").all(),
+			[
+				{ start_offset: 0, byte_count: 3, stored_bytes: 3 },
+				{ start_offset: 3, byte_count: 50_000, stored_bytes: 50_000 }
+			]
+		);
+
+		const finalized = service.finalizeSession({
+			captureId: "retained-tail",
+			sessionId: "retained-session",
+			expectedDataRevision: acknowledgement.dataRevision
+		});
+		assert.equal(finalized.retainedStartOffset, 3);
+		assert.deepEqual(
+			database.prepare("SELECT source_data_revision, retained_start_offset, verified FROM framing_profiles WHERE id = @profileId").get({ profileId: finalized.profileId }),
+			{ source_data_revision: 2, retained_start_offset: 3, verified: 1 }
+		);
+		const frames = database.prepare("SELECT raw_offsets_json, bytes_json FROM materialized_frames WHERE profile_id = @profileId ORDER BY ordinal").all({ profileId: finalized.profileId }) as Array<{ raw_offsets_json: string; bytes_json: string }>;
+		const rawOffsets = frames.flatMap(frame => JSON.parse(frame.raw_offsets_json) as number[]);
+		assert.equal(rawOffsets.length, 50_000);
+		assert.equal(rawOffsets[0], 3);
+		assert.equal(rawOffsets.at(-1), 50_002);
+		assert.equal(frames.reduce((count, frame) => count + (JSON.parse(frame.bytes_json) as number[]).length, 0), 50_000);
+	} finally {
+		database.close();
+	}
+});
