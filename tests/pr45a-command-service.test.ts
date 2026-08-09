@@ -318,6 +318,22 @@ test("finalization verifies continuous acknowledged chunks, stops before materia
 		assert.equal(retry.idempotent, true);
 		assert.equal(retry.job.id, finalized.job.id);
 		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM finalization_jobs WHERE capture_id = 'finalize-capture'").get() as { count: number }).count, 1);
+		service.startSession({ captureId: "finalize-capture", sessionId: "second-session" });
+		service.appendChunk({
+			captureId: "finalize-capture",
+			sessionId: "second-session",
+			requestId: "second-request",
+			sequence: 0,
+			expectedStartOffset: 4,
+			segments: [{ timestamp: 20, direction: "rx", bytes: [5, 6] }]
+		});
+		const secondFinalization = service.finalizeSession({ captureId: "finalize-capture", sessionId: "second-session" });
+		assert.equal(secondFinalization.profileVersion, 2);
+		assert.notEqual(secondFinalization.profileId, finalized.profileId);
+		assert.deepEqual(
+			database.prepare("SELECT version, is_active FROM framing_profiles WHERE capture_id = 'finalize-capture' ORDER BY version").all(),
+			[{ version: 1, is_active: 0 }, { version: 2, is_active: 1 }]
+		);
 
 		service.createCapture({ captureId: "incomplete-capture", framing, inputFormat: "binary" });
 		service.startSession({ captureId: "incomplete-capture", sessionId: "incomplete-session" });
