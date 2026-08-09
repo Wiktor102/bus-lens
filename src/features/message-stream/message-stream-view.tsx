@@ -115,11 +115,13 @@ function useMessageVirtualizer(snapshot: MessageStreamSnapshot, scrollRef: React
 function SectionEntry({
 	entry,
 	virtualItem,
-	rowRef
+	rowRef,
+	contextMenuState
 }: {
 	entry: Extract<MessageStreamEntry, { type: "section" }>;
 	virtualItem: VirtualItem;
 	rowRef: (element: HTMLTableRowElement | null) => void;
+	contextMenuState: MenuState | null;
 }) {
 	const { section, sectionNumber } = entry;
 	const actions = getMessageStreamActions();
@@ -127,10 +129,13 @@ function SectionEntry({
 	useEffect(() => setMarkerDraft(section.frameMarker), [section.id, section.frameMarker]);
 	const sectionLabel = String(sectionNumber).padStart(2, "0");
 	const toggleLabel = `${section.collapsed ? "Expand" : "Collapse"} section ${sectionLabel} messages`;
+	const contextMenuOpen = contextMenuState?.kind === "section" && contextMenuState.sectionId === section.id;
 	return (
 		<tr
 			ref={rowRef}
-			className={`section-divider ${sectionNumber === 1 ? "first-section-divider" : ""}`.trim()}
+			className={`section-divider ${sectionNumber === 1 ? "first-section-divider" : ""} ${
+				contextMenuOpen ? "context-menu-open" : ""
+			}`.trim()}
 			data-section-id={section.id}
 			data-index={virtualItem.index}
 			style={{ transform: `translateY(${virtualItem.start}px)` }}
@@ -296,12 +301,14 @@ function MessageEntry({
 	entry,
 	virtualItem,
 	snapshot,
-	rowRef
+	rowRef,
+	contextMenuState
 }: {
 	entry: Extract<MessageStreamEntry, { type: "message" }>;
 	virtualItem: VirtualItem;
 	snapshot: MessageStreamSnapshot;
 	rowRef: (element: HTMLTableRowElement | null) => void;
+	contextMenuState: MenuState | null;
 }) {
 	const { row: message, rowIndex } = entry;
 	const patternMember = snapshot.patterns.membership.get(message._originalStart);
@@ -351,6 +358,10 @@ function MessageEntry({
 	]
 		.filter(Boolean)
 		.join(" · ");
+	const messageContextMenuOpen =
+		contextMenuState?.kind === "message" && contextMenuState.target.messageId === message.id;
+	const byteContextMenuPosition =
+		messageContextMenuOpen && contextMenuState.target.position !== null ? contextMenuState.target.position : null;
 	const rowStyle: CSSVariableStyle = {
 		transform: `translateY(${virtualItem.start}px)`,
 		...(pattern
@@ -408,7 +419,7 @@ function MessageEntry({
 			ref={rowRef}
 			data-index={virtualItem.index}
 			data-message-id={message.id}
-			className={rowClasses}
+			className={`${rowClasses} ${messageContextMenuOpen ? "context-menu-open" : ""}`.trim()}
 			style={rowStyle}
 			title={rowTitles}
 		>
@@ -480,7 +491,9 @@ function MessageEntry({
 						return (
 							<button
 								key={`${message.id}:${rawPosition}`}
-								className={byteClasses}
+								className={`${byteClasses} ${
+									byteContextMenuPosition === rawPosition ? "context-menu-open" : ""
+								}`.trim()}
 								style={byteStyle}
 								data-byte-note={`${message.id}:${rawPosition}`}
 								title={`Byte ${position + 1} · ${directionLabel} ${receivedAt} · ${count} occurrence(s)${transitionTitle} · click to annotate · right-click for actions`}
@@ -841,7 +854,13 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 							if (element) virtualizer.measureElement(element);
 						};
 						return entry.type === "section" ? (
-							<SectionEntry key={entry.key} entry={entry} virtualItem={virtualItem} rowRef={ref} />
+							<SectionEntry
+								key={entry.key}
+								entry={entry}
+								virtualItem={virtualItem}
+								rowRef={ref}
+								contextMenuState={menuState}
+							/>
 						) : entry.type === "marker-prompt" ? (
 							<MarkerPromptEntry key={entry.key} entry={entry} virtualItem={virtualItem} rowRef={ref} />
 						) : (
@@ -851,6 +870,7 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 								virtualItem={virtualItem}
 								snapshot={snapshot}
 								rowRef={ref}
+								contextMenuState={menuState}
 							/>
 						);
 					})}
