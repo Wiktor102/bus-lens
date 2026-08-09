@@ -76,6 +76,24 @@ function installCommandSchema(database: ReturnType<typeof openDatabase>): void {
 	`);
 }
 
+function recordAndFinalize(
+	service: CanonicalCaptureCommandService,
+	captureId: string,
+	bytes: readonly number[] = [1, 2, 3, 4]
+) {
+	service.createCapture({ captureId, framing, inputFormat: "binary" });
+	service.startSession({ captureId, sessionId: `${captureId}-session` });
+	const append = service.appendChunk({
+		captureId,
+		sessionId: `${captureId}-session`,
+		requestId: `${captureId}-request`,
+		sequence: 0,
+		expectedStartOffset: 0,
+		bytes
+	});
+	return service.finalizeSession({ captureId, sessionId: `${captureId}-session`, expectedDataRevision: append.dataRevision });
+}
+
 test("canonical creation is idempotent by stable request hash and stores ordered metadata", () => {
 	const database = openDatabase(":memory:");
 	installCommandSchema(database);
@@ -406,6 +424,217 @@ test("commands reject incidental canonical rows when storage authority is failed
 			assert.throws(command, (error: unknown) => error instanceof Error && "details" in error && (error as { details: { status?: string } }).details.status === "canonicalization-failed");
 		}
 		assert.equal(service.getCaptureState("failed-authority").storage.status, "canonicalization-failed");
+	} finally {
+		database.close();
+	}
+});
+
+test("framing draft updates are recording-only, revision guarded, and derived-row free", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		const service = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-09T00:00:00.000Z" });
+		const created = service.createCapture({ captureId: "draft-only", framing, inputFormat: "binary" });
+	assert.throws(
+		() => service.updateFramingDraft({ captureId: "draft-only", sections: framing, expectedRevision: 0 }),
+		(error: unknown) => error instanceof Error && "code" in error && (error as { code: string }).code === "CONFLICT"
+	);
+	service.startSession({ captureId: "draft-only", sessionId: "draft-only-session" });
+	const updated = service.updateFramingDraft({
+		captureId: "draft-only",
+		expectedRevision: 0,
+		sections: [{ start: 0, framingMode: "length", frameSize: 1, collapseRuns: true, collapsed: true }]
+	});
+	assert.equal(updated.revision, 1);
+	assert.equal(updated.sections[0]?.frameSize, 1);
+	assert.equal(updated.sections[0]?.collapseRuns, true);
+	assert.deepEqual(
+		database.prepare("SELECT revision, sections_json FROM framing_drafts WHERE capture_id = 'draft-only' ORDER BY revision").all(),
+		[
+			{ revision: 0, sections_json: JSON.stringify(created.draft?.sections) },
+			{ revision: 1, sections_json: JSON.stringify(updated.sections) }
+		]
+	);
+	assert.throws(
+		() => service.updateFramingDraft({ captureId: "draft-only", sections: framing, expectedRevision: 0 }),
+		(error: unknown) => error instanceof Error && "details" in error && (error as { details: { actualRevision?: number } }).details.actualRevision === 1
+	);
+	for (const table of [
+		"framing_profiles",
+		"framing_sections",
+		"materialized_frames",
+		"frame_signatures",
+		"frame_transitions",
+		"byte_statistics",
+		"bit_statistics",
+		"sequence_groups",
+		"sequence_occurrences"
+	]) {
+		assert.equal((database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count, 0, table);
+	}
+	assert.equal(service.getCaptureState("draft-only").dataRevision, 0);
+	} finally {
+		database.close();
+	}
+});
+
+test("finalization snapshots the latest framing draft", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		const service = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-09T00:00:00.000Z" });
+		service.createCapture({ captureId: "latest-draft", framing, inputFormat: "binary" });
+		service.startSession({ captureId: "latest-draft", sessionId: "latest-draft-session" });
+		const append = service.appendChunk({
+			captureId: "latest-draft",
+			sessionId: "latest-draft-session",
+			requestId: "latest-draft-request",
+			sequence: 0,
+			expectedStartOffset: 0,
+			bytes: [1, 2, 3]
+		});
+		service.updateFramingDraft({
+			captureId: "latest-draft",
+			expectedRevision: 0,
+			sections: [{ start: 0, framingMode: "length", frameSize: 1 }]
+		});
+		service.finalizeSession({ captureId: "latest-draft", sessionId: "latest-draft-session", expectedDataRevision: append.dataRevision });
+		assert.deepEqual(
+			database.prepare("SELECT framing_mode, frame_length FROM framing_sections WHERE profile_id = (SELECT active_framing_profile_id FROM captures WHERE id = 'latest-draft')").all(),
+			[{ framing_mode: "length", frame_length: 1 }]
+		);
+		assert.deepEqual(
+			database.prepare("SELECT bytes_json FROM materialized_frames WHERE capture_id = 'latest-draft' ORDER BY ordinal").all(),
+			[{ bytes_json: "[1]" }, { bytes_json: "[2]" }, { bytes_json: "[3]" }]
+		);
+	} finally {
+		database.close();
+	}
+});
+
+test("reframe creates a fresh verified profile from retained visible bytes and preserves the previous materialization", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		const service = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-09T00:00:00.000Z" });
+		const finalized = recordAndFinalize(service, "reframe-success");
+		const oldFrameRows = database
+			.prepare("SELECT id, bytes_json, signature FROM materialized_frames WHERE profile_id = @profileId ORDER BY ordinal")
+			.all({ profileId: finalized.profileId });
+		const oldSectionIds = database
+			.prepare("SELECT id FROM framing_sections WHERE profile_id = @profileId ORDER BY position")
+			.all({ profileId: finalized.profileId }) as Array<{ id: string }>;
+		database.prepare("INSERT INTO raw_byte_visibility (capture_id, raw_offset, hidden) VALUES ('reframe-success', 1, 1)").run();
+		const reframed = service.reframe({
+			captureId: "reframe-success",
+			expectedActiveProfileId: finalized.profileId,
+			expectedDataRevision: finalized.dataRevision,
+			sections: [{ start: 0, framingMode: "length", frameSize: 1 }],
+			algorithmVersion: 2
+		});
+		assert.deepEqual(reframed, {
+			captureId: "reframe-success",
+			profileId: reframed.profileId,
+			version: 2,
+			sourceDataRevision: 1,
+			retainedStartOffset: 0,
+			verified: true
+		});
+		assert.notEqual(reframed.profileId, finalized.profileId);
+		assert.deepEqual(
+			database.prepare("SELECT id, version, algorithm_version, is_active, verified FROM framing_profiles WHERE capture_id = 'reframe-success' ORDER BY version").all(),
+			[
+				{ id: finalized.profileId, version: 1, algorithm_version: 1, is_active: 0, verified: 1 },
+				{ id: reframed.profileId, version: 2, algorithm_version: 2, is_active: 1, verified: 1 }
+			]
+		);
+		assert.deepEqual(
+			database.prepare("SELECT bytes_json FROM materialized_frames WHERE profile_id = @profileId ORDER BY ordinal").all({ profileId: reframed.profileId }),
+			[{ bytes_json: "[1]" }, { bytes_json: "[3]" }, { bytes_json: "[4]" }]
+		);
+		const newFrameIds = new Set(
+			(database.prepare("SELECT id FROM materialized_frames WHERE profile_id = @profileId").all({ profileId: reframed.profileId }) as Array<{ id: string }>).map(row => row.id)
+		);
+		assert.equal(newFrameIds.isDisjointFrom(new Set(oldFrameRows.map(row => (row as { id: string }).id))), true);
+		const newSectionIds = database
+			.prepare("SELECT id FROM framing_sections WHERE profile_id = @profileId")
+			.all({ profileId: reframed.profileId }) as Array<{ id: string }>;
+		assert.equal(newSectionIds.every(row => !oldSectionIds.some(old => old.id === row.id)), true);
+		assert.deepEqual(
+			database.prepare("SELECT id, bytes_json, signature FROM materialized_frames WHERE profile_id = @profileId ORDER BY ordinal").all({ profileId: finalized.profileId }),
+			oldFrameRows
+		);
+	} finally {
+		database.close();
+	}
+});
+
+test("reframe rejects null, stale profile, and stale data guards before inserting rows", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		const service = new CanonicalCaptureCommandService(database);
+		const finalized = recordAndFinalize(service, "reframe-guards");
+		const profileCount = () => (database.prepare("SELECT COUNT(*) AS count FROM framing_profiles WHERE capture_id = 'reframe-guards'").get() as { count: number }).count;
+		assert.throws(() => service.reframe({
+			captureId: "reframe-guards",
+			expectedActiveProfileId: null,
+			expectedDataRevision: finalized.dataRevision,
+			sections: framing
+		}));
+		assert.throws(() => service.reframe({
+			captureId: "reframe-guards",
+			expectedActiveProfileId: "stale-profile",
+			expectedDataRevision: finalized.dataRevision,
+			sections: framing
+		}));
+		assert.throws(() => service.reframe({
+			captureId: "reframe-guards",
+			expectedActiveProfileId: finalized.profileId,
+			expectedDataRevision: finalized.dataRevision - 1,
+			sections: framing
+		}));
+		assert.equal(profileCount(), 1);
+		assert.equal(service.getCaptureState("reframe-guards").activeProfile?.id, finalized.profileId);
+	} finally {
+		database.close();
+	}
+});
+
+test("reframe materialization failure rolls back the new profile and leaves the old rows active", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		const service = new CanonicalCaptureCommandService(database);
+		const finalized = recordAndFinalize(service, "reframe-failure");
+		const oldRows = database
+			.prepare("SELECT id, profile_id, ordinal, bytes_json, signature FROM materialized_frames WHERE capture_id = 'reframe-failure' ORDER BY ordinal")
+			.all();
+		database.exec(`
+			CREATE TRIGGER corrupt_reframe_materialization
+			AFTER INSERT ON materialized_frames
+			BEGIN
+				UPDATE materialized_frames SET signature = 'corrupted' WHERE id = NEW.id;
+			END
+		`);
+		assert.throws(
+			() => service.reframe({
+				captureId: "reframe-failure",
+				expectedActiveProfileId: finalized.profileId,
+				expectedDataRevision: finalized.dataRevision,
+				sections: [{ start: 0, framingMode: "length", frameSize: 1 }]
+			}),
+			(error: unknown) => error instanceof Error && "code" in error && (error as { code: string }).code === "STORAGE_ERROR"
+		);
+		assert.deepEqual(
+			database.prepare("SELECT id, version, is_active, verified FROM framing_profiles WHERE capture_id = 'reframe-failure'").all(),
+			[{ id: finalized.profileId, version: 1, is_active: 1, verified: 1 }]
+		);
+		assert.deepEqual(
+			database.prepare("SELECT id, profile_id, ordinal, bytes_json, signature FROM materialized_frames WHERE capture_id = 'reframe-failure' ORDER BY ordinal").all(),
+			oldRows
+		);
+		assert.equal(service.getCaptureState("reframe-failure").activeProfile?.id, finalized.profileId);
 	} finally {
 		database.close();
 	}

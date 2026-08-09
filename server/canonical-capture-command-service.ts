@@ -1883,12 +1883,261 @@ export class CanonicalCaptureCommandService {
 		}
 	}
 
-	updateFramingDraft(_request: UpdateFramingDraftRequest): UpdateFramingDraftResponse {
-		throw new Error("CanonicalCaptureCommandService.updateFramingDraft is not implemented");
+	updateFramingDraft(request: UpdateFramingDraftRequest): UpdateFramingDraftResponse {
+		const captureId = requiredString(request.captureId, "captureId");
+		const expectedRevision = request.expectedRevision === undefined
+			? undefined
+			: nonNegativeInteger(request.expectedRevision, "expectedRevision");
+		const sections = normalizeFramingSections(request.sections, this.generateId);
+		const transaction = this.database.transaction(() => {
+			const capture = this.database
+				.prepare("SELECT lifecycle FROM captures WHERE id = @captureId")
+				.get({ captureId }) as { lifecycle: string } | undefined;
+			if (!capture) throw new CanonicalCaptureNotFoundError(captureId);
+			this.requireCanonicalStorage(captureId);
+			if (capture.lifecycle !== "recording") {
+				throw new CanonicalCaptureConflictError("framing drafts can only be updated while recording", {
+					captureId,
+					lifecycle: capture.lifecycle
+				});
+			}
+
+			const draft = this.database
+				.prepare("SELECT revision FROM framing_drafts WHERE capture_id = @captureId ORDER BY revision DESC LIMIT 1")
+				.get({ captureId }) as { revision: number } | undefined;
+			if (!draft) throw new CanonicalCaptureConflictError("framing draft is missing", { captureId });
+			if (expectedRevision !== undefined && draft.revision !== expectedRevision) {
+				throw new CanonicalCaptureConflictError("framing draft revision does not match", {
+					captureId,
+					expectedRevision,
+					actualRevision: draft.revision
+				});
+			}
+
+			const revision = draft.revision + 1;
+			const updatedAt = this.nowIso();
+			this.database
+				.prepare(
+					`INSERT INTO framing_drafts (capture_id, revision, sections_json, updated_at)
+					 VALUES (@captureId, @revision, @sectionsJson, @updatedAt)`
+				)
+				.run({ captureId, revision, sectionsJson: JSON.stringify(sections), updatedAt });
+			return { captureId, revision, sections, updatedAt };
+		});
+		return transaction() as UpdateFramingDraftResponse;
 	}
 
-	reframe(_request: ReframeRequest): ReframeResponse {
-		throw new Error("CanonicalCaptureCommandService.reframe is not implemented");
+	reframe(request: ReframeRequest): ReframeResponse {
+		const captureId = requiredString(request.captureId, "captureId");
+		if (request.expectedActiveProfileId === undefined || request.expectedActiveProfileId === null) {
+			throw new CanonicalCaptureValidationError("expectedActiveProfileId is required", {
+				captureId,
+				expectedActiveProfileId: request.expectedActiveProfileId ?? null
+			});
+		}
+		const expectedActiveProfileId = requiredString(request.expectedActiveProfileId, "expectedActiveProfileId");
+		const expectedDataRevision = nonNegativeInteger(request.expectedDataRevision, "expectedDataRevision");
+		const algorithmVersion = request.algorithmVersion === undefined
+			? 1
+			: nonNegativeInteger(request.algorithmVersion, "algorithmVersion");
+		if (!Array.isArray(request.sections)) throw new CanonicalCaptureValidationError("framing sections are required");
+		const requestedSections = normalizeFramingSections(
+			request.sections.map(section => ({ ...section, id: undefined })),
+			this.generateId
+		);
+
+		const preparation = this.database.transaction(() => {
+			const capture = this.database
+				.prepare(
+					"SELECT data_revision, retained_start_offset, lifecycle, active_framing_profile_id FROM captures WHERE id = @captureId"
+				)
+				.get({ captureId }) as
+				| {
+						data_revision: number;
+						retained_start_offset: number;
+						lifecycle: string;
+						active_framing_profile_id: string | null;
+					}
+				| undefined;
+			if (!capture) throw new CanonicalCaptureNotFoundError(captureId);
+			this.requireCanonicalStorage(captureId);
+			if (capture.lifecycle !== "finalized") {
+				throw new CanonicalCaptureConflictError("capture must be finalized before reframing", {
+					captureId,
+					lifecycle: capture.lifecycle
+				});
+			}
+			if (capture.data_revision !== expectedDataRevision) {
+				throw new CanonicalCaptureConflictError("data revision does not match", {
+					captureId,
+					expectedDataRevision,
+					actualDataRevision: capture.data_revision
+				});
+			}
+			if (capture.active_framing_profile_id !== expectedActiveProfileId) {
+				throw new CanonicalCaptureConflictError("active framing profile does not match", {
+					captureId,
+					expectedActiveProfileId,
+					actualActiveProfileId: capture.active_framing_profile_id,
+					expectedDataRevision,
+					actualDataRevision: capture.data_revision
+				});
+			}
+
+			const activeProfile = this.database
+				.prepare("SELECT version, is_active, verified FROM framing_profiles WHERE id = @profileId AND capture_id = @captureId")
+				.get({ captureId, profileId: expectedActiveProfileId }) as
+				| { version: number; is_active: number; verified: number }
+				| undefined;
+			if (!activeProfile || !activeProfile.is_active || !activeProfile.verified) {
+				throw new CanonicalCaptureConflictError("expected active framing profile is not verified and active", {
+					captureId,
+					expectedActiveProfileId
+				});
+			}
+			const versionRow = this.database
+				.prepare("SELECT COALESCE(MAX(version), 0) AS version FROM framing_profiles WHERE capture_id = @captureId")
+				.get({ captureId }) as { version: number };
+			return {
+				dataRevision: capture.data_revision,
+				retainedStartOffset: capture.retained_start_offset,
+				activeProfileVersion: activeProfile.version,
+				profileVersion: versionRow.version + 1,
+				profileId: requiredString(this.generateId(), "profileId")
+			};
+		});
+
+		const prepared = preparation() as {
+			dataRevision: number;
+			retainedStartOffset: number;
+			activeProfileVersion: number;
+			profileVersion: number;
+			profileId: string;
+		};
+		const stream = this.readRawStream(captureId, prepared.retainedStartOffset);
+		const sections = normalizeSectionsForConversion(
+			requestedSections as CaptureSection[],
+			stream,
+			3,
+			this.generateId,
+			prepared.retainedStartOffset
+		).map(section => ({ ...section, id: requiredString(this.generateId(), "sectionId") }));
+		const materialization = buildCanonicalMaterialization(stream, sections, { generateId: this.generateId });
+
+		const activation = this.database.transaction(() => {
+			const capture = this.database
+				.prepare(
+					"SELECT data_revision, retained_start_offset, lifecycle, active_framing_profile_id FROM captures WHERE id = @captureId"
+				)
+				.get({ captureId }) as
+				| {
+						data_revision: number;
+						retained_start_offset: number;
+						lifecycle: string;
+						active_framing_profile_id: string | null;
+					}
+				| undefined;
+			if (!capture) throw new CanonicalCaptureNotFoundError(captureId);
+			this.requireCanonicalStorage(captureId);
+			if (
+				capture.lifecycle !== "finalized" ||
+				capture.data_revision !== prepared.dataRevision ||
+				capture.retained_start_offset !== prepared.retainedStartOffset ||
+				capture.active_framing_profile_id !== expectedActiveProfileId
+			) {
+				throw new CanonicalCaptureConflictError("capture changed while reframing was materializing", {
+					captureId,
+					expectedActiveProfileId,
+					actualActiveProfileId: capture.active_framing_profile_id,
+					expectedDataRevision: prepared.dataRevision,
+					actualDataRevision: capture.data_revision,
+					expectedRetainedStartOffset: prepared.retainedStartOffset,
+					actualRetainedStartOffset: capture.retained_start_offset
+				});
+			}
+			const activeProfile = this.database
+				.prepare("SELECT version, is_active, verified FROM framing_profiles WHERE id = @profileId AND capture_id = @captureId")
+				.get({ captureId, profileId: expectedActiveProfileId }) as
+				| { version: number; is_active: number; verified: number }
+				| undefined;
+			const versionRow = this.database
+				.prepare("SELECT COALESCE(MAX(version), 0) AS version FROM framing_profiles WHERE capture_id = @captureId")
+				.get({ captureId }) as { version: number };
+			if (
+				!activeProfile ||
+				!activeProfile.is_active ||
+				!activeProfile.verified ||
+				activeProfile.version !== prepared.activeProfileVersion ||
+				versionRow.version + 1 !== prepared.profileVersion
+			) {
+				throw new CanonicalCaptureConflictError("active framing profile changed while reframing was materializing", {
+					captureId,
+					expectedActiveProfileId,
+					expectedActiveProfileVersion: prepared.activeProfileVersion,
+					actualActiveProfileVersion: activeProfile?.version ?? null
+				});
+			}
+
+			const now = this.nowIso();
+			this.database
+				.prepare(
+					`INSERT INTO framing_profiles
+					 (id, capture_id, version, algorithm_version, is_active, created_at, updated_at,
+					  source_data_revision, retained_start_offset, verified)
+					 VALUES (@id, @captureId, @version, @algorithmVersion, 0, @createdAt, @updatedAt,
+					  @sourceDataRevision, @retainedStartOffset, 0)`
+				)
+				.run({
+					id: prepared.profileId,
+					captureId,
+					version: prepared.profileVersion,
+					algorithmVersion,
+					createdAt: now,
+					updatedAt: now,
+					sourceDataRevision: prepared.dataRevision,
+					retainedStartOffset: prepared.retainedStartOffset
+				});
+			persistCanonicalMaterializationRows(
+				this.database,
+				captureId,
+				prepared.profileId,
+				prepared.profileVersion,
+				materialization,
+				this.generateId
+			);
+			const verification = verifyCanonicalMaterializationRows(this.database, prepared.profileId, materialization);
+			if (!verification.ok) {
+				throw new CanonicalCaptureCommandError(
+					"STORAGE_ERROR",
+					verification.details || "canonical materialization verification failed",
+					{ captureId, profileId: prepared.profileId }
+				);
+			}
+			this.database
+				.prepare("UPDATE framing_profiles SET verified = 1, updated_at = @updatedAt WHERE id = @profileId")
+				.run({ profileId: prepared.profileId, updatedAt: now });
+			this.database.prepare("UPDATE framing_profiles SET is_active = 0 WHERE capture_id = @captureId").run({ captureId });
+			this.database.prepare("UPDATE framing_profiles SET is_active = 1 WHERE id = @profileId").run({ profileId: prepared.profileId });
+			this.database
+				.prepare("UPDATE captures SET active_framing_profile_id = @profileId, updated_at = @updatedAt WHERE id = @captureId")
+				.run({ captureId, profileId: prepared.profileId, updatedAt: now });
+		});
+
+		try {
+			activation();
+		} catch (error) {
+			if (error instanceof CanonicalCaptureCommandError) throw error;
+			const message = error instanceof Error ? error.message : String(error);
+			throw new CanonicalCaptureCommandError("STORAGE_ERROR", message, { captureId, profileId: prepared.profileId });
+		}
+		return {
+			captureId,
+			profileId: prepared.profileId,
+			version: prepared.profileVersion,
+			sourceDataRevision: prepared.dataRevision,
+			retainedStartOffset: prepared.retainedStartOffset,
+			verified: true
+		};
 	}
 
 	setByteVisibility(_request: ByteVisibilityRequest): VisibilityResponse {
