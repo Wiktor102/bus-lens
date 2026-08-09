@@ -2475,6 +2475,18 @@ export class CanonicalCaptureCommandService {
 				| undefined;
 			if (!capture) throw new CanonicalCaptureNotFoundError(captureId);
 			this.requireCanonicalStorage(captureId);
+			const activeSession = this.database
+				.prepare(
+					"SELECT id, status FROM capture_sessions WHERE capture_id = @captureId AND status IN ('recording','finalizing') ORDER BY ordinal DESC LIMIT 1"
+				)
+				.get({ captureId }) as { id: string; status: string } | undefined;
+			if (activeSession) {
+				throw new CanonicalCaptureConflictError("capture cannot be cleared while a session is recording or finalizing", {
+					captureId,
+					activeSessionId: activeSession.id,
+					activeSessionStatus: activeSession.status
+				});
+			}
 
 			// Framing drafts, parameters, canonical metadata, and capture-level notes
 			// are the durable operator context for a capture. Everything below is

@@ -213,11 +213,74 @@ test("clearCaptureData is authority-gated, atomic, revision-scoped, and preserve
 		service.createCapture({ captureId: "atomic-clear", framing, inputFormat: "binary" });
 		service.startSession({ captureId: "atomic-clear", sessionId: "atomic-session" });
 		service.appendChunk({ captureId: "atomic-clear", sessionId: "atomic-session", requestId: "atomic-request", sequence: 0, expectedStartOffset: 0, bytes: [1] });
+		service.finalizeSession({ captureId: "atomic-clear", sessionId: "atomic-session" });
 		const atomicBefore = service.getCaptureState("atomic-clear");
 		database.exec("CREATE TRIGGER fail_clear_update BEFORE UPDATE OF byte_count ON captures WHEN NEW.id = 'atomic-clear' BEGIN SELECT RAISE(ABORT, 'fail clear'); END");
 		assert.throws(() => service.clearCaptureData({ captureId: "atomic-clear" }), /fail clear/);
 		database.exec("DROP TRIGGER fail_clear_update");
 		assert.deepEqual(service.getCaptureState("atomic-clear"), atomicBefore);
+	} finally {
+		database.close();
+	}
+});
+
+test("clearCaptureData rejects recording and finalizing sessions without changing state or data", () => {
+	const database = openDatabase(":memory:");
+	try {
+		const service = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-09T00:00:00.000Z" });
+		for (const [captureId, activeStatus] of [["clear-recording", "recording"], ["clear-finalizing", "finalizing"]] as const) {
+			const sessionId = `${captureId}-session`;
+			service.createCapture({ captureId, framing, inputFormat: "binary" });
+			service.startSession({ captureId, sessionId });
+			service.appendChunk({
+				captureId,
+				sessionId,
+				requestId: `${captureId}-request`,
+				sequence: 0,
+				expectedStartOffset: 0,
+				bytes: [1, 2, 3]
+			});
+			if (activeStatus === "finalizing") {
+				database
+					.prepare("UPDATE capture_sessions SET status = 'finalizing' WHERE capture_id = @captureId AND id = @sessionId")
+					.run({ captureId, sessionId });
+				database
+					.prepare("UPDATE captures SET lifecycle = 'stopped' WHERE id = @captureId")
+					.run({ captureId });
+				database
+					.prepare(
+						`INSERT INTO finalization_jobs
+							(id, capture_id, session_id, profile_id, source_data_revision, status, created_at, updated_at, error, verified)
+						 VALUES (@id, @captureId, @sessionId, NULL, 1, 'running', @now, @now, NULL, 0)`
+					)
+					.run({ id: `${captureId}-job`, captureId, sessionId, now: "2026-08-09T00:00:00.000Z" });
+			}
+
+			const before = service.getCaptureState(captureId);
+			const chunksBefore = database
+				.prepare("SELECT * FROM raw_chunks WHERE capture_id = @captureId ORDER BY chunk_index")
+				.all({ captureId });
+			const requestsBefore = database
+				.prepare("SELECT * FROM raw_chunk_requests WHERE capture_id = @captureId ORDER BY sequence")
+				.all({ captureId });
+			const jobsBefore = database
+				.prepare("SELECT * FROM finalization_jobs WHERE capture_id = @captureId ORDER BY id")
+				.all({ captureId });
+
+			assert.throws(
+				() => service.clearCaptureData({ captureId }),
+				(error: unknown) => {
+					if (!(error instanceof CanonicalCaptureConflictError)) return false;
+					return error.details.captureId === captureId
+						&& error.details.activeSessionId === sessionId
+						&& error.details.activeSessionStatus === activeStatus;
+				}
+			);
+			assert.deepEqual(service.getCaptureState(captureId), before);
+			assert.deepEqual(database.prepare("SELECT * FROM raw_chunks WHERE capture_id = @captureId ORDER BY chunk_index").all({ captureId }), chunksBefore);
+			assert.deepEqual(database.prepare("SELECT * FROM raw_chunk_requests WHERE capture_id = @captureId ORDER BY sequence").all({ captureId }), requestsBefore);
+			assert.deepEqual(database.prepare("SELECT * FROM finalization_jobs WHERE capture_id = @captureId ORDER BY id").all({ captureId }), jobsBefore);
+		}
 	} finally {
 		database.close();
 	}
