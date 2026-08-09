@@ -15,6 +15,11 @@ import { createSnapshotRuntime } from "./snapshot-runtime.ts";
 import { registerSendActions } from "../features/send/send-bridge.ts";
 import { registerTransportActions } from "../features/transport/transport-bridge.ts";
 import { getViewStateSnapshot } from "../shared/view-state-bridge.ts";
+import {
+	EMPTY_PERSISTENCE_ERROR,
+	publishPersistenceError,
+	registerPersistenceErrorActions
+} from "../shared/persistence-error-bridge.ts";
 
 export type ControllerLifecycle = {
 	beforeUnload: (event?: { preventDefault: () => void; returnValue?: string }) => void;
@@ -50,6 +55,13 @@ export function initializeController(): ControllerLifecycle {
 		isPatternsPanelActive: () => getViewStateSnapshot().activePanel === "patterns",
 		stopSendQueue: () => sendController?.stopSendQueue(),
 		publishSendState: snapshots.publishSendState,
+		publishPersistenceError: error => publishPersistenceError(error ? {
+			visible: true,
+			captureId: error.captureId,
+			message: error.message,
+			canRetry: true,
+			canExportRecovery: true
+		} : EMPTY_PERSISTENCE_ERROR),
 		isCanonicalCapture: runtime.isCanonicalCapture,
 		recordingWriter: runtime.captureWriter ? {
 			startSession: async (captureId, sessionId) => {
@@ -62,6 +74,20 @@ export function initializeController(): ControllerLifecycle {
 				runtime.captureWriter!.finalizeSession({ captureId, sessionId, expectedDataRevision }),
 			refreshCapture: runtime.refreshCapture
 		} : undefined
+	});
+
+	registerPersistenceErrorActions({
+		retry: () => { void transport.retryPersistence(); },
+		exportRecovery: () => {
+			const capture = transport.recoveryDocument();
+			if (!capture) return;
+			download(
+				JSON.stringify(capture, null, 2),
+				`bus-lens-${String(capture.id ?? "capture")}-recovery.json`,
+				"application/json"
+			);
+		},
+		dismiss: () => publishPersistenceError(EMPTY_PERSISTENCE_ERROR)
 	});
 
 	sendController = createSendController({
