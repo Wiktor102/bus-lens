@@ -30,7 +30,13 @@ test("legacy captures stay JSON-backed until an explicit conversion operation", 
 				{ rawOffset: 1, value: 0x20, timestamp: 125, direction: "rx" }
 			],
 			frameSections: [{ id: "section-1", start: 0, framingMode: "length", frameSize: 2 }],
-			messages: [],
+			messages: [{
+				id: "legacy-message",
+				timestamp: 100,
+				bytes: [0x10, 0x20],
+				byteTimestamps: [100, 125],
+				rawOffsets: [0, 1]
+			}],
 			notes: []
 		});
 
