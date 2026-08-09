@@ -305,12 +305,14 @@ export type CanonicalNoteTarget =
 	| Readonly<{
 			kind: "range";
 			profileId?: string | null;
+			startOrdinal?: number;
+			endOrdinal?: number;
 			startRow?: number;
 			endRow?: number;
 			startRawOffset?: number;
 			endRawOffset?: number;
 		}>
-	| Readonly<{ kind: "sequence-group"; sequenceKey: string; profileId?: string | null }>
+	| Readonly<{ kind: "sequence-group"; groupId?: string; sequenceKey?: string; profileId?: string | null }>
 	| Readonly<{ kind: "sequence"; startRawOffset: number; endRawOffset: number }>
 	| Readonly<{ kind: "pattern"; sequenceKey: string }>
 	| Readonly<{ kind: "legacy-sequence"; startRow: number; endRow: number }>;
@@ -598,6 +600,7 @@ type NoteRow = {
 	sequence_key: string | null;
 	start_row: number | null;
 	end_row: number | null;
+	sequence_group_id: string | null;
 };
 
 type FlattenedChunk = {
@@ -739,14 +742,22 @@ function noteTargetFromRow(row: NoteRow): CanonicalNoteTarget {
 		return {
 			kind: "range",
 			profileId: row.profile_id,
-			...(row.start_row === null ? {} : { startRow: row.start_row }),
-			...(row.end_row === null ? {} : { endRow: row.end_row }),
+			...(row.start_row === null ? {} : { startOrdinal: row.start_row }),
+			...(row.end_row === null ? {} : { endOrdinal: row.end_row }),
 			...(row.start_offset === null ? {} : { startRawOffset: row.start_offset }),
 			...(row.end_offset === null ? {} : { endRawOffset: row.end_offset })
 		};
 	}
 	if (row.target_kind === "sequence-group" || row.target_kind === "pattern") {
-		return { kind: row.target_kind === "pattern" ? "pattern" : "sequence-group", sequenceKey: row.sequence_key ?? "" };
+		if (row.target_kind === "sequence-group") {
+			return {
+				kind: "sequence-group",
+				groupId: row.sequence_group_id ?? undefined,
+				sequenceKey: row.sequence_key ?? undefined,
+				profileId: row.profile_id
+			};
+		}
+		return { kind: "pattern", sequenceKey: row.sequence_key ?? "" };
 	}
 	if (row.target_kind === "sequence") {
 		return { kind: "sequence", startRawOffset: row.start_offset ?? 0, endRawOffset: row.end_offset ?? 0 };
@@ -954,7 +965,7 @@ export class CanonicalCaptureCommandService {
 		const notes = this.database
 			.prepare(
 				`SELECT id, capture_id, text, created_at, updated_at, target_kind, raw_offset, profile_id,
-						raw_offsets_json, start_offset, end_offset, sequence_key, start_row, end_row
+						raw_offsets_json, start_offset, end_offset, sequence_key, start_row, end_row, sequence_group_id
 				 FROM stable_notes WHERE capture_id = @captureId ORDER BY created_at, id`
 			)
 			.all({ captureId: id }) as NoteRow[];
@@ -2140,32 +2151,303 @@ export class CanonicalCaptureCommandService {
 		};
 	}
 
-	setByteVisibility(_request: ByteVisibilityRequest): VisibilityResponse {
-		throw new Error("CanonicalCaptureCommandService.setByteVisibility is not implemented");
+	private incrementContentRevision(captureId: string): number {
+		const result = this.database
+			.prepare(
+				`UPDATE captures
+				 SET content_revision = content_revision + 1, updated_at = @updatedAt
+				 WHERE id = @captureId
+				 RETURNING content_revision`
+			)
+			.get({ captureId, updatedAt: this.nowIso() }) as { content_revision: number } | undefined;
+		if (!result) throw new CanonicalCaptureNotFoundError(captureId);
+		return result.content_revision;
 	}
 
-	deleteByteVisibility(_captureId: string, _rawOffset: number): Readonly<{ contentRevision: number }> {
-		throw new Error("CanonicalCaptureCommandService.deleteByteVisibility is not implemented");
+	private requireRawOffset(captureId: string, rawOffset: number): void {
+		const row = this.database
+			.prepare(
+				`SELECT 1 FROM raw_chunks
+				 WHERE capture_id = @captureId
+				   AND start_offset <= @rawOffset
+				   AND start_offset + byte_count > @rawOffset
+				 LIMIT 1`
+			)
+			.get({ captureId, rawOffset });
+		if (!row) throw new CanonicalCaptureNotFoundError(`${captureId}/bytes/${rawOffset}`);
 	}
 
-	setFrameVisibility(_request: FrameVisibilityRequest): VisibilityResponse {
-		throw new Error("CanonicalCaptureCommandService.setFrameVisibility is not implemented");
+	private resolveFrameSpan(request: Omit<FrameVisibilityRequest, "hidden">): {
+		profileId: string;
+		frameId?: string;
+		startRawOffset: number;
+		endRawOffset: number;
+	} {
+		const captureId = requiredString(request.captureId, "captureId");
+		if (request.frameId) {
+			const frameId = requiredString(request.frameId, "frameId");
+			const row = this.database
+				.prepare("SELECT profile_id, raw_offsets_json FROM materialized_frames WHERE id = @frameId AND capture_id = @captureId")
+				.get({ captureId, frameId }) as { profile_id: string; raw_offsets_json: string } | undefined;
+			if (!row) throw new CanonicalCaptureNotFoundError(`${captureId}/frames/${frameId}`);
+			const offsets = JSON.parse(row.raw_offsets_json) as number[];
+			if (!offsets.length) throw new CanonicalCaptureConflictError("frame has no stable raw span", { captureId, frameId });
+			return {
+				profileId: row.profile_id,
+				frameId,
+				startRawOffset: Math.min(...offsets),
+				endRawOffset: Math.max(...offsets)
+			};
+		}
+		const profileId = requiredString(request.profileId, "profileId");
+		const startRawOffset = nonNegativeInteger(request.startRawOffset, "startRawOffset");
+		const endRawOffset = nonNegativeInteger(request.endRawOffset, "endRawOffset");
+		if (endRawOffset < startRawOffset) throw new CanonicalCaptureValidationError("endRawOffset must not precede startRawOffset");
+		const profile = this.database
+			.prepare("SELECT 1 FROM framing_profiles WHERE id = @profileId AND capture_id = @captureId")
+			.get({ captureId, profileId });
+		if (!profile) throw new CanonicalCaptureNotFoundError(`${captureId}/profiles/${profileId}`);
+		return { profileId, startRawOffset, endRawOffset };
 	}
 
-	deleteFrameVisibility(_request: Omit<FrameVisibilityRequest, "hidden">): Readonly<{ contentRevision: number }> {
-		throw new Error("CanonicalCaptureCommandService.deleteFrameVisibility is not implemented");
+	setByteVisibility(request: ByteVisibilityRequest): VisibilityResponse {
+		const captureId = requiredString(request.captureId, "captureId");
+		const rawOffset = nonNegativeInteger(request.rawOffset, "rawOffset");
+		const transaction = this.database.transaction(() => {
+			this.requireCanonicalStorage(captureId);
+			this.requireRawOffset(captureId, rawOffset);
+			this.database
+				.prepare(
+					`INSERT INTO raw_byte_visibility (capture_id, raw_offset, hidden)
+					 VALUES (@captureId, @rawOffset, @hidden)
+					 ON CONFLICT(capture_id, raw_offset) DO UPDATE SET hidden = excluded.hidden`
+				)
+				.run({ captureId, rawOffset, hidden: request.hidden ? 1 : 0 });
+			return this.incrementContentRevision(captureId);
+		});
+		const contentRevision = transaction() as number;
+		return { captureId, startRawOffset: rawOffset, endRawOffset: rawOffset, hidden: Boolean(request.hidden), contentRevision };
 	}
 
-	createNote(_request: CreateNoteRequest): NoteResponse {
-		throw new Error("CanonicalCaptureCommandService.createNote is not implemented");
+	deleteByteVisibility(captureIdValue: string, rawOffsetValue: number): Readonly<{ contentRevision: number }> {
+		const captureId = requiredString(captureIdValue, "captureId");
+		const rawOffset = nonNegativeInteger(rawOffsetValue, "rawOffset");
+		const transaction = this.database.transaction(() => {
+			this.requireCanonicalStorage(captureId);
+			this.database.prepare("DELETE FROM raw_byte_visibility WHERE capture_id = @captureId AND raw_offset = @rawOffset").run({ captureId, rawOffset });
+			return this.incrementContentRevision(captureId);
+		});
+		return { contentRevision: transaction() as number };
 	}
 
-	updateNote(_request: UpdateNoteRequest): NoteResponse {
-		throw new Error("CanonicalCaptureCommandService.updateNote is not implemented");
+	setFrameVisibility(request: FrameVisibilityRequest): VisibilityResponse {
+		const captureId = requiredString(request.captureId, "captureId");
+		const transaction = this.database.transaction(() => {
+			this.requireCanonicalStorage(captureId);
+			const span = this.resolveFrameSpan(request);
+			this.database
+				.prepare(
+					`INSERT INTO frame_visibility (capture_id, profile_id, start_raw_offset, end_raw_offset, hidden)
+					 VALUES (@captureId, @profileId, @startRawOffset, @endRawOffset, @hidden)
+					 ON CONFLICT(capture_id, profile_id, start_raw_offset, end_raw_offset)
+					 DO UPDATE SET hidden = excluded.hidden`
+				)
+				.run({ captureId, ...span, hidden: request.hidden ? 1 : 0 });
+			return { span, contentRevision: this.incrementContentRevision(captureId) };
+		});
+		const result = transaction() as { span: ReturnType<CanonicalCaptureCommandService["resolveFrameSpan"]>; contentRevision: number };
+		return { captureId, ...result.span, hidden: Boolean(request.hidden), contentRevision: result.contentRevision };
 	}
 
-	deleteNote(_request: DeleteNoteRequest): Readonly<{ contentRevision: number }> {
-		throw new Error("CanonicalCaptureCommandService.deleteNote is not implemented");
+	deleteFrameVisibility(request: Omit<FrameVisibilityRequest, "hidden">): Readonly<{ contentRevision: number }> {
+		const captureId = requiredString(request.captureId, "captureId");
+		const transaction = this.database.transaction(() => {
+			this.requireCanonicalStorage(captureId);
+			const span = this.resolveFrameSpan(request);
+			this.database
+				.prepare(
+					`DELETE FROM frame_visibility
+					 WHERE capture_id = @captureId AND profile_id = @profileId
+					   AND start_raw_offset = @startRawOffset AND end_raw_offset = @endRawOffset`
+				)
+				.run({ captureId, ...span });
+			return this.incrementContentRevision(captureId);
+		});
+		return { contentRevision: transaction() as number };
+	}
+
+	private resolveNoteTarget(captureId: string, target: CanonicalNoteTarget): Record<string, string | number | null> {
+		if (!target || typeof target !== "object" || !("kind" in target)) {
+			throw new CanonicalCaptureValidationError("note target is required");
+		}
+		const empty = {
+			rawOffset: null,
+			profileId: null,
+			rawOffsetsJson: null,
+			startOffset: null,
+			endOffset: null,
+			sequenceKey: null,
+			startRow: null,
+			endRow: null,
+			frameId: null,
+			sequenceGroupId: null
+		};
+		if (target.kind === "capture") return { targetKind: "capture", ...empty };
+		if (target.kind === "byte") {
+			const rawOffset = nonNegativeInteger(target.rawOffset, "target.rawOffset");
+			this.requireRawOffset(captureId, rawOffset);
+			return { targetKind: "byte", ...empty, rawOffset };
+		}
+		if (target.kind === "frame") {
+			if (target.frameId) {
+				const span = this.resolveFrameSpan({ captureId, frameId: target.frameId });
+				const row = this.database.prepare("SELECT raw_offsets_json FROM materialized_frames WHERE id = @frameId").get({ frameId: target.frameId }) as { raw_offsets_json: string };
+				return {
+					targetKind: "frame",
+					...empty,
+					profileId: span.profileId,
+					frameId: target.frameId,
+					rawOffsetsJson: row.raw_offsets_json,
+					startOffset: span.startRawOffset,
+					endOffset: span.endRawOffset
+				};
+			}
+			const profileId = requiredString(target.profileId, "target.profileId");
+			const rawOffsets = (target.rawOffsets ?? []).map((offset, index) => nonNegativeInteger(offset, `target.rawOffsets[${index}]`));
+			if (!rawOffsets.length) throw new CanonicalCaptureValidationError("frame note requires rawOffsets or frameId");
+			const profile = this.database.prepare("SELECT 1 FROM framing_profiles WHERE id = @profileId AND capture_id = @captureId").get({ captureId, profileId });
+			if (!profile) throw new CanonicalCaptureNotFoundError(`${captureId}/profiles/${profileId}`);
+			for (const rawOffset of rawOffsets) this.requireRawOffset(captureId, rawOffset);
+			return {
+				targetKind: "frame",
+				...empty,
+				profileId,
+				rawOffsetsJson: JSON.stringify(rawOffsets),
+				startOffset: Math.min(...rawOffsets),
+				endOffset: Math.max(...rawOffsets)
+			};
+		}
+		if (target.kind === "range") {
+			const profileId = requiredString(target.profileId, "target.profileId");
+			const capture = this.database.prepare("SELECT active_framing_profile_id FROM captures WHERE id = @captureId").get({ captureId }) as { active_framing_profile_id: string | null };
+			if (capture.active_framing_profile_id !== profileId) {
+				throw new CanonicalCaptureConflictError("range notes must target the active profile", {
+					captureId,
+					expectedActiveProfileId: profileId,
+					actualActiveProfileId: capture.active_framing_profile_id
+				});
+			}
+			const startOrdinal = nonNegativeInteger(target.startOrdinal ?? target.startRow, "target.startOrdinal");
+			const endOrdinal = nonNegativeInteger(target.endOrdinal ?? target.endRow, "target.endOrdinal");
+			if (endOrdinal < startOrdinal) throw new CanonicalCaptureValidationError("target.endOrdinal must not precede startOrdinal");
+			const frames = this.database
+				.prepare(
+					`SELECT raw_offsets_json FROM materialized_frames
+					 WHERE capture_id = @captureId AND profile_id = @profileId
+					   AND ordinal >= @startOrdinal AND ordinal <= @endOrdinal
+					 ORDER BY ordinal`
+				)
+				.all({ captureId, profileId, startOrdinal, endOrdinal }) as Array<{ raw_offsets_json: string }>;
+			if (!frames.length) throw new CanonicalCaptureValidationError("range note resolves to no active frames");
+			const offsets = frames.flatMap(frame => JSON.parse(frame.raw_offsets_json) as number[]);
+			if (!offsets.length) throw new CanonicalCaptureValidationError("range note resolves to no raw-span evidence");
+			return {
+				targetKind: "range",
+				...empty,
+				profileId,
+				startOffset: Math.min(...offsets),
+				endOffset: Math.max(...offsets),
+				startRow: startOrdinal,
+				endRow: endOrdinal
+			};
+		}
+		if (target.kind === "sequence-group") {
+			const groupId = requiredString(target.groupId, "target.groupId");
+			const row = this.database
+				.prepare("SELECT id, profile_id, key_text FROM sequence_groups WHERE id = @groupId AND capture_id = @captureId")
+				.get({ captureId, groupId }) as { id: string; profile_id: string; key_text: string } | undefined;
+			if (!row) throw new CanonicalCaptureNotFoundError(`${captureId}/sequence-groups/${groupId}`);
+			if (target.profileId && target.profileId !== row.profile_id) {
+				throw new CanonicalCaptureConflictError("sequence group profile does not match", { captureId, groupId, expectedProfileId: target.profileId, actualProfileId: row.profile_id });
+			}
+			return { targetKind: "sequence-group", ...empty, profileId: row.profile_id, sequenceKey: row.key_text, sequenceGroupId: row.id };
+		}
+		throw new CanonicalCaptureValidationError("new notes require a stable canonical target", { kind: target.kind });
+	}
+
+	private readNote(captureId: string, noteId: string): CanonicalNote {
+		const row = this.database
+			.prepare(
+				`SELECT id, capture_id, text, created_at, updated_at, target_kind, raw_offset, profile_id,
+				        raw_offsets_json, start_offset, end_offset, sequence_key, start_row, end_row, sequence_group_id
+				 FROM stable_notes WHERE capture_id = @captureId AND id = @noteId`
+			)
+			.get({ captureId, noteId }) as NoteRow | undefined;
+		if (!row) throw new CanonicalCaptureNotFoundError(`${captureId}/notes/${noteId}`);
+		return { id: row.id, captureId: row.capture_id, text: row.text, createdAt: row.created_at, updatedAt: row.updated_at, target: noteTargetFromRow(row) };
+	}
+
+	createNote(request: CreateNoteRequest): NoteResponse {
+		const captureId = requiredString(request.captureId, "captureId");
+		const noteId = requiredString(request.noteId ?? request.id ?? this.generateId(), "noteId");
+		const text = requiredString(request.text, "text");
+		const createdAt = isoFrom(request.createdAt, this.nowIso());
+		const transaction = this.database.transaction(() => {
+			this.requireCanonicalStorage(captureId);
+			const target = this.resolveNoteTarget(captureId, request.target);
+			try {
+				this.database
+					.prepare(
+						`INSERT INTO stable_notes
+						 (id, capture_id, text, created_at, target_kind, raw_offset, profile_id, raw_offsets_json,
+						  start_offset, end_offset, sequence_key, start_row, end_row, frame_id, sequence_group_id)
+						 VALUES (@noteId, @captureId, @text, @createdAt, @targetKind, @rawOffset, @profileId, @rawOffsetsJson,
+						  @startOffset, @endOffset, @sequenceKey, @startRow, @endRow, @frameId, @sequenceGroupId)`
+					)
+					.run({ noteId, captureId, text, createdAt, ...target });
+			} catch (error) {
+				if (String(error).includes("UNIQUE constraint")) throw new CanonicalCaptureConflictError("note id already exists", { captureId, noteId });
+				throw error;
+			}
+			return this.incrementContentRevision(captureId);
+		});
+		const contentRevision = transaction() as number;
+		return { note: this.readNote(captureId, noteId), contentRevision };
+	}
+
+	updateNote(request: UpdateNoteRequest): NoteResponse {
+		const captureId = requiredString(request.captureId, "captureId");
+		const noteId = requiredString(request.noteId, "noteId");
+		const transaction = this.database.transaction(() => {
+			this.requireCanonicalStorage(captureId);
+			const existing = this.readNote(captureId, noteId);
+			const text = request.text === undefined ? existing.text : requiredString(request.text, "text");
+			const target = request.target === undefined ? this.resolveNoteTarget(captureId, existing.target) : this.resolveNoteTarget(captureId, request.target);
+			this.database
+				.prepare(
+					`UPDATE stable_notes SET text = @text, updated_at = @updatedAt, target_kind = @targetKind,
+					 raw_offset = @rawOffset, profile_id = @profileId, raw_offsets_json = @rawOffsetsJson,
+					 start_offset = @startOffset, end_offset = @endOffset, sequence_key = @sequenceKey,
+					 start_row = @startRow, end_row = @endRow, frame_id = @frameId, sequence_group_id = @sequenceGroupId
+					 WHERE capture_id = @captureId AND id = @noteId`
+				)
+				.run({ captureId, noteId, text, updatedAt: this.nowIso(), ...target });
+			return this.incrementContentRevision(captureId);
+		});
+		const contentRevision = transaction() as number;
+		return { note: this.readNote(captureId, noteId), contentRevision };
+	}
+
+	deleteNote(request: DeleteNoteRequest): Readonly<{ contentRevision: number }> {
+		const captureId = requiredString(request.captureId, "captureId");
+		const noteId = requiredString(request.noteId, "noteId");
+		const transaction = this.database.transaction(() => {
+			this.requireCanonicalStorage(captureId);
+			const result = this.database.prepare("DELETE FROM stable_notes WHERE capture_id = @captureId AND id = @noteId").run({ captureId, noteId });
+			if (!result.changes) throw new CanonicalCaptureNotFoundError(`${captureId}/notes/${noteId}`);
+			return this.incrementContentRevision(captureId);
+		});
+		return { contentRevision: transaction() as number };
 	}
 
 	clearCaptureData(_request: ClearCaptureDataRequest): ClearCaptureDataResponse {
