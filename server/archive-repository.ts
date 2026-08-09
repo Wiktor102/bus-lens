@@ -612,9 +612,9 @@ export class ArchiveRepository {
 			} else if (row.target_kind === "capture") {
 				captureNotes.push({ id: row.id, type: "capture", text: row.text, createdAt: new Date(row.created_at).getTime() });
 			} else if (row.target_kind === "byte") {
-				annotations[legacyAnnotationKey(messages, row)] = { text: row.text, createdAt: new Date(row.created_at).getTime(), type: "byte", targetLabel: `raw ${row.raw_offset}` };
+				annotations[legacyAnnotationKey(messages, row)] = { noteId: row.id, text: row.text, createdAt: new Date(row.created_at).getTime(), type: "byte", targetLabel: `raw ${row.raw_offset}` };
 			} else if (row.target_kind === "frame") {
-				annotations[legacyAnnotationKey(messages, row)] = { text: row.text, createdAt: new Date(row.created_at).getTime(), type: "message", targetLabel: row.raw_offsets_json || "" };
+				annotations[legacyAnnotationKey(messages, row)] = { noteId: row.id, text: row.text, createdAt: new Date(row.created_at).getTime(), type: "message", targetLabel: row.raw_offsets_json || "" };
 			} else if (row.target_kind === "pattern") {
 				// patternRemarks not reconstructed here; stored separately but we omit for brevity
 			}

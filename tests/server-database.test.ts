@@ -126,7 +126,7 @@ test("canonical annotation notes reload under the message and byte keys used by 
 		assert.equal(conversion.verified, true);
 		const converted = repository.getCapture("annotated-capture")?.document as {
 			messages: Array<{ id: string }>;
-			annotations: Record<string, { text: string; type: string }>;
+			annotations: Record<string, { noteId: string; text: string; type: string }>;
 		};
 		const messageId = converted.messages[0].id;
 		assert.deepEqual(Object.keys(converted.annotations).sort(), [messageId, `${messageId}:1`].sort());
@@ -144,6 +144,8 @@ test("canonical annotation notes reload under the message and byte keys used by 
 		assert.equal(byteNote?.message_id, legacyMessageId);
 		assert.equal(byteNote?.byte_position, 1);
 		assert.equal(byteNote?.raw_offset, 11);
+		assert.equal(converted.annotations[messageId].noteId, messageNote?.id);
+		assert.equal(converted.annotations[`${messageId}:1`].noteId, byteNote?.id);
 
 		repository.close();
 		const reopened = new ArchiveRepository(openDatabase(join(directory, "archive.sqlite")));
@@ -151,6 +153,8 @@ test("canonical annotation notes reload under the message and byte keys used by 
 		assert.deepEqual(Object.keys(reloaded.annotations).sort(), [messageId, `${messageId}:1`].sort());
 		assert.equal(reloaded.annotations[messageId].text, "message target");
 		assert.equal(reloaded.annotations[`${messageId}:1`].text, "byte target");
+		assert.equal(reloaded.annotations[messageId].noteId, messageNote?.id);
+		assert.equal(reloaded.annotations[`${messageId}:1`].noteId, byteNote?.id);
 		reopened.close();
 	});
 });
