@@ -114,7 +114,17 @@ export function initializeController(): ControllerLifecycle {
 		publishArchiveState: snapshots.publishArchiveState,
 		publishCaptureHeaderState: snapshots.publishCaptureHeaderState,
 		publishNotesState: snapshots.publishNotesState,
-		publishDialogCommand
+		publishDialogCommand,
+		captureWriter: runtime.captureWriter,
+		isCanonicalCapture: runtime.isCanonicalCapture,
+		refreshCapture: runtime.refreshCapture,
+		reportPersistenceFailure: (captureId, error) => publishPersistenceError({
+			visible: true,
+			captureId,
+			message: error instanceof Error ? error.message : String(error),
+			canRetry: false,
+			canExportRecovery: false
+		})
 	});
 
 	const dataTransferController = createDataTransferController({
@@ -201,8 +211,25 @@ export function initializeController(): ControllerLifecycle {
 			const capture = runtime.capture();
 			const message = capture?.messages?.find(item => item.id === messageId);
 			if (!message) return;
+			const previousHidden = Boolean(message.hidden);
 			message.hidden = true;
-			runtime.saveState({ immediate: true });
+			if (capture?.id && runtime.captureWriter && runtime.isCanonicalCapture(String(capture.id))) {
+				void runtime.captureWriter.setFrameVisibility({
+					captureId: String(capture.id),
+					frameId: messageId,
+					hidden: true
+				}).then(result => { capture.contentRevision = result.contentRevision; }).catch(error => {
+					message.hidden = previousHidden;
+					publishPersistenceError({
+						visible: true,
+						captureId: String(capture.id),
+						message: error instanceof Error ? error.message : String(error),
+						canRetry: false,
+						canExportRecovery: false
+					});
+					snapshots.render();
+				});
+			} else runtime.saveState({ immediate: true });
 			snapshots.render();
 			runtime.showToast("Message hidden; captured data was kept");
 		},
@@ -212,10 +239,29 @@ export function initializeController(): ControllerLifecycle {
 			if (!capture || !message || position < 0 || position >= message.bytes.length) return;
 			message.hiddenBytes ||= [];
 			message.hiddenBytes[position] = true;
-			const rawIndex = message._rawPositions?.[position] ?? -1;
+			const rawOffset = message.rawOffsets?.[position] ?? message._rawPositions?.[position];
+			const rawIndex = capture.byteStream?.findIndex((record, index) => (record.rawOffset ?? index) === rawOffset) ?? -1;
+			const previousHidden = rawIndex >= 0 ? Boolean(capture.byteStream?.[rawIndex]?.hidden) : false;
 			if (rawIndex >= 0 && capture.byteStream?.[rawIndex]) capture.byteStream[rawIndex].hidden = true;
 			rebuildPreview(capture);
-			runtime.saveState({ immediate: true });
+			if (capture.id && rawOffset !== undefined && runtime.captureWriter && runtime.isCanonicalCapture(String(capture.id))) {
+				void runtime.captureWriter.setByteVisibility({
+					captureId: String(capture.id),
+					rawOffset,
+					hidden: true
+				}).then(result => { capture.contentRevision = result.contentRevision; }).catch(error => {
+					if (rawIndex >= 0 && capture.byteStream?.[rawIndex]) capture.byteStream[rawIndex].hidden = previousHidden;
+					rebuildPreview(capture);
+					publishPersistenceError({
+						visible: true,
+						captureId: String(capture.id),
+						message: error instanceof Error ? error.message : String(error),
+						canRetry: false,
+						canExportRecovery: false
+					});
+					snapshots.render();
+				});
+			} else runtime.saveState({ immediate: true });
 			snapshots.render();
 			runtime.showToast("Byte hidden; captured data was kept");
 		},
