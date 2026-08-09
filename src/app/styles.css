@@ -325,8 +325,15 @@ p {
 }
 .capture-list {
 	margin-top: 12px;
-	overflow-y: auto;
 	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	-ms-overflow-style: none;
+	scrollbar-width: none;
+}
+.capture-list::-webkit-scrollbar {
+	display: none;
 }
 .capture-folder {
 	margin-bottom: 8px;
