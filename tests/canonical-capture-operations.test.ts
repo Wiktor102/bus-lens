@@ -136,6 +136,36 @@ function captureDocumentRow(database: ReturnType<typeof openDatabase>, captureId
 		.run({ id: captureId, documentJson: JSON.stringify({ id: captureId, name: "legacy shadow" }), createdAt: "2026-08-09T00:00:00.000Z", updatedAt: "2026-08-09T00:00:00.000Z" });
 }
 
+test("pattern notes support stable canonical create, update, and delete commands", () => {
+	const database = openDatabase(":memory:");
+	try {
+		const service = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-09T00:00:00.000Z" });
+		service.createCapture({ captureId: "pattern-note", framing, inputFormat: "binary" });
+
+		const created = service.createNote({
+			captureId: "pattern-note",
+			noteId: "pattern-note-id",
+			text: "first remark",
+			target: { kind: "pattern", sequenceKey: "01 02" }
+		});
+		assert.deepEqual(created.note.target, { kind: "pattern", sequenceKey: "01 02" });
+
+		const updated = service.updateNote({
+			captureId: "pattern-note",
+			noteId: "pattern-note-id",
+			text: "updated remark",
+			target: { kind: "pattern", sequenceKey: "01 02" }
+		});
+		assert.equal(updated.note.text, "updated remark");
+		assert.deepEqual(updated.note.target, { kind: "pattern", sequenceKey: "01 02" });
+
+		service.deleteNote({ captureId: "pattern-note", noteId: "pattern-note-id" });
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM stable_notes WHERE capture_id = 'pattern-note'").get() as { count: number }).count, 0);
+	} finally {
+		database.close();
+	}
+});
+
 test("clearCaptureData is authority-gated, atomic, revision-scoped, and preserves canonical context", () => {
 	const database = openDatabase(":memory:");
 	try {

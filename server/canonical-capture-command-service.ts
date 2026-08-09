@@ -2431,6 +2431,10 @@ export class CanonicalCaptureCommandService {
 				endRow: endOrdinal
 			};
 		}
+		if (target.kind === "pattern") {
+			const sequenceKey = requiredString(target.sequenceKey, "target.sequenceKey");
+			return { targetKind: "pattern", ...empty, sequenceKey };
+		}
 		if (target.kind === "sequence-group") {
 			const groupId = requiredString(target.groupId, "target.groupId");
 			const row = this.database

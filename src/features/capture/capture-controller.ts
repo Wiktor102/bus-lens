@@ -56,7 +56,7 @@ export type CaptureControllerDependencies = {
 };
 
 type AnnotationValue = { text?: unknown; noteId?: string; [key: string]: unknown };
-type PatternRemarkValue = { text?: unknown; [key: string]: unknown };
+type PatternRemarkValue = { text?: unknown; noteId?: string; [key: string]: unknown };
 type ActiveCaptureSection = NormalizedCaptureSection;
 type ActiveCapture = Omit<
 	Capture,
@@ -291,7 +291,10 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			: "";
 		if (!dependencies.confirm(`Delete folder “${folder.name}”?${detail}`)) return;
 		state.captures.forEach(item => {
-			if (item.folderId === folderId) item.folderId = null;
+			if (item.folderId === folderId) {
+				item.folderId = null;
+				if (isCanonical(item)) metadataPatch(item);
+			}
 		});
 		state.folders = state.folders.filter(item => item.id !== folderId);
 		dependencies.saveState();
@@ -754,9 +757,36 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (!c) return false;
 		const text = normalizePatternRemarkText(input.text);
 		c.patternRemarks ||= {};
-		if (text) c.patternRemarks[input.patternKey] = { text, updatedAt: Date.now() };
+		const previous = c.patternRemarks[input.patternKey];
+		const previousValue = previous && typeof previous === "object" ? previous as PatternRemarkValue : undefined;
+		const previousNoteId = previousValue?.noteId ? String(previousValue.noteId) : undefined;
+		if (text) c.patternRemarks[input.patternKey] = {
+			text,
+			updatedAt: Date.now(),
+			...(previousNoteId ? { noteId: previousNoteId } : {})
+		};
 		else delete c.patternRemarks[input.patternKey];
-		dependencies.saveState();
+		if (isCanonical(c)) {
+			const target: CanonicalNoteTarget = { kind: "pattern", sequenceKey: input.patternKey };
+			const operation = text
+				? previousNoteId
+					? dependencies.captureWriter!.updateNote({ captureId: c.id, noteId: previousNoteId, text, target })
+					: dependencies.captureWriter!.createNote({ captureId: c.id, text, target })
+				: previousNoteId
+					? dependencies.captureWriter!.deleteNote({ captureId: c.id, noteId: previousNoteId })
+					: Promise.resolve();
+			void operation.then(result => {
+				if (text && result && "note" in result) {
+					const optimistic = c.patternRemarks?.[input.patternKey] as PatternRemarkValue | undefined;
+					if (optimistic) optimistic.noteId = result.note.id;
+					c.contentRevision = result.contentRevision;
+				}
+			}).catch(error => reconcileFailure(c.id!, error, () => {
+				if (previousValue) c.patternRemarks![input.patternKey] = previousValue;
+				else delete c.patternRemarks![input.patternKey];
+				dependencies.renderMessages();
+			}));
+		} else dependencies.saveState();
 		dependencies.renderMessages();
 		dependencies.showToast(text ? "Sequence note saved" : "Sequence note removed");
 		return true;
