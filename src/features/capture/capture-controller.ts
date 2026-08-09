@@ -541,31 +541,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			}) as ActiveCapture;
 			state.captures.unshift(c);
 			dependencies.setActiveId(c.id);
-			if (dependencies.captureWriter) {
-				void dependencies.captureWriter.createCapture({
-					captureId: String(c.id),
-					name: String(c.name),
-					description: String(c.description ?? ""),
-					view: String(c.view ?? ""),
-					folderId: c.folderId ?? null,
-					baudRate: Number(c.baudRate ?? 115200),
-					inputFormat: "binary",
-					parameters: c.params.flatMap(parameter => {
-						const key = String(parameter.key ?? "").trim();
-						return key ? [{ key, value: String(parameter.value ?? "") }] : [];
-					}),
-					framing: framingRequest(c)
-				}).then(server => {
-					c.storageStatus = "canonical";
-					c.dataRevision = server.dataRevision;
-					c.metadataRevision = server.metadataRevision;
-					c.contentRevision = server.contentRevision;
-				}).catch(error => {
-					state.captures = state.captures.filter(item => item !== c);
-					reportFailure(String(c.id), error);
-					dependencies.render();
-				});
-			}
+			// The runtime owns create bookkeeping and the archive-index write.
+			dependencies.saveState({ immediate: true });
 		} else {
 			const c = state.captures.find(item => String(item.id) === String(input.captureId)) || capture();
 			if (!c) return false;
