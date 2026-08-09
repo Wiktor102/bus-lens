@@ -31,6 +31,7 @@ import { publishDialogCommand } from "../dialogs/dialog-bridge.ts";
 import type {
 	CaptureWriter,
 	CanonicalNoteTarget,
+	CaptureMetadataPatch,
 	FramingSectionRequest
 } from "../../persistence/archive-client.ts";
 
@@ -51,6 +52,7 @@ export type CaptureControllerDependencies = {
 	publishDialogCommand: typeof publishDialogCommand;
 	captureWriter?: CaptureWriter;
 	isCanonicalCapture?: (captureId: string) => boolean;
+	waitForCaptureWrite?: (captureId: string) => Promise<void>;
 	refreshCapture?: (captureId: string) => Promise<Capture>;
 	reportPersistenceFailure?: (captureId: string, error: unknown) => void;
 };
@@ -74,8 +76,10 @@ type ActiveCapture = Omit<
 type ActiveAppState = Pick<AppState, "folders" | "unfiledCollapsed"> & { captures: ActiveCapture[] };
 
 type CaptureWriteQueue = {
-	metadataPending: boolean;
-	framingPending: boolean;
+	metadataPending: CaptureMetadataPatch | null;
+	framingPending: FramingSectionRequest[] | null;
+	metadataRetries: number;
+	framingRetries: number;
 	running: Promise<void> | null;
 };
 
@@ -116,40 +120,73 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		return state.captures.find(item => String(item.id) === captureId);
 	}
 
-	async function writeMetadata(captureId: string): Promise<void> {
+	function metadataPatchValue(item: ActiveCapture): CaptureMetadataPatch {
+		return {
+			name: String(item.name ?? ""),
+			description: String(item.description ?? ""),
+			controllerView: String(item.view ?? ""),
+			baudRate: Number(item.baudRate ?? 115200),
+			inputFormat: "binary",
+			folderId: item.folderId ?? null,
+			parameters: item.params.flatMap(parameter => {
+				const key = String(parameter.key ?? "").trim();
+				return key ? [{ key, value: String(parameter.value ?? "") }] : [];
+			})
+		};
+	}
+
+	function applyMetadataSnapshot(item: ActiveCapture, patch: CaptureMetadataPatch): void {
+		if (patch.name !== undefined) item.name = patch.name;
+		if (patch.description !== undefined) item.description = patch.description;
+		if (patch.controllerView !== undefined) item.view = patch.controllerView;
+		else if (patch.view !== undefined) item.view = patch.view;
+		if (patch.baudRate !== undefined) item.baudRate = patch.baudRate;
+		if ("folderId" in patch) item.folderId = patch.folderId ?? null;
+		if (patch.parameters) item.params = patch.parameters.map(parameter => ({ key: parameter.key, value: parameter.value }));
+	}
+
+	function applyFramingSnapshot(item: ActiveCapture, sections: readonly FramingSectionRequest[]): void {
+		item.frameSections = sections.map(section => ({ ...section })) as ActiveCaptureSection[];
+		normalizeSections(item);
+	}
+
+	function reapplyPendingSnapshots(captureId: string, queue: CaptureWriteQueue): void {
+		const item = captureById(captureId);
+		if (!item) return;
+		if (queue.metadataPending) applyMetadataSnapshot(item, queue.metadataPending);
+		if (queue.framingPending) applyFramingSnapshot(item, queue.framingPending);
+	}
+
+	async function writeMetadata(captureId: string, patch: CaptureMetadataPatch): Promise<void> {
+		if (dependencies.waitForCaptureWrite) await dependencies.waitForCaptureWrite(captureId);
 		const item = captureById(captureId);
 		if (!item || !isCanonical(item)) return;
 		const result = await dependencies.captureWriter!.patchMetadata({
 			captureId: item.id,
 			expectedMetadataRevision: item.metadataRevision,
-			patch: {
-				name: String(item.name ?? ""),
-				description: String(item.description ?? ""),
-				controllerView: String(item.view ?? ""),
-				baudRate: Number(item.baudRate ?? 115200),
-				inputFormat: "binary",
-				folderId: item.folderId ?? null,
-				parameters: item.params.flatMap(parameter => {
-					const key = String(parameter.key ?? "").trim();
-					return key ? [{ key, value: String(parameter.value ?? "") }] : [];
-				})
-			}
+			patch
 		});
-		item.metadataRevision = result.metadataRevision;
-		item.updatedAt = result.updatedAt;
+		const current = captureById(captureId);
+		if (current) {
+			current.metadataRevision = result.metadataRevision;
+			current.updatedAt = result.updatedAt;
+		}
 	}
 
-	async function writeFraming(captureId: string): Promise<void> {
+	async function writeFraming(captureId: string, sections: readonly FramingSectionRequest[]): Promise<void> {
+		if (dependencies.waitForCaptureWrite) await dependencies.waitForCaptureWrite(captureId);
 		const item = captureById(captureId);
 		if (!item || !isCanonical(item)) return;
-		const sections = framingRequest(item);
 		if (dependencies.transport.isRecording()) {
 			const draft = await dependencies.captureWriter!.updateFramingDraft({
 				captureId: item.id,
 				sections,
 				expectedRevision: item.framingDraftRevision
 			});
-			item.framingDraftRevision = draft.revision;
+			const current = captureById(captureId);
+			if (current) {
+				current.framingDraftRevision = draft.revision;
+			}
 		} else {
 			const profile = await dependencies.captureWriter!.reframe({
 				captureId: item.id,
@@ -157,7 +194,59 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				expectedActiveProfileId: item.activeFramingProfileId,
 				expectedDataRevision: Number(item.dataRevision ?? 0)
 			});
-			item.activeFramingProfileId = profile.profileId;
+			const current = captureById(captureId);
+			if (current) {
+				current.activeFramingProfileId = profile.profileId;
+			}
+		}
+	}
+
+	async function recoverCaptureWrite(
+		captureId: string,
+		queue: CaptureWriteQueue,
+		kind: "metadata" | "framing",
+		desired: CaptureMetadataPatch | FramingSectionRequest[],
+		error: unknown
+	): Promise<void> {
+		const retries = kind === "metadata" ? queue.metadataRetries : queue.framingRetries;
+		const latest = kind === "metadata"
+			? (queue.metadataPending ?? desired) as CaptureMetadataPatch
+			: (queue.framingPending ?? desired) as FramingSectionRequest[];
+		if (retries >= 1 || !dependencies.refreshCapture) {
+			if (kind === "metadata") {
+				queue.metadataPending = null;
+				queue.metadataRetries = 0;
+			} else {
+				queue.framingPending = null;
+				queue.framingRetries = 0;
+			}
+			reapplyPendingSnapshots(captureId, queue);
+			reportFailure(captureId, error);
+			dependencies.render();
+			return;
+		}
+		if (kind === "metadata") {
+			queue.metadataRetries += 1;
+			queue.metadataPending = latest as CaptureMetadataPatch;
+		} else {
+			queue.framingRetries += 1;
+			queue.framingPending = latest as FramingSectionRequest[];
+		}
+		try {
+			await dependencies.refreshCapture(captureId);
+			reapplyPendingSnapshots(captureId, queue);
+			dependencies.render();
+		} catch (refreshError) {
+			if (kind === "metadata") {
+				queue.metadataPending = null;
+				queue.metadataRetries = 0;
+			} else {
+				queue.framingPending = null;
+				queue.framingRetries = 0;
+			}
+			reapplyPendingSnapshots(captureId, queue);
+			reportFailure(captureId, refreshError);
+			dependencies.render();
 		}
 	}
 
@@ -166,23 +255,31 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		queue.running = (async () => {
 			while (queue.metadataPending || queue.framingPending) {
 				if (queue.metadataPending) {
-					queue.metadataPending = false;
+					const patch = queue.metadataPending;
+					queue.metadataPending = null;
 					try {
-						await writeMetadata(captureId);
+						await writeMetadata(captureId, patch);
+						if (!queue.metadataPending) {
+							const current = captureById(captureId);
+							if (current) applyMetadataSnapshot(current, patch);
+						}
+						queue.metadataRetries = 0;
 					} catch (error) {
-						queue.metadataPending = false;
-						queue.framingPending = false;
-						reconcileFailure(captureId, error);
+						await recoverCaptureWrite(captureId, queue, "metadata", patch, error);
 					}
 				}
 				if (queue.framingPending) {
-					queue.framingPending = false;
+					const sections = queue.framingPending;
+					queue.framingPending = null;
 					try {
-						await writeFraming(captureId);
+						await writeFraming(captureId, sections);
+						if (!queue.framingPending) {
+							const current = captureById(captureId);
+							if (current) applyFramingSnapshot(current, sections);
+						}
+						queue.framingRetries = 0;
 					} catch (error) {
-						queue.metadataPending = false;
-						queue.framingPending = false;
-						reconcileFailure(captureId, error);
+						await recoverCaptureWrite(captureId, queue, "framing", sections, error);
 					}
 				}
 			}
@@ -193,12 +290,28 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		return queue.running;
 	}
 
-	function queueCaptureWrite(captureId: string, kind: "metadata" | "framing"): void {
-		const queue = captureWriteQueues.get(captureId) || { metadataPending: false, framingPending: false, running: null };
+	function queueCaptureWrite(
+		captureId: string,
+		kind: "metadata" | "framing",
+		value: CaptureMetadataPatch | FramingSectionRequest[]
+	): void {
+		const queue = captureWriteQueues.get(captureId) || {
+			metadataPending: null,
+			framingPending: null,
+			metadataRetries: 0,
+			framingRetries: 0,
+			running: null
+		};
 		captureWriteQueues.set(captureId, queue);
-		if (kind === "metadata") queue.metadataPending = true;
-		else queue.framingPending = true;
+		if (kind === "metadata") queue.metadataPending = value as CaptureMetadataPatch;
+		else queue.framingPending = value as FramingSectionRequest[];
 		void drainCaptureWrites(captureId, queue);
+	}
+
+	async function waitForCaptureWrites(captureId: string): Promise<void> {
+		while (captureWriteQueues.get(captureId)?.running) {
+			await captureWriteQueues.get(captureId)!.running;
+		}
 	}
 
 	function metadataPatch(item: ActiveCapture): void {
@@ -206,7 +319,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			dependencies.saveState();
 			return;
 		}
-		queueCaptureWrite(item.id, "metadata");
+		queueCaptureWrite(item.id, "metadata", metadataPatchValue(item));
 	}
 
 	function framingRequest(item: ActiveCapture): FramingSectionRequest[] {
@@ -229,8 +342,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			dependencies.saveState(immediate ? { immediate: true } : undefined);
 			return;
 		}
-		framingRequest(item);
-		queueCaptureWrite(item.id, "framing");
+		queueCaptureWrite(item.id, "framing", framingRequest(item));
 	}
 
 	function selectArchiveCapture(captureId: string) {
@@ -404,7 +516,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	}
 
 	async function deleteArchiveCapture(captureId: string): Promise<void> {
-		const item = state.captures.find(captureItem => captureItem.id === captureId);
+		let item = state.captures.find(captureItem => captureItem.id === captureId);
 		if (!item || !dependencies.confirm(`Delete “${item.name}”?`)) return;
 		const deletingActiveCapture = dependencies.getActiveId() === captureId;
 		if (deletingActiveCapture) {
@@ -419,6 +531,9 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				return;
 			}
 		}
+		await waitForCaptureWrites(captureId);
+		item = state.captures.find(captureItem => captureItem.id === captureId);
+		if (!item) return;
 		state.captures = state.captures.filter(captureItem => captureItem.id !== captureId);
 		if (deletingActiveCapture) dependencies.setActiveId(state.captures[0]?.id || null);
 		if (isCanonical(item)) {

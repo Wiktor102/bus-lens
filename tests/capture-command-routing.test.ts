@@ -180,6 +180,77 @@ test("serializes metadata and framing revisions while coalescing the latest opti
 	assert.equal(capture.framingDraftRevision, 2);
 });
 
+test("retries a failed metadata revision without losing the latest optimistic patch", async () => {
+	const capture: Capture = {
+		id: "retry-capture",
+		name: "Before",
+		description: "before",
+		view: "",
+		baudRate: 115200,
+		metadataRevision: 0,
+		messages: [],
+		byteStream: [],
+		frameSections: [{ id: "section-1", start: 0, framingMode: "length", frameSize: 2 }],
+		params: [],
+		notes: [],
+		annotations: {},
+		patternRemarks: {},
+		storageStatus: "canonical"
+	};
+	const state = { captures: [capture], folders: [], unfiledCollapsed: false } as unknown as AppState;
+	const metadataRequests: Array<{ expectedMetadataRevision?: number; patch: Record<string, unknown> }> = [];
+	let rejectFirst!: (error: Error) => void;
+	const firstRequest = new Promise<{ metadataRevision: number; updatedAt: string }>((_resolve, reject) => { rejectFirst = reject; });
+	const writer = {
+		patchMetadata: (request: { expectedMetadataRevision?: number; patch: Record<string, unknown> }) => {
+			metadataRequests.push(request);
+			return metadataRequests.length === 1
+				? firstRequest
+				: Promise.resolve({ metadataRevision: 1, updatedAt: "retried" });
+		}
+	} as unknown as CaptureWriter;
+	const errors: unknown[] = [];
+	const controller = createCaptureController({
+		state,
+		capture: () => state.captures[0],
+		getActiveId: () => capture.id,
+		setActiveId: () => {},
+		saveState: () => { throw new Error("canonical mutation used generic saveState"); },
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => false, stopRecording: async () => {} },
+		publishArchiveState: () => {},
+		publishCaptureHeaderState: () => {},
+		publishNotesState: () => {},
+		publishDialogCommand: () => {},
+		captureWriter: writer,
+		isCanonicalCapture: () => true,
+		refreshCapture: async () => {
+			const reloaded = { ...capture, name: "Server name", description: "Server description", metadataRevision: 0 };
+			state.captures[0] = reloaded;
+			return reloaded;
+		},
+		reportPersistenceFailure: (_captureId, error) => errors.push(error)
+	});
+
+	controller.commitCaptureTitle("Latest title");
+	controller.commitCaptureDescription("Latest description");
+	rejectFirst(new Error("stale metadata revision"));
+	await new Promise(resolve => setTimeout(resolve, 0));
+	await new Promise(resolve => setTimeout(resolve, 0));
+
+	assert.equal(metadataRequests.length, 2);
+	assert.equal(metadataRequests[1]?.expectedMetadataRevision, 0);
+	assert.equal(metadataRequests[1]?.patch.name, "Latest title");
+	assert.equal(metadataRequests[1]?.patch.description, "Latest description");
+	assert.equal(state.captures[0]?.metadataRevision, 1);
+	assert.equal(state.captures[0]?.name, "Latest title");
+	assert.equal(state.captures[0]?.description, "Latest description");
+	assert.deepEqual(errors, []);
+});
+
 test("uses reloaded annotation note IDs for canonical update and delete commands", async () => {
 	const capture: Capture = {
 		id: "reloaded-annotation",
@@ -482,6 +553,74 @@ test("new capture creation uses runtime bookkeeping and does not replay the crea
 		runtime.saveState({ immediate: true });
 		await runtime.waitForCaptureWrite(captureId);
 		assert.equal(requests.filter(request => request.path === "/api/captures" && request.method === "POST").length, 1);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("holds canonical metadata writes until a new capture is acknowledged", async () => {
+	const originalFetch = globalThis.fetch;
+	const requests: Array<{ path: string; method: string; body?: unknown }> = [];
+	let releaseCreate!: (response: Response) => void;
+	const createResponse = new Promise<Response>(resolve => { releaseCreate = resolve; });
+	globalThis.fetch = async (input, init) => {
+		const path = String(input);
+		requests.push({
+			path,
+			method: init?.method || "GET",
+			body: init?.body ? JSON.parse(String(init.body)) : undefined
+		});
+		if (path.endsWith("/health")) return new Response(null, { status: 204 });
+		if (path.endsWith("/archive")) {
+			return new Response(JSON.stringify({ captures: [], folders: [], index: { activeId: null, unfiledCollapsed: false }, queue: [], history: [], settings: {} }), { status: 200 });
+		}
+		if (path.endsWith("/canonical/captures")) return new Response(JSON.stringify([]), { status: 200 });
+		if (path.endsWith("/captures") && (init?.method || "GET") === "POST") return createResponse;
+		return new Response(null, { status: 204 });
+	};
+
+	try {
+		const runtime = createAppRuntime();
+		await runtime.ready;
+		runtime.state.captures = [];
+		runtime.setActiveId(null);
+		const controller = createCaptureController({
+			state: runtime.state,
+			capture: runtime.capture,
+			getActiveId: runtime.getActiveId,
+			setActiveId: runtime.setActiveId,
+			saveState: runtime.saveState,
+			render: () => {},
+			renderMessages: () => {},
+			showToast: () => {},
+			confirm: () => true,
+			transport: { isRecording: () => false, stopRecording: async () => {} },
+			publishArchiveState: () => {},
+			publishCaptureHeaderState: () => {},
+			publishNotesState: () => {},
+			publishDialogCommand: () => {},
+			captureWriter: runtime.captureWriter,
+			isCanonicalCapture: runtime.isCanonicalCapture,
+			waitForCaptureWrite: runtime.waitForCaptureWrite
+		});
+
+		assert.equal(controller.commitContextDraft({
+			mode: "new",
+			captureId: null,
+			draft: { name: "Created", view: "Main", folderId: "", baudRate: "115200", parameters: [] }
+		}), true);
+		const captureId = String(runtime.state.captures[0]?.id);
+		await new Promise(resolve => setTimeout(resolve, 0));
+		controller.commitCaptureTitle("Edited before create acknowledgement");
+		await new Promise(resolve => setTimeout(resolve, 0));
+		assert.equal(requests.filter(request => request.path.endsWith(`/captures/${captureId}/metadata`)).length, 0);
+
+		releaseCreate(new Response(JSON.stringify({}), { status: 201 }));
+		await runtime.waitForCaptureWrite(captureId);
+		await new Promise(resolve => setTimeout(resolve, 0));
+		const metadataRequest = requests.find(request => request.path.endsWith(`/captures/${captureId}/metadata`));
+		assert.equal(metadataRequest?.method, "PATCH");
+		assert.equal((metadataRequest?.body as { patch?: { name?: string } } | undefined)?.patch?.name, "Edited before create acknowledgement");
 	} finally {
 		globalThis.fetch = originalFetch;
 	}

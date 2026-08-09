@@ -5,6 +5,7 @@ import {
 	ArchiveClient,
 	type CanonicalCaptureSummary,
 	type CaptureMetadataPatch,
+	type CaptureState,
 	type CaptureWriter,
 	type CreateCaptureRequest,
 	type FramingSectionRequest,
@@ -158,6 +159,22 @@ function captureMetadataPatch(capture: Capture): CaptureMetadataPatch {
 	};
 }
 
+function applyCanonicalCaptureState(capture: Capture, result: unknown): void {
+	if (!result || typeof result !== "object") return;
+	const state = result as Partial<CaptureState>;
+	if (typeof state.dataRevision === "number") capture.dataRevision = state.dataRevision;
+	if (typeof state.metadataRevision === "number") capture.metadataRevision = state.metadataRevision;
+	if (typeof state.contentRevision === "number") capture.contentRevision = state.contentRevision;
+	if (typeof state.retainedStartOffset === "number") capture.retainedStartOffset = state.retainedStartOffset;
+	if (state.activeProfile && typeof state.activeProfile === "object" && typeof state.activeProfile.id === "string") {
+		capture.activeFramingProfileId = state.activeProfile.id;
+	}
+	if (state.draft && typeof state.draft === "object" && typeof state.draft.revision === "number") {
+		capture.framingDraftRevision = state.draft.revision;
+	}
+	if (typeof state.updatedAt === "string") capture.updatedAt = state.updatedAt;
+}
+
 export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): AppRuntime {
 	const storage = dependencies.storage || browserStorage();
 	let legacyArchive: string | null = null;
@@ -207,12 +224,15 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		let operation: Promise<unknown>;
 		if (isNew) {
 			captureStatuses.set(id, "canonical");
-			operation = writer.createCapture(captureCreateRequest(capture)).then(() => {
+			operation = writer.createCapture(captureCreateRequest(capture)).then(result => {
+				applyCanonicalCaptureState(capture, result);
 				persistedIds.captures.add(id);
 				captureStatuses.set(id, "canonical");
 			});
 		} else if (captureStatuses.get(id) === "canonical") {
-			operation = writer.patchMetadata({ captureId: id, patch: captureMetadataPatch(capture) });
+			operation = writer.patchMetadata({ captureId: id, patch: captureMetadataPatch(capture) }).then(result => {
+				applyCanonicalCaptureState(capture, result);
+			});
 		} else if (client) {
 			// The generic document endpoint is a legacy-only compatibility path.
 			operation = client.saveLegacyCaptureDocument(capture);
@@ -250,7 +270,10 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		if (!capture) return false;
 		captureStatuses.set(captureId, "canonical");
 		const operation = writer.createCapture(captureCreateRequest(capture))
-			.then(() => { persistedIds.captures.add(captureId); })
+			.then(result => {
+				applyCanonicalCaptureState(capture, result);
+				persistedIds.captures.add(captureId);
+			})
 			.catch(error => {
 				captureStatuses.delete(captureId);
 				persistedIds.captures.delete(captureId);

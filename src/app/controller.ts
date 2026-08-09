@@ -117,6 +117,7 @@ export function initializeController(): ControllerLifecycle {
 		publishDialogCommand,
 		captureWriter: runtime.captureWriter,
 		isCanonicalCapture: runtime.isCanonicalCapture,
+		waitForCaptureWrite: runtime.waitForCaptureWrite,
 		refreshCapture: runtime.refreshCapture,
 		reportPersistenceFailure: (captureId, error) => publishPersistenceError({
 			visible: true,
