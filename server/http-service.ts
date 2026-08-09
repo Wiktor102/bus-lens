@@ -139,7 +139,8 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 					return send(response, 201, repository.migrateLegacyArchive(String(body.fingerprint ?? ""), archive, body.report));
 				}
 			}
-			// PR4: canonical migration and reframing
+			// Canonicalization is an explicit admin/background operation. Startup and
+			// ordinary legacy-capture saves deliberately do not invoke these routes.
 			if (segments[1] === "migrations" && segments[2] === "canonical") {
 				if (request.method === "POST") {
 					const results = repository.convertAllCaptures();
