@@ -12,6 +12,7 @@ import {
 	type JsonDocument
 } from "./archive-repository.ts";
 import { openDatabase, type SqliteDatabase } from "./database.ts";
+import { CanonicalQueryService } from "./canonical-query.ts";
 
 const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
 const MIME_TYPES: Record<string, string> = {
@@ -110,6 +111,7 @@ async function serveStatic(response: ServerResponse, staticDirectory: string, pa
 export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpService {
 	const database = openDatabase(options.databasePath);
 	const repository = new ArchiveRepository(database);
+	const canonicalQueries = new CanonicalQueryService(database);
 	const staticDirectory = options.staticDirectory ? resolve(options.staticDirectory) : undefined;
 	const maxBodyBytes = options.maxBodyBytes ?? 128 * 1024 * 1024;
 	const server = createServer(async (request, response) => {
@@ -123,6 +125,23 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { ok: true });
 			if (request.method === "GET" && url.pathname === "/api/archive") {
 				return send(response, 200, { captures: repository.listCaptures(), folders: repository.listFolders(), index: repository.getArchiveIndex(), queue: repository.listQueue(), history: repository.listHistory(), settings: repository.getSettings() });
+			}
+			if (segments[1] === "canonical" && segments[2] === "captures") {
+				if (request.method === "GET" && !segments[3]) return send(response, 200, canonicalQueries.listCaptureSummaries());
+				const captureId = segments[3];
+				if (request.method === "GET" && captureId && segments[4] === "overview") {
+					const overview = canonicalQueries.getCaptureOverview(captureId);
+					return overview ? send(response, 200, overview) : send(response, 404, { error: "Not found" });
+				}
+				if (request.method === "GET" && captureId && segments[4] === "frames") {
+					const offset = url.searchParams.has("offset") ? Number(url.searchParams.get("offset")) : 0;
+					const limit = url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : undefined;
+					if ((url.searchParams.has("offset") && !Number.isSafeInteger(offset)) || (limit !== undefined && !Number.isSafeInteger(limit))) {
+						throw new RepositoryValidationError("offset and limit must be integers");
+					}
+					const window = canonicalQueries.getFrameWindow(captureId, offset, limit);
+					return window ? send(response, 200, window) : send(response, 404, { error: "Not found" });
+				}
 			}
 			if (segments[1] === "archive-index") {
 				if (request.method === "GET") return send(response, 200, repository.getArchiveIndex());
