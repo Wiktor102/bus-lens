@@ -1,6 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { SqliteDatabase } from "./database.ts";
 import { markerBytes as parseMarkerBytes } from "../src/domain/framing.ts";
+import {
+	buildCanonicalMaterialization,
+	normalizeSectionsForConversion,
+	persistCanonicalMaterializationRows,
+	verifyCanonicalMaterializationRows,
+	type CaptureSection,
+	type RawByteRecord,
+	type NormalizedSection
+} from "./canonical.ts";
 
 export const CANONICAL_STORAGE_STATUS = "canonical" as const;
 export const CANONICALIZATION_FAILED_STORAGE_STATUS = "canonicalization-failed" as const;
@@ -180,7 +189,6 @@ export type AppendChunkResponse = Readonly<{
 	nextRawOffset: number;
 	nextSequence: number;
 	dataRevision: number;
-	idempotent: boolean;
 }>;
 
 export type FramingSectionRequest = Readonly<{
@@ -843,41 +851,6 @@ export class CanonicalCaptureCommandService {
 			parameters.forEach((parameter, position) =>
 				insertParameter.run({ captureId, position, keyText: parameter.key, valueText: parameter.value })
 			);
-			const profileId = requiredString(this.generateId(), "profileId");
-			this.database
-				.prepare(
-					`INSERT INTO framing_profiles
-					 (id, capture_id, version, algorithm_version, is_active, created_at, updated_at,
-					  source_data_revision, retained_start_offset, verified)
-					 VALUES (@id, @captureId, 1, 1, 1, @createdAt, @updatedAt, 0, 0, 1)`
-				)
-				.run({ id: profileId, captureId, createdAt: now, updatedAt: now });
-			const insertSection = this.database.prepare(
-				`INSERT INTO framing_sections
-				 (id, profile_id, capture_id, start_offset, position, framing_mode, frame_length,
-				  marker_bytes, marker_position, time_gap_ms, collapse_runs, collapsed)
-				 VALUES (@id, @profileId, @captureId, @startOffset, @position, @framingMode,
-				  @frameLength, @markerBytes, @markerPosition, @timeGapMs, @collapseRuns, @collapsed)`
-			);
-			framingSections.forEach((section, position) =>
-				insertSection.run({
-					id: section.id,
-					profileId,
-					captureId,
-					startOffset: section.start,
-					position,
-					framingMode: section.framingMode,
-					frameLength: section.framingMode === "length" ? section.frameSize : null,
-					markerBytes: section.framingMode === "marker" ? JSON.stringify(parseMarkerBytes(section.frameMarker)) : null,
-					markerPosition: section.framingMode === "marker" ? section.markerPosition : null,
-					timeGapMs: section.framingMode === "time" ? section.frameTimeGap : null,
-					collapseRuns: section.collapseRuns ? 1 : 0,
-					collapsed: section.collapsed ? 1 : 0
-				})
-			);
-			this.database
-				.prepare("UPDATE captures SET active_framing_profile_id = @profileId WHERE id = @captureId")
-				.run({ captureId, profileId });
 			this.database
 				.prepare(
 					`INSERT INTO framing_drafts (capture_id, revision, sections_json, updated_at)
@@ -1086,6 +1059,214 @@ export class CanonicalCaptureCommandService {
 			finalizedAt: row.finalized_at,
 			nextChunkSequence: row.next_chunk_sequence,
 			nextRawOffset: row.next_raw_offset
+		};
+	}
+
+	private assertSessionAppendCompleteness(
+		captureId: string,
+		sessionId: string,
+		session: { next_chunk_sequence: number; next_raw_offset: number }
+	): void {
+		const requests = this.database
+			.prepare(
+				`SELECT sequence, expected_start_offset, accepted_start_offset, accepted_end_offset,
+						next_raw_offset, next_sequence
+				 FROM raw_chunk_requests
+				 WHERE capture_id = @captureId AND session_id = @sessionId
+				 ORDER BY sequence`
+			)
+			.all({ captureId, sessionId }) as Array<{
+				sequence: number;
+				expected_start_offset: number;
+				accepted_start_offset: number;
+				accepted_end_offset: number;
+				next_raw_offset: number;
+				next_sequence: number;
+			}>;
+		if (requests.length !== session.next_chunk_sequence) {
+			throw new CanonicalCaptureConflictError("session chunk acknowledgements are incomplete", {
+				captureId,
+				sessionId,
+				expectedSequence: session.next_chunk_sequence,
+				actualSequence: requests.length,
+				expectedStartOffset: session.next_raw_offset
+			});
+		}
+
+		let previousNextOffset: number | undefined;
+		for (const [index, request] of requests.entries()) {
+			const expectedStartOffset = previousNextOffset ?? request.expected_start_offset;
+			if (
+				request.sequence !== index ||
+				request.expected_start_offset !== expectedStartOffset ||
+				request.accepted_start_offset !== expectedStartOffset ||
+				request.accepted_end_offset <= request.accepted_start_offset ||
+				request.next_raw_offset !== request.accepted_end_offset ||
+				request.next_sequence !== index + 1
+			) {
+				throw new CanonicalCaptureConflictError("session chunk acknowledgements are not continuous", {
+					captureId,
+					sessionId,
+					sequence: request.sequence,
+					expectedSequence: index,
+					actualSequence: request.sequence,
+					expectedStartOffset,
+					actualStartOffset: request.accepted_start_offset,
+					nextRawOffset: request.next_raw_offset,
+					nextSequence: request.next_sequence
+				});
+			}
+			previousNextOffset = request.next_raw_offset;
+		}
+		if (previousNextOffset !== undefined && previousNextOffset !== session.next_raw_offset) {
+			throw new CanonicalCaptureConflictError("session next raw offset is not acknowledged by its final chunk", {
+				captureId,
+				sessionId,
+				expectedSequence: session.next_chunk_sequence,
+				actualSequence: requests.length,
+				expectedStartOffset: session.next_raw_offset,
+				actualStartOffset: previousNextOffset
+			});
+		}
+
+		const chunks = this.database
+			.prepare(
+				`SELECT start_offset, byte_count, session_id, session_ids_json
+				 FROM raw_chunks WHERE capture_id = @captureId ORDER BY start_offset`
+			)
+			.all({ captureId }) as Array<{
+				start_offset: number;
+				byte_count: number;
+				session_id: string | null;
+				session_ids_json: string;
+			}>;
+		for (const request of requests) {
+			let coveredOffset = request.accepted_start_offset;
+			const coveringChunks = chunks.filter(chunk => {
+				const end = chunk.start_offset + chunk.byte_count;
+				return chunk.start_offset >= request.accepted_start_offset && chunk.start_offset < request.accepted_end_offset && end <= request.accepted_end_offset;
+			});
+			for (const chunk of coveringChunks) {
+				if (chunk.start_offset !== coveredOffset) {
+					throw new CanonicalCaptureConflictError("session raw chunks contain a gap or overlap", {
+						captureId,
+						sessionId,
+						sequence: request.sequence,
+						expectedSequence: request.sequence,
+						actualSequence: request.sequence,
+						expectedStartOffset: coveredOffset,
+						actualStartOffset: chunk.start_offset
+					});
+				}
+				const sessionIds = JSON.parse(chunk.session_ids_json || "[]") as Array<string | null>;
+				if (chunk.session_id !== sessionId || sessionIds.some(value => value !== sessionId)) {
+					throw new CanonicalCaptureConflictError("session raw chunk identity does not match its acknowledgement", {
+						captureId,
+						sessionId,
+						sequence: request.sequence,
+						chunkStartOffset: chunk.start_offset
+					});
+				}
+				coveredOffset += chunk.byte_count;
+			}
+			if (coveredOffset !== request.accepted_end_offset) {
+				throw new CanonicalCaptureConflictError("session acknowledgement has no complete raw chunk span", {
+					captureId,
+					sessionId,
+					sequence: request.sequence,
+					expectedSequence: request.sequence,
+					actualSequence: request.sequence,
+					expectedStartOffset: request.accepted_end_offset,
+					actualStartOffset: coveredOffset
+				});
+			}
+		}
+	}
+
+	private readRawStream(captureId: string, retainedStartOffset: number): Array<RawByteRecord & { rawOffset: number }> {
+		const visibilityRows = this.database
+			.prepare("SELECT raw_offset, hidden FROM raw_byte_visibility WHERE capture_id = @captureId")
+			.all({ captureId }) as Array<{ raw_offset: number; hidden: number }>;
+		const visibility = new Map(visibilityRows.map(row => [row.raw_offset, Boolean(row.hidden)]));
+		const chunks = this.database
+			.prepare(
+				"SELECT bytes, timestamps_json, directions_json, hidden_json, start_offset, session_id, session_ids_json FROM raw_chunks WHERE capture_id = @captureId ORDER BY chunk_index"
+			)
+			.all({ captureId }) as Array<{
+				bytes: Buffer;
+				timestamps_json: string;
+				directions_json: string;
+				hidden_json: string;
+				start_offset: number;
+				session_id: string | null;
+				session_ids_json: string;
+			}>;
+		const stream: Array<RawByteRecord & { rawOffset: number }> = [];
+		for (const chunk of chunks) {
+			const bytes = chunk.bytes instanceof Buffer ? [...chunk.bytes] : Array.from(new Uint8Array(chunk.bytes as unknown as Uint8Array));
+			const timestamps = JSON.parse(chunk.timestamps_json) as number[];
+			const directions = JSON.parse(chunk.directions_json) as string[];
+			const hidden = JSON.parse(chunk.hidden_json) as boolean[];
+			const sessionIds = JSON.parse(chunk.session_ids_json || "[]") as Array<string | null>;
+			for (let index = 0; index < bytes.length; index++) {
+				const rawOffset = chunk.start_offset + index;
+				if (rawOffset < retainedStartOffset) continue;
+				const sessionId = sessionIds[index] || chunk.session_id || undefined;
+				stream.push({
+					rawOffset,
+					value: bytes[index],
+					timestamp: Number(timestamps[index] ?? 0),
+					direction: directions[index] || "rx",
+					hidden: visibility.has(rawOffset) ? Boolean(visibility.get(rawOffset)) : Boolean(hidden[index]),
+					...(sessionId ? { sessionId } : {})
+				});
+			}
+		}
+		return stream;
+	}
+
+	private readFramingSections(captureId: string, retainedStartOffset: number, stream: Array<RawByteRecord & { rawOffset: number }>): NormalizedSection[] {
+		const draft = this.database
+			.prepare("SELECT sections_json FROM framing_drafts WHERE capture_id = @captureId ORDER BY revision DESC LIMIT 1")
+			.get({ captureId }) as { sections_json: string } | undefined;
+		const rawSections = draft
+			? (JSON.parse(draft.sections_json) as CaptureSection[])
+			: ([{ start: retainedStartOffset, framingMode: "length", frameSize: 3 }] as CaptureSection[]);
+		return normalizeSectionsForConversion(rawSections, stream, 3, this.generateId as () => string, retainedStartOffset);
+	}
+
+	private readFinalizationJob(jobId: string): FinalizationJobState {
+		const row = this.database
+			.prepare(
+				`SELECT id, capture_id, session_id, profile_id, status, source_data_revision, verified, error, created_at, updated_at
+				 FROM finalization_jobs WHERE id = @jobId`
+			)
+			.get({ jobId }) as
+			| {
+					id: string;
+					capture_id: string;
+					session_id: string | null;
+					profile_id: string | null;
+					status: string;
+					source_data_revision: number | null;
+					verified: number;
+					error: string | null;
+					created_at: string;
+					updated_at: string;
+				}
+			| undefined;
+		if (!row) throw new CanonicalCaptureNotFoundError(`finalization job ${jobId}`);
+		return {
+			id: row.id,
+			captureId: row.capture_id,
+			sessionId: row.session_id,
+			profileId: row.profile_id,
+			status: row.status,
+			sourceDataRevision: row.source_data_revision,
+			verified: Boolean(row.verified),
+			error: row.error,
+			createdAt: row.created_at,
+			updatedAt: row.updated_at
 		};
 	}
 
@@ -1305,10 +1486,9 @@ export class CanonicalCaptureCommandService {
 					payloadHash,
 					acceptedStartOffset: existingRequest.accepted_start_offset,
 					acceptedEndOffset: existingRequest.accepted_end_offset,
-					nextRawOffset: existingRequest.next_raw_offset,
-					nextSequence: existingRequest.next_sequence,
-					dataRevision: existingRequest.data_revision,
-					idempotent: true
+						nextRawOffset: existingRequest.next_raw_offset,
+						nextSequence: existingRequest.next_sequence,
+						dataRevision: existingRequest.data_revision
 				} satisfies AppendChunkResponse;
 			}
 
@@ -1342,15 +1522,15 @@ export class CanonicalCaptureCommandService {
 				throw new CanonicalCaptureConflictError("session is not recording", { captureId, sessionId, status: session.status });
 			}
 			const expectedSequenceMatches = session.next_chunk_sequence === sequence;
-		const expectedOffsetMatches = session.next_raw_offset === expectedStartOffset;
-		if (!expectedSequenceMatches || !expectedOffsetMatches) {
+			const expectedOffsetMatches = session.next_raw_offset === expectedStartOffset;
+			if (!expectedSequenceMatches || !expectedOffsetMatches) {
 				throw new CanonicalCaptureConflictError("append sequence or offset does not match durable session state", {
 					captureId,
 					sessionId,
-					expectedSequence: sequence,
-					actualSequence: session.next_chunk_sequence,
-					expectedStartOffset,
-					actualStartOffset: session.next_raw_offset
+					expectedSequence: session.next_chunk_sequence,
+					actualSequence: sequence,
+					expectedStartOffset: session.next_raw_offset,
+					actualStartOffset: expectedStartOffset
 				});
 			}
 
@@ -1439,17 +1619,267 @@ export class CanonicalCaptureCommandService {
 				payloadHash,
 				acceptedStartOffset,
 				acceptedEndOffset,
-				nextRawOffset,
-				nextSequence,
-				dataRevision: nextDataRevision,
-				idempotent: false
+					nextRawOffset,
+					nextSequence,
+					dataRevision: nextDataRevision
 			} satisfies AppendChunkResponse;
 		});
 		return transaction() as AppendChunkResponse;
 	}
 
-	finalizeSession(_request: FinalizeSessionRequest): FinalizeSessionResponse {
-		throw new Error("CanonicalCaptureCommandService.finalizeSession is not implemented");
+	finalizeSession(request: FinalizeSessionRequest): FinalizeSessionResponse {
+		const captureId = requiredString(request.captureId, "captureId");
+		const sessionId = requiredString(request.sessionId, "sessionId");
+		const expectedDataRevision = request.expectedDataRevision === undefined
+			? undefined
+			: nonNegativeInteger(request.expectedDataRevision, "expectedDataRevision");
+		const preparation = this.database.transaction(() => {
+			const capture = this.database
+				.prepare("SELECT data_revision, retained_start_offset FROM captures WHERE id = @captureId")
+				.get({ captureId }) as { data_revision: number; retained_start_offset: number } | undefined;
+			if (!capture) throw new CanonicalCaptureNotFoundError(captureId);
+			this.requireCanonicalStorage(captureId);
+			if (expectedDataRevision !== undefined && expectedDataRevision !== capture.data_revision) {
+				throw new CanonicalCaptureConflictError("data revision does not match", {
+					captureId,
+					expectedDataRevision,
+					actualDataRevision: capture.data_revision
+				});
+			}
+			const session = this.database
+				.prepare(
+					"SELECT status, next_chunk_sequence, next_raw_offset FROM capture_sessions WHERE capture_id = @captureId AND id = @sessionId"
+				)
+				.get({ captureId, sessionId }) as
+				| { status: string; next_chunk_sequence: number; next_raw_offset: number }
+				| undefined;
+			if (!session) throw new CanonicalCaptureNotFoundError(`session ${sessionId} in capture ${captureId}`);
+			if (session.status === "finalized") {
+				const completed = this.database
+					.prepare(
+						`SELECT id, profile_id FROM finalization_jobs
+						 WHERE capture_id = @captureId AND session_id = @sessionId AND status = 'completed' AND verified = 1
+						 ORDER BY updated_at DESC LIMIT 1`
+					)
+					.get({ captureId, sessionId }) as { id: string; profile_id: string | null } | undefined;
+				if (!completed?.profile_id) {
+					throw new CanonicalCaptureConflictError("session is already finalized without a verified finalization job", { captureId, sessionId });
+				}
+				const profile = this.database
+					.prepare("SELECT version FROM framing_profiles WHERE id = @profileId")
+					.get({ profileId: completed.profile_id }) as { version: number } | undefined;
+				if (!profile) throw new CanonicalCaptureConflictError("completed finalization profile is missing", { captureId, sessionId });
+				return {
+					captureId,
+					sessionId,
+					dataRevision: capture.data_revision,
+					retainedStartOffset: capture.retained_start_offset,
+					profileId: completed.profile_id,
+					profileVersion: profile.version,
+					jobId: completed.id,
+					idempotent: true
+				};
+			}
+			if (!["recording", "stopped", "failed", "finalizing"].includes(session.status)) {
+				throw new CanonicalCaptureConflictError("session cannot be finalized from its current state", { captureId, sessionId, status: session.status });
+			}
+			this.assertSessionAppendCompleteness(captureId, sessionId, session);
+			const profileVersionRow = this.database
+				.prepare("SELECT COALESCE(MAX(version), 0) AS version FROM framing_profiles WHERE capture_id = @captureId")
+				.get({ captureId }) as { version: number };
+			const profileVersion = profileVersionRow.version + 1;
+			const profileId = requiredString(this.generateId(), "profileId");
+			const now = this.nowIso();
+			const existingJob = this.database
+				.prepare(
+					`SELECT id, status, profile_id
+					 FROM finalization_jobs
+					 WHERE capture_id = @captureId AND session_id = @sessionId
+					   AND source_data_revision = @sourceDataRevision
+					 ORDER BY updated_at DESC LIMIT 1`
+				)
+				.get({ captureId, sessionId, sourceDataRevision: capture.data_revision }) as
+				| { id: string; status: string; profile_id: string | null }
+				| undefined;
+			const jobId = existingJob?.id ?? requiredString(this.generateId(), "finalizationJobId");
+			if (existingJob) {
+				if (existingJob.status === "completed" && existingJob.profile_id) {
+					const profile = this.database
+						.prepare("SELECT version, verified FROM framing_profiles WHERE id = @profileId")
+						.get({ profileId: existingJob.profile_id }) as { version: number; verified: number } | undefined;
+					if (profile?.verified) {
+						return {
+							captureId,
+							sessionId,
+							dataRevision: capture.data_revision,
+							retainedStartOffset: capture.retained_start_offset,
+							profileId: existingJob.profile_id,
+							profileVersion: profile.version,
+							jobId,
+							idempotent: true
+						};
+					}
+				}
+				this.database
+					.prepare(
+						`UPDATE finalization_jobs
+						 SET status = 'pending', profile_id = NULL, updated_at = @updatedAt,
+							 error = NULL, verified = 0
+						 WHERE id = @jobId`
+					)
+					.run({ jobId, updatedAt: now });
+			} else {
+				this.database
+					.prepare(
+						`INSERT INTO finalization_jobs
+						 (id, capture_id, session_id, profile_id, source_data_revision, status, created_at, updated_at, error, verified)
+						 VALUES (@id, @captureId, @sessionId, NULL, @sourceDataRevision, 'pending', @createdAt, @updatedAt, NULL, 0)`
+					)
+					.run({ id: jobId, captureId, sessionId, sourceDataRevision: capture.data_revision, createdAt: now, updatedAt: now });
+			}
+			this.database
+				.prepare("UPDATE finalization_jobs SET status = 'running', updated_at = @updatedAt WHERE id = @jobId")
+				.run({ jobId, updatedAt: this.nowIso() });
+			this.database
+				.prepare("UPDATE capture_sessions SET status = 'finalizing', finalized_at = NULL WHERE capture_id = @captureId AND id = @sessionId")
+				.run({ captureId, sessionId });
+			this.database
+				.prepare("UPDATE captures SET lifecycle = 'stopped', updated_at = @updatedAt WHERE id = @captureId")
+				.run({ captureId, updatedAt: this.nowIso() });
+			return {
+				captureId,
+				sessionId,
+				dataRevision: capture.data_revision,
+				retainedStartOffset: capture.retained_start_offset,
+				profileId,
+				profileVersion,
+				jobId,
+				idempotent: false
+			};
+		});
+
+		const prepared = preparation() as {
+			captureId: string;
+			sessionId: string;
+			dataRevision: number;
+			retainedStartOffset: number;
+			profileId: string;
+			profileVersion: number;
+			jobId: string;
+			idempotent: boolean;
+		};
+		if (prepared.idempotent) {
+			return {
+				captureId,
+				session: this.readSession(captureId, sessionId),
+				profileId: prepared.profileId,
+				profileVersion: prepared.profileVersion,
+				dataRevision: prepared.dataRevision,
+				retainedStartOffset: prepared.retainedStartOffset,
+				job: this.readFinalizationJob(prepared.jobId),
+				idempotent: true
+			};
+		}
+
+		try {
+			const stream = this.readRawStream(captureId, prepared.retainedStartOffset);
+			const sections = this.readFramingSections(captureId, prepared.retainedStartOffset, stream);
+			const materialization = buildCanonicalMaterialization(stream, sections, { generateId: this.generateId });
+			const activation = this.database.transaction(() => {
+				const capture = this.database
+					.prepare("SELECT data_revision, retained_start_offset FROM captures WHERE id = @captureId")
+					.get({ captureId }) as { data_revision: number; retained_start_offset: number } | undefined;
+				if (!capture) throw new CanonicalCaptureNotFoundError(captureId);
+				this.requireCanonicalStorage(captureId);
+				if (capture.data_revision !== prepared.dataRevision || capture.retained_start_offset !== prepared.retainedStartOffset) {
+					throw new CanonicalCaptureConflictError("capture changed while finalization was materializing", {
+						captureId,
+						sourceDataRevision: prepared.dataRevision,
+						actualDataRevision: capture.data_revision,
+						sourceRetainedStartOffset: prepared.retainedStartOffset,
+						actualRetainedStartOffset: capture.retained_start_offset
+					});
+				}
+				const session = this.database
+					.prepare("SELECT status FROM capture_sessions WHERE capture_id = @captureId AND id = @sessionId")
+					.get({ captureId, sessionId }) as { status: string } | undefined;
+				if (!session || session.status !== "finalizing") throw new CanonicalCaptureConflictError("session is no longer finalizing", { captureId, sessionId });
+				const now = this.nowIso();
+				this.database
+					.prepare(
+						`INSERT INTO framing_profiles
+						 (id, capture_id, version, algorithm_version, is_active, created_at, updated_at,
+						  source_data_revision, retained_start_offset, verified)
+						 VALUES (@id, @captureId, @version, 1, 0, @createdAt, @updatedAt,
+						  @sourceDataRevision, @retainedStartOffset, 0)`
+					)
+					.run({
+						id: prepared.profileId,
+						captureId,
+						version: prepared.profileVersion,
+						createdAt: now,
+						updatedAt: now,
+						sourceDataRevision: prepared.dataRevision,
+						retainedStartOffset: prepared.retainedStartOffset
+					});
+				persistCanonicalMaterializationRows(this.database, captureId, prepared.profileId, prepared.profileVersion, materialization, this.generateId);
+				const verification = verifyCanonicalMaterializationRows(this.database, prepared.profileId, materialization);
+				if (!verification.ok) throw new CanonicalCaptureCommandError("STORAGE_ERROR", verification.details || "canonical materialization verification failed", { captureId });
+				this.database
+					.prepare("UPDATE framing_profiles SET verified = 1, updated_at = @updatedAt WHERE id = @profileId")
+					.run({ profileId: prepared.profileId, updatedAt: now });
+				this.database.prepare("UPDATE framing_profiles SET is_active = 0 WHERE capture_id = @captureId").run({ captureId });
+				this.database.prepare("UPDATE framing_profiles SET is_active = 1 WHERE id = @profileId").run({ profileId: prepared.profileId });
+				this.database
+					.prepare("UPDATE captures SET active_framing_profile_id = @profileId, lifecycle = 'finalized', updated_at = @updatedAt WHERE id = @captureId")
+					.run({ captureId, profileId: prepared.profileId, updatedAt: now });
+				this.database
+					.prepare("UPDATE capture_sessions SET status = 'finalized', finalized_at = @finalizedAt WHERE capture_id = @captureId AND id = @sessionId")
+					.run({ captureId, sessionId, finalizedAt: now });
+				this.database
+					.prepare(
+						"UPDATE finalization_jobs SET status = 'completed', profile_id = @profileId, updated_at = @updatedAt, error = NULL, verified = 1 WHERE id = @jobId"
+					)
+					.run({ jobId: prepared.jobId, profileId: prepared.profileId, updatedAt: now });
+				this.database
+					.prepare("UPDATE capture_storage SET status = @status, updated_at = @updatedAt, last_error = NULL WHERE capture_id = @captureId")
+					.run({ captureId, status: CANONICAL_STORAGE_STATUS, updatedAt: now });
+			});
+			activation();
+			return {
+				captureId,
+				session: this.readSession(captureId, sessionId),
+				profileId: prepared.profileId,
+				profileVersion: prepared.profileVersion,
+				dataRevision: prepared.dataRevision,
+				retainedStartOffset: prepared.retainedStartOffset,
+				job: this.readFinalizationJob(prepared.jobId),
+				idempotent: false
+			};
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const markFailed = this.database.transaction(() => {
+				this.database
+					.prepare("UPDATE finalization_jobs SET status = 'failed', updated_at = @updatedAt, error = @error, verified = 0 WHERE id = @jobId")
+					.run({ jobId: prepared.jobId, updatedAt: this.nowIso(), error: message });
+				this.database
+					.prepare("UPDATE capture_sessions SET status = 'failed' WHERE capture_id = @captureId AND id = @sessionId")
+					.run({ captureId, sessionId });
+				this.database
+					.prepare("UPDATE captures SET lifecycle = 'stopped', updated_at = @updatedAt WHERE id = @captureId")
+					.run({ captureId, updatedAt: this.nowIso() });
+				this.database
+					.prepare("UPDATE capture_storage SET updated_at = @updatedAt, last_error = @error WHERE capture_id = @captureId")
+					.run({ captureId, updatedAt: this.nowIso(), error: message });
+			});
+			try {
+				markFailed();
+			} catch {
+				// Preserve the original materialization error if failure bookkeeping is unavailable.
+			}
+			if (error instanceof CanonicalCaptureCommandError) throw error;
+			throw new CanonicalCaptureCommandError("STORAGE_ERROR", message, { captureId, sessionId });
+		}
 	}
 
 	updateFramingDraft(_request: UpdateFramingDraftRequest): UpdateFramingDraftResponse {
