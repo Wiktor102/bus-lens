@@ -2379,6 +2379,14 @@ tr:hover .row-action,
 	gap: 8px;
 }
 
+.retained-tail-notice {
+	padding: 8px 14px;
+	border-bottom: 1px solid var(--border);
+	background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+	color: var(--text-muted);
+	font-size: 0.82rem;
+}
+
 @media (max-width: 900px) {
 	.capture-title-row {
 		align-items: flex-start;

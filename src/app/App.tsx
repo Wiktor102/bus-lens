@@ -364,6 +364,12 @@ function StreamPanel({ viewState, dispatchViewState, messageFilterRef, messageFi
 			id="streamPanel"
 			className={`tab-panel ${viewState.activePanel === "stream" ? "active" : ""}`.trim()}
 		>
+			{messageStream.retainedTail ? (
+				<div className="retained-tail-notice" role="status">
+					Displaying newest 50,000 bytes. Earlier acknowledged bytes remain durably stored
+					{messageStream.durableByteCount > 50_000 ? ` (${messageStream.durableByteCount.toLocaleString()} total).` : "."}
+				</div>
+			) : null}
 			<div id="streamFilter" className={`stream-filter ${viewState.filterOpen ? "" : "collapsed"}`.trim()}>
 				<label>
 					<span>⌕</span>
