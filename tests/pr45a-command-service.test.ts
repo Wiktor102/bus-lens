@@ -101,3 +101,44 @@ test("canonical creation is idempotent by stable request hash and stores ordered
 		database.close();
 	}
 });
+
+test("metadata patches increment only metadata revision and replace parameters in order", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		const service = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-09T00:00:00.000Z" });
+		const created = service.createCapture({ captureId: "metadata-capture", name: "Before", parameters: [{ key: "one", value: "1" }] });
+		const updated = service.patchMetadata({
+			captureId: created.captureId,
+			expectedMetadataRevision: 0,
+			patch: {
+				name: "After",
+				description: "Updated description",
+				controllerView: "controller",
+				baudRate: 9600,
+				inputFormat: "ascii",
+				parameters: [
+					{ key: "two", value: "2" },
+					{ key: "one", value: "changed" }
+				]
+			}
+		});
+		assert.equal(updated.metadataRevision, 1);
+		assert.equal(updated.dataRevision, 0);
+		assert.equal(updated.contentRevision, 0);
+		assert.equal(updated.name, "After");
+		assert.equal(updated.description, "Updated description");
+		assert.equal(updated.controllerView, "controller");
+		assert.equal(updated.baudRate, 9600);
+		assert.deepEqual(updated.parameters, [
+			{ key: "two", value: "2" },
+			{ key: "one", value: "changed" }
+		]);
+		assert.throws(
+			() => service.patchMetadata({ captureId: created.captureId, expectedMetadataRevision: 0, patch: { name: "stale" } }),
+			(error: unknown) => error instanceof Error && "details" in error && (error as { details: { actualMetadataRevision?: number } }).details.actualMetadataRevision === 1
+		);
+	} finally {
+		database.close();
+	}
+});

@@ -810,7 +810,84 @@ export class CanonicalCaptureCommandService {
 	}
 
 	patchMetadata(_request: PatchMetadataRequest): CaptureState {
-		throw new Error("CanonicalCaptureCommandService.patchMetadata is not implemented");
+		const captureId = requiredString(_request.captureId, "captureId");
+		if (!isRecord(_request.patch)) throw new CanonicalCaptureValidationError("metadata patch must be an object");
+		const patch = _request.patch;
+		const expectedRevision = _request.expectedMetadataRevision === undefined
+			? undefined
+			: nonNegativeInteger(_request.expectedMetadataRevision, "expectedMetadataRevision");
+		const transaction = this.database.transaction(() => {
+			const row = this.database
+				.prepare(
+					"SELECT name, description, controller_view, baud_rate, input_format, folder_id, metadata_revision FROM captures WHERE id = @captureId"
+				)
+				.get({ captureId }) as
+				| {
+						name: string;
+						description: string;
+						controller_view: string;
+						baud_rate: number | null;
+						input_format: string;
+						folder_id: string | null;
+						metadata_revision: number;
+					}
+				| undefined;
+			if (!row) throw new CanonicalCaptureNotFoundError(captureId);
+			const storage = this.database
+				.prepare("SELECT status FROM capture_storage WHERE capture_id = @captureId")
+				.get({ captureId }) as { status: string } | undefined;
+			if (!storage) throw new CanonicalCaptureConflictError("capture storage status is not explicit", { captureId });
+			if (expectedRevision !== undefined && row.metadata_revision !== expectedRevision) {
+				throw new CanonicalCaptureConflictError("metadata revision does not match", {
+					captureId,
+					expectedMetadataRevision: expectedRevision,
+					actualMetadataRevision: row.metadata_revision
+				});
+			}
+
+			const values: Record<string, unknown> = {
+				name: row.name,
+				description: row.description,
+				controllerView: row.controller_view,
+				baudRate: row.baud_rate,
+				inputFormat: row.input_format,
+				folderId: row.folder_id
+			};
+			if (Object.prototype.hasOwnProperty.call(patch, "name")) values.name = String(patch.name ?? "");
+		if (Object.prototype.hasOwnProperty.call(patch, "description")) values.description = String(patch.description ?? "");
+		if (Object.prototype.hasOwnProperty.call(patch, "controllerView") || Object.prototype.hasOwnProperty.call(patch, "view")) {
+			values.controllerView = String(patch.controllerView ?? patch.view ?? "");
+		}
+		if (Object.prototype.hasOwnProperty.call(patch, "baudRate")) values.baudRate = optionalPositiveNumber(patch.baudRate, "baudRate");
+		if (Object.prototype.hasOwnProperty.call(patch, "inputFormat")) values.inputFormat = String(patch.inputFormat ?? "");
+		if (Object.prototype.hasOwnProperty.call(patch, "folderId")) values.folderId = optionalString(patch.folderId);
+
+		this.database
+			.prepare(
+				`UPDATE captures
+				 SET name = @name, description = @description, controller_view = @controllerView,
+					 baud_rate = @baudRate, input_format = @inputFormat, folder_id = @folderId,
+					 metadata_revision = metadata_revision + 1, updated_at = @updatedAt
+				 WHERE id = @captureId`
+			)
+			.run({ ...values, captureId, updatedAt: this.nowIso() });
+
+		if (Object.prototype.hasOwnProperty.call(patch, "parameters")) {
+			const parameters = normalizedParameters(patch.parameters);
+			this.database.prepare("DELETE FROM capture_parameters WHERE capture_id = @captureId").run({ captureId });
+			const insertParameter = this.database.prepare(
+				"INSERT INTO capture_parameters (capture_id, position, key_text, value_text) VALUES (@captureId, @position, @keyText, @valueText)"
+			);
+			parameters.forEach((parameter, position) =>
+				insertParameter.run({ captureId, position, keyText: parameter.key, valueText: parameter.value })
+			);
+		}
+		this.database
+			.prepare("UPDATE capture_storage SET updated_at = @updatedAt WHERE capture_id = @captureId")
+			.run({ captureId, updatedAt: this.nowIso() });
+		});
+		transaction();
+		return this.getCaptureState(captureId);
 	}
 
 	startSession(_request: StartSessionRequest): StartSessionResponse {
