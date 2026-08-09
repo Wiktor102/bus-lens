@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createCaptureController } from "../src/features/capture/capture-controller.ts";
+import { createAppRuntime } from "../src/app/app-runtime.ts";
 import type { Capture } from "../src/features/capture/capture-framing.ts";
 import type { CaptureWriter } from "../src/persistence/archive-client.ts";
 import type { AppState } from "../src/shared/app-state.ts";
@@ -82,4 +83,70 @@ test("canonical optimistic mutations route through dedicated commands", async ()
 	assert.equal(capture.notes?.[0]?.id, "stable-note");
 	assert.equal(capture.activeFramingProfileId, "profile-2");
 	assert.deepEqual(capture.byteStream, []);
+});
+
+test("new capture creation uses runtime bookkeeping and does not replay the create", async () => {
+	const originalFetch = globalThis.fetch;
+	const requests: Array<{ path: string; method: string; body?: unknown }> = [];
+	globalThis.fetch = async (input, init) => {
+		const path = String(input);
+		requests.push({
+			path,
+			method: init?.method || "GET",
+			body: init?.body ? JSON.parse(String(init.body)) : undefined
+		});
+		if (path.endsWith("/health")) return new Response(null, { status: 204 });
+		if (path.endsWith("/archive")) {
+			return new Response(JSON.stringify({ captures: [], folders: [], index: { activeId: null, unfiledCollapsed: false }, queue: [], history: [], settings: {} }), { status: 200 });
+		}
+		if (path.endsWith("/canonical/captures")) return new Response(JSON.stringify([]), { status: 200 });
+		if (path.endsWith("/captures") && (init?.method || "GET") === "POST") return new Response(JSON.stringify({}), { status: 201 });
+		return new Response(null, { status: 204 });
+	};
+
+	try {
+		const runtime = createAppRuntime();
+		await runtime.ready;
+		runtime.state.captures = [];
+		runtime.setActiveId(null);
+		const controller = createCaptureController({
+			state: runtime.state,
+			capture: runtime.capture,
+			getActiveId: runtime.getActiveId,
+			setActiveId: runtime.setActiveId,
+			saveState: runtime.saveState,
+			render: () => {},
+			renderMessages: () => {},
+			showToast: () => {},
+			confirm: () => true,
+			transport: { isRecording: () => false, stopRecording: async () => {} },
+			publishArchiveState: () => {},
+			publishCaptureHeaderState: () => {},
+			publishNotesState: () => {},
+			publishDialogCommand: () => {},
+			captureWriter: runtime.captureWriter,
+			isCanonicalCapture: runtime.isCanonicalCapture
+		});
+
+		assert.equal(controller.commitContextDraft({
+			mode: "new",
+			captureId: null,
+			draft: { name: "Created", view: "Main", folderId: "", baudRate: "115200", parameters: [] }
+		}), true);
+
+		const captureId = String(runtime.state.captures[0]?.id);
+		await runtime.waitForCaptureWrite(captureId);
+		const initialCreates = requests.filter(request => request.path === "/api/captures" && request.method === "POST");
+		const initialIndexes = requests.filter(request => request.path === "/api/archive-index" && request.method === "PUT");
+		assert.equal(initialCreates.length, 1);
+		assert.equal(initialIndexes.length, 1);
+		assert.equal((initialIndexes[0]?.body as { activeId?: string } | undefined)?.activeId, captureId);
+		assert.deepEqual((initialIndexes[0]?.body as { activeId?: string; captures?: unknown[] } | undefined)?.captures, [{ id: captureId, folderId: null, position: 0 }]);
+
+		runtime.saveState({ immediate: true });
+		await runtime.waitForCaptureWrite(captureId);
+		assert.equal(requests.filter(request => request.path === "/api/captures" && request.method === "POST").length, 1);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
 });
