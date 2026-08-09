@@ -189,7 +189,7 @@ function CaptureHeader() {
 					<span title="Received raw bytes only; transmitted bytes are excluded" aria-label="Captured: received raw bytes only; transmitted bytes are excluded">Captured <strong id="statCapturedBytes">{snapshot.summary.capturedBytes}</strong></span>
 				</div>
 				<div ref={actionsRef} className="header-actions">
-					<button id="editContextBtn" className="btn btn-secondary" type="button" disabled={!snapshot.hasCapture} onClick={actions.openContext}>
+					<button id="editContextBtn" className="btn btn-secondary" type="button" disabled={!snapshot.hasCapture} onClick={() => actions.openContext()}>
 						Edit context
 					</button>
 					<button
