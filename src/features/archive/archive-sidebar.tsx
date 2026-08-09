@@ -25,32 +25,47 @@ type CaptureContextMenuState = {
 	origin: HTMLElement;
 };
 
+type FolderContextMenuState = {
+	folderId: string;
+	clientX: number;
+	clientY: number;
+	origin: HTMLElement;
+};
+
 function FolderGroup({
 	group,
 	searching,
 	activeId,
+	folderContextMenuOpen,
 	onToggle,
-	onRename,
-	onDelete,
 	onSelect,
-	onContextMenu,
+	onCaptureContextMenu,
+	onFolderContextMenu,
 	contextMenuCaptureId
 }: {
 	group: ArchiveGroup;
 	searching: boolean;
 	activeId: string | null | undefined;
+	folderContextMenuOpen: boolean;
 	onToggle: (folderId: string | null) => void;
-	onRename: (folderId: string) => void;
-	onDelete: (folderId: string) => void;
 	onSelect: (captureId: string) => void;
-	onContextMenu: (event: ReactMouseEvent<HTMLDivElement>, captureId: string) => void;
+	onCaptureContextMenu: (event: ReactMouseEvent<HTMLDivElement>, captureId: string) => void;
+	onFolderContextMenu: (event: ReactMouseEvent<HTMLElement>, folderId: string) => void;
 	contextMenuCaptureId: string | null;
 }) {
 	const collapsed = group.collapsed && !searching;
 
 	return (
-		<section className={`capture-folder ${collapsed ? "collapsed" : ""}`} data-folder-id={group.id}>
-			<header className="folder-header">
+		<section
+			className={`capture-folder ${collapsed ? "collapsed" : ""} ${folderContextMenuOpen ? "context-menu-open" : ""}`.trim()}
+			data-folder-id={group.id}
+		>
+			<header
+				className="folder-header"
+				onContextMenu={event => {
+					if (!group.system) onFolderContextMenu(event, group.id);
+				}}
+			>
 				<button
 					className="folder-toggle"
 					type="button"
@@ -64,30 +79,6 @@ function FolderGroup({
 					<strong>{group.name}</strong>
 					<small>{group.captures.length}</small>
 				</button>
-				{group.system ? (
-					<span className="folder-actions folder-actions-placeholder" aria-hidden="true" />
-				) : (
-					<span className="folder-actions">
-						<button
-							type="button"
-							data-folder-rename={group.id}
-							title="Rename folder"
-							aria-label={`Rename ${group.name}`}
-							onClick={() => onRename(group.id)}
-						>
-							✎
-						</button>
-						<button
-							type="button"
-							data-folder-delete={group.id}
-							title="Delete folder"
-							aria-label={`Delete ${group.name}`}
-							onClick={() => onDelete(group.id)}
-						>
-							×
-						</button>
-					</span>
-				)}
 			</header>
 			<div className="folder-captures">
 				{group.captures.length ? (
@@ -98,7 +89,7 @@ function FolderGroup({
 							active={capture.id === activeId}
 							contextMenuOpen={capture.id === contextMenuCaptureId}
 							onSelect={onSelect}
-							onContextMenu={event => onContextMenu(event, capture.id)}
+							onContextMenu={event => onCaptureContextMenu(event, capture.id)}
 						/>
 					))
 				) : (
@@ -153,6 +144,7 @@ export function ArchiveSidebar() {
 	const [folderDialogId, setFolderDialogId] = useState<string | null | undefined>(undefined);
 	const [folderMoveCaptureId, setFolderMoveCaptureId] = useState<string | null>(null);
 	const [captureMenuState, setCaptureMenuState] = useState<CaptureContextMenuState | null>(null);
+	const [folderMenuState, setFolderMenuState] = useState<FolderContextMenuState | null>(null);
 	const openNewFolder = useCallback((captureId: string | null = null) => {
 		setFolderMoveCaptureId(captureId);
 		setFolderDialogId(null);
@@ -163,6 +155,12 @@ export function ArchiveSidebar() {
 	}, [actions, folderMoveCaptureId]);
 	const closeCaptureMenu = useCallback((restoreFocus = false) => {
 		setCaptureMenuState(current => {
+			if (restoreFocus && current?.origin.isConnected) current.origin.focus();
+			return null;
+		});
+	}, []);
+	const closeFolderMenu = useCallback((restoreFocus = false) => {
+		setFolderMenuState(current => {
 			if (restoreFocus && current?.origin.isConnected) current.origin.focus();
 			return null;
 		});
@@ -222,15 +220,26 @@ export function ArchiveSidebar() {
 							group={group}
 							searching={archive.searching}
 							activeId={snapshot.activeId}
+							folderContextMenuOpen={group.id !== "" && folderMenuState?.folderId === group.id}
 							contextMenuCaptureId={captureMenuState?.captureId ?? null}
 							onToggle={actions.toggleFolder}
-							onRename={folderId => setFolderDialogId(folderId)}
-							onDelete={actions.deleteFolder}
 							onSelect={actions.selectCapture}
-							onContextMenu={(event, captureId) => {
+							onCaptureContextMenu={(event, captureId) => {
 								event.preventDefault();
+								closeFolderMenu();
 								setCaptureMenuState({
 									captureId,
+									clientX: event.clientX,
+									clientY: event.clientY,
+									origin:
+										(event.target instanceof Element ? event.target.closest("button") : null) || event.currentTarget
+								});
+							}}
+							onFolderContextMenu={(event, folderId) => {
+								event.preventDefault();
+								closeCaptureMenu();
+								setFolderMenuState({
+									folderId,
 									clientX: event.clientX,
 									clientY: event.clientY,
 									origin:
@@ -285,7 +294,116 @@ export function ArchiveSidebar() {
 				onClose={closeCaptureMenu}
 				onCreateFolder={captureId => openNewFolder(captureId)}
 			/>
+			<FolderContextMenu
+				state={folderMenuState}
+				onClose={closeFolderMenu}
+				onRename={folderId => setFolderDialogId(folderId)}
+				onDelete={actions.deleteFolder}
+			/>
 		</>
+	);
+}
+
+function FolderContextMenu({
+	state,
+	onClose,
+	onRename,
+	onDelete
+}: {
+	state: FolderContextMenuState | null;
+	onClose: (restoreFocus?: boolean) => void;
+	onRename: (folderId: string) => void;
+	onDelete: (folderId: string) => void;
+}) {
+	const snapshot = useSyncExternalStore(subscribeToArchive, getArchiveSnapshot, getArchiveSnapshot);
+	const menuRef = useRef<HTMLDivElement>(null);
+	const positionRef = useRef({ left: 10, top: 10 });
+	const [position, setPosition] = useState({ left: 10, top: 10 });
+	positionRef.current = position;
+
+	const folder = state ? snapshot.folders.find(item => item.id === state.folderId) : undefined;
+
+	useLayoutEffect(() => {
+		if (!state || !menuRef.current) return;
+		const edge = 10;
+		const bounds = menuRef.current.getBoundingClientRect();
+		const next = {
+			left: Math.max(edge, Math.min(state.clientX, window.innerWidth - bounds.width - edge)),
+			top: Math.max(edge, Math.min(state.clientY, window.innerHeight - bounds.height - edge))
+		};
+		if (next.left !== positionRef.current.left || next.top !== positionRef.current.top) setPosition(next);
+	}, [state]);
+
+	useEffect(() => {
+		if (!state) return;
+		const closeOnOutsideClick = (event: MouseEvent) => {
+			if (!menuRef.current?.contains(event.target as Node)) onClose();
+		};
+		const closeOnEscape = (event: KeyboardEvent) => {
+			if (event.key === "Escape") onClose(true);
+		};
+		const closeOnOutsideContextMenu = (event: MouseEvent) => {
+			const target = event.target instanceof Element ? event.target : null;
+			if (!target?.closest("#folderContextMenu, #captureList")) onClose();
+		};
+		const closeOnResize = () => onClose();
+		document.addEventListener("click", closeOnOutsideClick);
+		document.addEventListener("contextmenu", closeOnOutsideContextMenu);
+		document.addEventListener("keydown", closeOnEscape);
+		window.addEventListener("resize", closeOnResize);
+		return () => {
+			document.removeEventListener("click", closeOnOutsideClick);
+			document.removeEventListener("contextmenu", closeOnOutsideContextMenu);
+			document.removeEventListener("keydown", closeOnEscape);
+			window.removeEventListener("resize", closeOnResize);
+		};
+	}, [onClose, state]);
+
+	return (
+		<div
+			id="folderContextMenu"
+			ref={menuRef}
+			onContextMenu={event => event.preventDefault()}
+			className={`message-context-menu folder-context-menu ${state && folder ? "" : "hidden"}`.trim()}
+			data-folder-id={state?.folderId}
+			style={{ left: position.left, top: position.top }}
+			role="menu"
+			aria-label="Folder actions"
+			aria-hidden={state && folder ? "false" : "true"}
+		>
+			<button
+				type="button"
+				role="menuitem"
+				data-context-action="rename"
+				onClick={() => {
+					if (!state) return;
+					onClose();
+					onRename(state.folderId);
+				}}
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="m5 16.5-.75 3.25 3.25-.75L18.75 7.75a2.12 2.12 0 0 0-3-3L5 16.5Z" />
+					<path d="m14.25 6.75 3 3" />
+				</svg>
+				<span>Rename</span>
+			</button>
+			<button
+				type="button"
+				role="menuitem"
+				className="context-delete"
+				data-context-action="delete"
+				onClick={() => {
+					if (!state) return;
+					onClose();
+					onDelete(state.folderId);
+				}}
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M5.5 7.5h13M9.5 7.5V5h5v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5.5M14 11v5.5" />
+				</svg>
+				<span>Delete</span>
+			</button>
+		</div>
 	);
 }
 
