@@ -81,8 +81,9 @@ export type StartSessionRequest = Readonly<{
 }>;
 
 export type StartSessionResponse = Readonly<{
-	captureId: string;
-	session: CaptureSessionState;
+	sessionId: string;
+	nextChunkSequence: number;
+	nextRawOffset: number;
 	dataRevision: number;
 }>;
 
@@ -366,7 +367,7 @@ export type CaptureState = Readonly<{
 
 export type CanonicalCaptureSummary = Readonly<{
 	id: string;
-	status: "canonical" | "legacy-not-canonicalized";
+	status: "canonical" | "legacy-not-canonicalized" | "canonicalization-failed";
 	name: string;
 	lifecycle: string | null;
 	byteCount: number | null;
@@ -503,13 +504,22 @@ export class ArchiveClient implements CaptureWriter {
 		return summaries.filter((summary): summary is CanonicalCaptureSummary => {
 			if (!summary || typeof summary !== "object") return false;
 			const value = summary as Record<string, unknown>;
-			return typeof value.id === "string" && (value.status === "canonical" || value.status === "legacy-not-canonicalized");
+			return typeof value.id === "string" && (
+				value.status === "canonical" ||
+				value.status === "legacy-not-canonicalized" ||
+				value.status === "canonicalization-failed"
+			);
 		});
 	}
 
 	/** Persist a legacy JSON capture only while its server storage is unconverted. */
 	async saveLegacyCaptureDocument(capture: Capture): Promise<void> {
 		await request(capturePath(String(capture.id)), { method: "PUT", ...requestBody(capture) });
+	}
+
+	async loadCapture(captureId: string): Promise<Capture> {
+		const record = await request<{ id?: string; document: Capture }>(capturePath(captureId));
+		return documentWithId(record);
 	}
 
 	async saveFolder(folder: StoredFolder): Promise<void> { await request(`/folders/${encodeURIComponent(folder.id)}`, { method: "PUT", ...requestBody(folder) }); }

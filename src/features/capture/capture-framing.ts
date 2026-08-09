@@ -96,6 +96,14 @@ export type Capture = Omit<CaptureSummaryData, "notes"> & {
 	frameSections?: CaptureSection[];
 	/** The next unassigned absolute raw offset. */
 	nextRawOffset?: number;
+	storageStatus?: "legacy-not-canonicalized" | "canonical" | "canonicalization-failed";
+	lifecycle?: string;
+	dataRevision?: number;
+	metadataRevision?: number;
+	contentRevision?: number;
+	retainedStartOffset?: number;
+	activeFramingProfileId?: string | null;
+	isRetainedTail?: boolean;
 };
 
 export type PreviewByteRecord = RawByteRecord & { rawPosition: number };

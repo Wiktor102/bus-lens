@@ -49,7 +49,19 @@ export function initializeController(): ControllerLifecycle {
 		renderMessages: snapshots.renderMessages,
 		isPatternsPanelActive: () => getViewStateSnapshot().activePanel === "patterns",
 		stopSendQueue: () => sendController?.stopSendQueue(),
-		publishSendState: snapshots.publishSendState
+		publishSendState: snapshots.publishSendState,
+		isCanonicalCapture: runtime.isCanonicalCapture,
+		recordingWriter: runtime.captureWriter ? {
+			startSession: async (captureId, sessionId) => {
+				if (!await runtime.ensureCanonicalCapture(captureId)) throw new Error("capture is not canonical");
+				await runtime.waitForCaptureWrite(captureId);
+				return runtime.captureWriter!.startSession({ captureId, sessionId });
+			},
+			appendChunk: request => runtime.captureWriter!.appendChunk(request),
+			finalizeSession: (captureId, sessionId, expectedDataRevision) =>
+				runtime.captureWriter!.finalizeSession({ captureId, sessionId, expectedDataRevision }),
+			refreshCapture: runtime.refreshCapture
+		} : undefined
 	});
 
 	sendController = createSendController({
