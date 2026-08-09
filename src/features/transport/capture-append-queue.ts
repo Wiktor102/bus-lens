@@ -65,11 +65,15 @@ export class CaptureAppendQueue {
 	private readonly states = new Map<string, CaptureQueueState>();
 	private readonly generateRequestId: () => string;
 	private readonly backpressureBytes: number;
+	private readonly transport: CaptureAppendTransport;
+	private readonly options: CaptureAppendQueueOptions;
 
 	constructor(
-		private readonly transport: CaptureAppendTransport,
-		private readonly options: CaptureAppendQueueOptions = {}
+		transport: CaptureAppendTransport,
+		options: CaptureAppendQueueOptions = {}
 	) {
+		this.transport = transport;
+		this.options = options;
 		this.generateRequestId = options.generateRequestId ?? (() => crypto.randomUUID());
 		this.backpressureBytes = options.backpressureBytes ?? 32_768;
 	}
