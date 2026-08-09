@@ -249,14 +249,15 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	}
 
 	function publishContextDialog(isNew = false) {
-		const c = isNew
+		const creatingNewCapture = isNew === true;
+		const c = creatingNewCapture
 			? { name: "Untitled capture", view: "", params: [], baudRate: 115200, folderId: null, id: null }
 			: capture();
 		if (!c) return;
 		dependencies.publishDialogCommand({
 			type: "context",
-			mode: isNew ? "new" : "edit",
-			captureId: isNew ? null : String(c.id),
+			mode: creatingNewCapture ? "new" : "edit",
+			captureId: creatingNewCapture ? null : String(c.id),
 			name: String(c.name ?? "Untitled capture"),
 			view: String(c.view ?? ""),
 			folderId: c.folderId ? String(c.folderId) : null,
