@@ -48,6 +48,7 @@ export type SerialControllerDependencies = {
 		finalizeSession: (captureId: string, sessionId: string, expectedDataRevision: number) => Promise<unknown>;
 		refreshCapture?: (captureId: string) => Promise<Capture>;
 	};
+	isCanonicalCapture?: (captureId: string) => boolean;
 	publishPersistenceError?: (error: { captureId: string; message: string } | null) => void;
 };
 
@@ -74,6 +75,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	let recording = false;
 	let recordingSessionId: string | null = null;
 	let recordingCaptureId: string | null = null;
+	let canonicalRecording = false;
 	let readAbort = false;
 	let pendingLiveBytes: PendingLiveByte[] = [];
 	let liveRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -175,7 +177,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			}
 		}
 		capture.nextRawOffset = nextRawOffset;
-		if (captureId && appendQueue && recordingSessionId && captureId === recordingCaptureId) {
+		if (canonicalRecording && captureId && appendQueue && recordingSessionId && captureId === recordingCaptureId) {
 			for (const record of pendingLiveBytes) {
 				appendQueue.enqueue(captureId, {
 					timestamp: record.timestamp,
@@ -190,7 +192,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		pendingLiveBytes = [];
 		const trimmed = trimCapture(capture);
 		rebuildPreview(capture);
-		if (!dependencies.recordingWriter) dependencies.saveState();
+		if (!canonicalRecording) dependencies.saveState();
 		dependencies.publishCaptureHeaderState();
 		dependencies.publishFramingToolbarState(capture);
 		dependencies.renderMessages();
@@ -277,6 +279,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	}
 
 	async function disconnect({ persist = true }: DisconnectOptions = {}) {
+		const hadRecording = Boolean(recording || recordingSessionId);
 		if (!persist) {
 			flushLiveBytes();
 			recording = false;
@@ -285,7 +288,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		} else {
 			flushLiveBytes();
 		}
-		if (persist && !dependencies.recordingWriter) dependencies.saveState({ immediate: true });
+		if (persist && !hadRecording) dependencies.saveState({ immediate: true });
 		readAbort = true;
 		dependencies.stopSendQueue();
 		try {
@@ -307,7 +310,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		recording = false;
 		flushLiveBytes();
 		stopPromise = (async () => {
-			if (captureId && sessionId && appendQueue && dependencies.recordingWriter) {
+			if (canonicalRecording && captureId && sessionId && appendQueue && dependencies.recordingWriter) {
 				await appendQueue.drain(captureId);
 				const boundary = appendQueue.boundary(captureId);
 				await dependencies.recordingWriter.finalizeSession(captureId, sessionId, boundary.dataRevision);
@@ -321,6 +324,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			}
 			recordingSessionId = null;
 			recordingCaptureId = null;
+			canonicalRecording = false;
 			persistenceError = null;
 			dependencies.publishPersistenceError?.(null);
 			dependencies.publishCaptureHeaderState();
@@ -348,7 +352,12 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		const captureId = String(capture.id ?? "");
 		const sessionId = crypto.randomUUID();
 		startPromise = (async () => {
-			if (dependencies.recordingWriter && appendQueue) {
+			canonicalRecording = Boolean(
+				dependencies.recordingWriter &&
+				appendQueue &&
+				(dependencies.isCanonicalCapture?.(captureId) ?? true)
+			);
+			if (canonicalRecording && dependencies.recordingWriter && appendQueue) {
 				const boundary = await dependencies.recordingWriter.startSession(captureId, sessionId);
 				appendQueue.start(captureId, boundary);
 			}
@@ -360,7 +369,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			recording = true;
 			persistenceError = null;
 			dependencies.publishPersistenceError?.(null);
-			if (!dependencies.recordingWriter) dependencies.saveState();
+			if (!canonicalRecording) dependencies.saveState();
 			dependencies.publishCaptureHeaderState();
 			publishState();
 			dependencies.showToast("Capture started");

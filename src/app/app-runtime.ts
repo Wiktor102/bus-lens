@@ -44,6 +44,11 @@ export type AppRuntime = {
 	saveFolder: (folderId: string) => void;
 	saveSendState: () => void;
 	saveSettings: () => void;
+	captureWriter: CaptureWriter | undefined;
+	isCanonicalCapture: (captureId: string) => boolean;
+	ensureCanonicalCapture: (captureId: string) => Promise<boolean>;
+	waitForCaptureWrite: (captureId: string) => Promise<void>;
+	refreshCapture: (captureId: string) => Promise<Capture>;
 };
 
 type PersistedEntityIds = {
@@ -165,6 +170,7 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 	let unloading = false;
 	let persistedIds = emptyPersistedEntityIds();
 	let captureStatuses = new Map<string, CanonicalCaptureSummary["status"]>();
+	let captureStatusesReady = false;
 	const activeCaptureWrites = new Map<string, Promise<unknown>>();
 	const pendingDeletions = emptyPersistedEntityIds();
 	const activeDeletions = {
@@ -200,6 +206,7 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		const isNew = !persistedIds.captures.has(id);
 		let operation: Promise<unknown>;
 		if (isNew) {
+			captureStatuses.set(id, "canonical");
 			operation = writer.createCapture(captureCreateRequest(capture)).then(() => {
 				persistedIds.captures.add(id);
 				captureStatuses.set(id, "canonical");
@@ -214,11 +221,53 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		}
 		const tracked = operation
 			.catch(error => {
-				if (isNew) persistedIds.captures.delete(id);
+				if (isNew) {
+					persistedIds.captures.delete(id);
+					captureStatuses.delete(id);
+				}
 				reportPersistenceFailure(error);
 			})
 			.finally(() => activeCaptureWrites.delete(id));
 		activeCaptureWrites.set(id, tracked);
+	}
+
+	function isCanonicalCapture(captureId: string): boolean {
+		const status = captureStatuses.get(captureId);
+		return status === "canonical" || (captureStatusesReady && status === undefined);
+	}
+
+	async function waitForCaptureWrite(captureId: string): Promise<void> {
+		await activeCaptureWrites.get(captureId);
+	}
+
+	async function ensureCanonicalCapture(captureId: string): Promise<boolean> {
+		const status = captureStatuses.get(captureId);
+		if (status === "legacy-not-canonicalized" || status === "canonicalization-failed") return false;
+		await waitForCaptureWrite(captureId);
+		if (captureStatuses.get(captureId) === "canonical") return true;
+		if (!captureStatusesReady || !writer) return false;
+		const capture = state.captures.find(item => String(item.id) === captureId);
+		if (!capture) return false;
+		captureStatuses.set(captureId, "canonical");
+		const operation = writer.createCapture(captureCreateRequest(capture))
+			.then(() => { persistedIds.captures.add(captureId); })
+			.catch(error => {
+				captureStatuses.delete(captureId);
+				persistedIds.captures.delete(captureId);
+				throw error;
+			})
+			.finally(() => activeCaptureWrites.delete(captureId));
+		activeCaptureWrites.set(captureId, operation);
+		await operation;
+		return true;
+	}
+
+	async function refreshCapture(captureId: string): Promise<Capture> {
+		if (!client) throw new Error("archive client is unavailable");
+		const refreshed = await client.loadCapture(captureId);
+		const index = state.captures.findIndex(capture => String(capture.id) === captureId);
+		if (index >= 0) state.captures[index] = refreshed;
+		return refreshed;
 	}
 	function saveArchiveIndex(): void { if (!unloading && databaseReady && client) void client.saveArchiveIndex(state, activeId).catch(reportPersistenceFailure); }
 	function saveFolder(folderId: string): void { const folder = state.folders.find(item => item.id === folderId); if (!unloading && databaseReady && folder && client) void client.saveFolder(folder).catch(reportPersistenceFailure); }
@@ -298,10 +347,12 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		try {
 			const summaries = await client.listCaptureSummaries();
 			captureStatuses = new Map(summaries.map(summary => [summary.id, summary.status]));
+			captureStatusesReady = true;
 		} catch {
 			// A missing status read must fail closed: existing captures use the
 			// explicit legacy method until the server identifies them as canonical.
 			captureStatuses = new Map();
+			captureStatusesReady = false;
 		}
 	}
 
@@ -346,6 +397,11 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		saveFolder,
 		saveSendState,
 		saveSettings,
+		captureWriter: writer,
+		isCanonicalCapture,
+		ensureCanonicalCapture,
+		waitForCaptureWrite,
+		refreshCapture,
 		showToast
 	};
 }
