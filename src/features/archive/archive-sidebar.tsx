@@ -114,6 +114,8 @@ function CaptureItem({
 	onSelect: (captureId: string) => void;
 	onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void;
 }) {
+	const storageStatus = captureStorageUiStatus(capture.storageStatus);
+
 	return (
 		<div
 			className={`capture-item ${active ? "active" : ""} ${contextMenuOpen ? "context-menu-open" : ""}`.trim()}
@@ -122,9 +124,11 @@ function CaptureItem({
 			<button className="capture-open" type="button" data-capture-id={capture.id} onClick={() => onSelect(capture.id)}>
 				<strong className="capture-name-row">
 					{capture.name}
-					<span className={`storage-badge storage-${captureStorageUiStatus(capture.storageStatus)}`} data-storage-status={capture.storageStatus || "legacy-not-canonicalized"}>
-						{captureStorageLabel(captureStorageUiStatus(capture.storageStatus))}
-					</span>
+					{storageStatus === "legacy" || storageStatus === "failed" ? (
+						<span className={`storage-badge storage-${storageStatus}`} data-storage-status={capture.storageStatus || "legacy-not-canonicalized"}>
+							{captureStorageLabel(storageStatus)}
+						</span>
+					) : null}
 				</strong>
 				<small>
 					<span>{capture.view || "Unassigned view"}</span>
