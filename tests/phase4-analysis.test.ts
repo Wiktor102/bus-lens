@@ -87,6 +87,21 @@ test("analysis messages attach each sequence member to its offset frame", () => 
 	}
 });
 
+test("analysis note presence includes byte notes at frame raw-span boundaries", () => {
+	const { database, commands } = seedAnalysisCapture();
+	try {
+		commands.deleteNote({ captureId: "analysis-capture", noteId: "analysis-frame-note" });
+		commands.createNote({ captureId: "analysis-capture", noteId: "analysis-byte-note", text: "inspect this byte", target: { kind: "byte", rawOffset: 0 } });
+		const query = new CanonicalQueryService(database);
+		const withNote = query.queryMessages({ captureId: "analysis-capture", notePresence: "with-note" }).data.messages;
+		assert.deepEqual(withNote.map(message => message.ordinal), [0]);
+		assert.deepEqual(withNote[0]?.noteReferences, ["analysis-byte-note"]);
+		assert.deepEqual(query.queryMessages({ captureId: "analysis-capture", notePresence: "without-note" }).data.messages.map(message => message.ordinal), [1, 2, 3]);
+	} finally {
+		database.close();
+	}
+});
+
 test("analysis groups, occurrences, statistics, transitions, and raw reads remain bounded", () => {
 	const { database, profileId, groupId } = seedAnalysisCapture();
 	try {

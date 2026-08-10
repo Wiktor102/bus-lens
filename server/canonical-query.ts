@@ -1412,6 +1412,7 @@ export class CanonicalQueryService {
 					notes.frame_id = materialized_frames.id
 					OR notes.profile_id = materialized_frames.profile_id AND notes.start_row IS NOT NULL AND notes.end_row IS NOT NULL AND notes.start_row <= materialized_frames.ordinal AND notes.end_row >= materialized_frames.ordinal
 					OR notes.profile_id = materialized_frames.profile_id AND notes.start_offset IS NOT NULL AND notes.end_offset IS NOT NULL AND notes.end_offset >= json_extract(materialized_frames.raw_offsets_json, '$[0]') AND notes.start_offset <= json_extract(materialized_frames.raw_offsets_json, '$[#-1]')
+					OR notes.raw_offset IS NOT NULL AND notes.raw_offset >= json_extract(materialized_frames.raw_offsets_json, '$[0]') AND notes.raw_offset <= json_extract(materialized_frames.raw_offsets_json, '$[#-1]')
 				  )
 			)`;
 			clauses.push(filters.notePresence === "with-note" ? noteExists : `NOT ${noteExists}`);
