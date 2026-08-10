@@ -1420,6 +1420,10 @@ export class CanonicalQueryService {
 		if (filters.sequenceGroupId) {
 			clauses.push(`EXISTS (
 				SELECT 1 FROM sequence_occurrences sequence_membership
+				JOIN sequence_groups sequence_group
+				  ON sequence_group.id = sequence_membership.group_id
+				 AND sequence_group.profile_id = materialized_frames.profile_id
+				 AND sequence_group.capture_id = materialized_frames.capture_id
 				WHERE sequence_membership.group_id = @sequenceGroupId
 				  AND sequence_membership.start_frame_ordinal <= materialized_frames.ordinal
 				  AND sequence_membership.start_frame_ordinal + sequence_membership.length > materialized_frames.ordinal
