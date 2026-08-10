@@ -165,6 +165,36 @@ test("agent overview resolves pattern remarks by key within the selected capture
 	});
 });
 
+test("agent overview derives framed bytes from the selected profile materialization", async () => {
+	await withTemporaryArchive(async directory => {
+		const database = openDatabase(join(directory, "archive.sqlite"), () => "2026-08-10T00:00:00.000Z");
+		const repository = new ArchiveRepository(database, { nowIso: () => "2026-08-10T00:00:00.000Z" });
+		repository.putCapture("framed-bytes", {
+			id: "framed-bytes",
+			name: "Framed bytes",
+			parameters: [],
+			byteStream: [
+				{ rawOffset: 0, value: 0x10, timestamp: 1, direction: "rx" },
+				{ rawOffset: 1, value: 0x20, timestamp: 2, direction: "rx" }
+			],
+			frameSections: [{ id: "length-section", start: 0, framingMode: "length", frameSize: 2 }],
+			messages: [{ id: "framed-message", timestamp: 1, bytes: [0x10, 0x20], rawOffsets: [0, 1], byteTimestamps: [1, 2] }],
+			notes: []
+		});
+		repository.convertCaptureToCanonical("framed-bytes");
+		const queries = new CanonicalQueryService(database);
+		const before = queries.queryCaptureOverview("framed-bytes");
+		assert.deepEqual(before.data.counts, { rawBytes: 2, framedBytes: 2, frames: 1, visibleFrames: 1 });
+
+		repository.createFramingRevision("framed-bytes", [{ start: 0, framingMode: "marker", frameMarker: "AA", markerPosition: "end" }]);
+		const unframed = queries.queryCaptureOverview("framed-bytes");
+		assert.deepEqual(unframed.data.counts, { rawBytes: 2, framedBytes: 0, frames: 0, visibleFrames: 0 });
+		const pinned = queries.queryCaptureOverview("framed-bytes", before.meta.snapshot);
+		assert.deepEqual(pinned.data.counts, { rawBytes: 2, framedBytes: 2, frames: 1, visibleFrames: 1 });
+		repository.close();
+	});
+});
+
 test("large discovery fixtures return bounded pages and use agent ordering indexes", async () => {
 	await withTemporaryArchive(async directory => {
 		const database = openDatabase(join(directory, "archive.sqlite"));

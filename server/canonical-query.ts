@@ -726,6 +726,9 @@ export class CanonicalQueryService {
 		}>;
 		const frameCount = (this.database.prepare("SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId").get({ profileId: profile.id }) as { count: number }).count;
 		const visibleFrames = (this.database.prepare("SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId AND hidden = 0").get({ profileId: profile.id }) as { count: number }).count;
+		const framedBytes = (this.database.prepare(
+			"SELECT COALESCE(SUM(json_array_length(bytes_json)), 0) AS count FROM materialized_frames WHERE profile_id = @profileId"
+		).get({ profileId: profile.id }) as { count: number }).count;
 		const rawBounds = this.database.prepare(
 			"SELECT MIN(start_offset) AS start_offset, MAX(start_offset + byte_count - 1) AS end_offset FROM raw_chunks WHERE capture_id = @captureId"
 		).get({ captureId }) as { start_offset: number | null; end_offset: number | null };
@@ -813,7 +816,7 @@ export class CanonicalQueryService {
 				collapseRuns: Boolean(section.collapse_runs),
 				collapsed: Boolean(section.collapsed)
 			})),
-			counts: { rawBytes: capture.byteCount, framedBytes: capture.byteCount, frames: frameCount, visibleFrames },
+			counts: { rawBytes: capture.byteCount, framedBytes, frames: frameCount, visibleFrames },
 			notes: noteRows.slice(0, 16).map(row => ({ id: row.id, targetKind: row.target_kind, textPreview: previewText(row.text), createdAt: row.created_at, profileId: row.profile_id, rawOffset: row.raw_offset, startOffset: row.start_offset, endOffset: row.end_offset, sequenceGroupId: row.sequence_group_id })),
 			topSignatures: signatureRows.slice(0, 12),
 			topTransitions: transitionRows.slice(0, 12).map(row => ({ fromSignature: row.from_signature, toSignature: row.to_signature, count: row.count, changedPositions: row.diffs })),
