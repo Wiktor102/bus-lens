@@ -65,6 +65,28 @@ test("analysis messages apply bounded filters, stable evidence references, and k
 	}
 });
 
+test("analysis messages attach each sequence member to its offset frame", () => {
+	const { database, groupId } = seedAnalysisCapture();
+	try {
+		database.prepare(
+			`INSERT INTO sequence_occurrences
+			 (group_id, occurrence_index, offset, start_frame_ordinal, start_raw_offset, end_raw_offset, length)
+			 VALUES (@groupId, 0, 1, 0, 0, 3, 2), (@groupId, 1, 1, 2, 4, 7, 2)`
+		).run({ groupId });
+
+		const query = new CanonicalQueryService(database);
+		const messages = query.queryMessages({ captureId: "analysis-capture", limit: 10 }).data.messages;
+		assert.deepEqual(messages.map(message => message.sequenceMembership), [
+			[{ groupId, occurrenceNumber: 0, offset: 0 }],
+			[{ groupId, occurrenceNumber: 0, offset: 1 }],
+			[{ groupId, occurrenceNumber: 1, offset: 0 }],
+			[{ groupId, occurrenceNumber: 1, offset: 1 }]
+		]);
+	} finally {
+		database.close();
+	}
+});
+
 test("analysis groups, occurrences, statistics, transitions, and raw reads remain bounded", () => {
 	const { database, profileId, groupId } = seedAnalysisCapture();
 	try {

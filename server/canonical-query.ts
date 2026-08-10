@@ -1279,12 +1279,11 @@ export class CanonicalQueryService {
 		}>;
 		const membershipByOrdinal = new Map<number, Array<{ groupId: string; occurrenceNumber: number; offset: number }>>();
 		for (const membership of memberships) {
-			for (let ordinal = membership.start_frame_ordinal; ordinal < membership.start_frame_ordinal + membership.length; ordinal += 1) {
-				if (ordinal < minOrdinal || ordinal > maxOrdinal) continue;
-				const list = membershipByOrdinal.get(ordinal) ?? [];
-				list.push({ groupId: membership.group_id, occurrenceNumber: membership.occurrence_index, offset: membership.offset });
-				membershipByOrdinal.set(ordinal, list);
-			}
+			const ordinal = membership.start_frame_ordinal + membership.offset;
+			if (ordinal < minOrdinal || ordinal > maxOrdinal) continue;
+			const list = membershipByOrdinal.get(ordinal) ?? [];
+			list.push({ groupId: membership.group_id, occurrenceNumber: membership.occurrence_index, offset: membership.offset });
+			membershipByOrdinal.set(ordinal, list);
 		}
 		const spans = rows.map(row => frameRawSpan(row)).filter(span => span.startOffset !== null && span.endOffset !== null);
 		const minRawOffset = spans.length ? Math.min(...spans.map(span => span.startOffset as number)) : null;
