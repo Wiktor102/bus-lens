@@ -17,6 +17,7 @@ export const DEFAULT_FRAME_WINDOW_LIMIT = 50;
 export const MAX_FRAME_WINDOW_LIMIT = 200;
 export const DEFAULT_CAPTURE_DISCOVERY_LIMIT = 20;
 export const MAX_CAPTURE_DISCOVERY_LIMIT = 100;
+export const MAX_CONTEXT_PARAMETER_FILTERS = 64;
 
 export type CanonicalCaptureStatus = "canonical" | "legacy-not-canonicalized" | "converting" | "canonicalization-failed";
 
@@ -308,9 +309,15 @@ function normalizeParameterFilters(
 	const entries = Array.isArray(value)
 		? value.map(item => ({ key: String(item.key ?? "").trim(), value: String(item.value ?? "") }))
 		: Object.entries(value).map(([key, item]) => ({ key: key.trim(), value: String(item) }));
-	return entries
-		.filter(item => item.key.length > 0)
-		.sort((left, right) => left.key.localeCompare(right.key) || left.value.localeCompare(right.value));
+	const uniqueEntries = [...new Map(entries.filter(item => item.key.length > 0).map(item => [JSON.stringify([item.key, item.value]), item] as const)).values()];
+	if (uniqueEntries.length > MAX_CONTEXT_PARAMETER_FILTERS) {
+		throw new AgentQueryError(
+			"invalid-input",
+			`contextParameters must contain no more than ${MAX_CONTEXT_PARAMETER_FILTERS} unique entries`,
+			{ label: "contextParameters", maximum: MAX_CONTEXT_PARAMETER_FILTERS, received: uniqueEntries.length }
+		);
+	}
+	return uniqueEntries.sort((left, right) => left.key.localeCompare(right.key) || left.value.localeCompare(right.value));
 }
 
 function normalizeStatusFilters(value: CaptureDiscoveryFiltersInput["storageStatus"]): readonly CanonicalCaptureStatus[] {
