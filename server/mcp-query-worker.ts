@@ -8,6 +8,8 @@ import {
 } from "./agent-contracts.ts";
 import {
 	CanonicalQueryService,
+	type AgentCompareCapturesInput,
+	type AgentComparisonResult,
 	type AgentByteStatisticsInput,
 	type AgentByteStatisticsResult,
 	type AgentCaptureDiscovery,
@@ -30,6 +32,7 @@ import {
 export type McpQueryRequest =
 	| { operation: "capture-discovery"; input: CaptureDiscoveryFiltersInput }
 	| { operation: "capture-overview"; captureId: string; snapshot?: Partial<AgentSnapshotReference> }
+	| { operation: "comparison"; input: AgentCompareCapturesInput }
 	| { operation: "messages"; input: AgentMessageQueryInput }
 	| { operation: "message-context"; input: AgentMessageContextInput }
 	| { operation: "sequence-groups"; input: AgentSequenceGroupsInput }
@@ -73,6 +76,7 @@ try {
 	const value = database.transaction(():
 		| AgentResponse<AgentCaptureDiscovery>
 		| AgentResponse<AgentCaptureOverview>
+		| AgentResponse<AgentComparisonResult>
 		| AgentResponse<AgentMessageQueryResult>
 		| AgentResponse<AgentMessageContext>
 		| AgentResponse<AgentSequenceGroupsResult>
@@ -85,6 +89,8 @@ try {
 				return queries.queryCaptureDiscovery(request.input);
 			case "capture-overview":
 				return queries.queryCaptureOverview(request.captureId, request.snapshot);
+			case "comparison":
+				return queries.compareCaptures(request.input);
 			case "messages":
 				return queries.queryMessages(request.input);
 			case "message-context":

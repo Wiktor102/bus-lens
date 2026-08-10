@@ -22,6 +22,7 @@ import {
 } from "./canonical-capture-command-service.ts";
 import { createMcpAccess, type AgentAccessStatus, type McpAccess, type McpToolRegistrar } from "./mcp-server.ts";
 import { registerAnalysisTools } from "./mcp-analysis.ts";
+import { registerComparisonTools } from "./mcp-comparison.ts";
 
 const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
 const MIME_TYPES: Record<string, string> = {
@@ -129,13 +130,17 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 	const commandService = new CanonicalCaptureCommandService(database);
 	const staticDirectory = options.staticDirectory ? resolve(options.staticDirectory) : undefined;
 	const maxBodyBytes = options.maxBodyBytes ?? 128 * 1024 * 1024;
+	const phase4ToolRegistrar: McpToolRegistrar = (server, queries, recordClient) => {
+		registerAnalysisTools(server, queries, recordClient);
+		registerComparisonTools(server, queries, recordClient);
+	};
 	const mcpAccess = createMcpAccess({
 		database,
 		databasePath: options.databasePath,
 		endpoint: options.mcpEndpoint ?? "http://127.0.0.1/mcp",
 		serverVersion: "1.0.0",
 		agentNotes: options.mcpAgentNotes,
-		toolRegistrar: options.mcpToolRegistrar ?? registerAnalysisTools
+		toolRegistrar: options.mcpToolRegistrar ?? phase4ToolRegistrar
 	});
 	const server = createServer(async (request, response) => {
 		try {

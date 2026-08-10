@@ -1,6 +1,8 @@
 import { Worker } from "node:worker_threads";
 import { AgentQueryError, type AgentResponse } from "./agent-contracts.ts";
 import type {
+	AgentCompareCapturesInput,
+	AgentComparisonResult,
 	AgentByteStatisticsInput,
 	AgentByteStatisticsResult,
 	AgentCaptureDiscovery,
@@ -134,6 +136,10 @@ export class McpQueryExecutor {
 
 	queryCaptureOverview(captureId: string, snapshot?: Partial<AgentSnapshotReference>): Promise<AgentResponse<AgentCaptureOverview>> {
 		return this.run({ operation: "capture-overview", captureId, snapshot });
+	}
+
+	compareCaptures(input: AgentCompareCapturesInput): Promise<AgentResponse<AgentComparisonResult>> {
+		return this.run<AgentResponse<AgentComparisonResult>>({ operation: "comparison", input });
 	}
 
 	queryMessages(input: AgentMessageQueryInput): Promise<AgentResponse<AgentMessageQueryResult>> {

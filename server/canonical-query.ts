@@ -364,6 +364,82 @@ export type AgentRawRead = Readonly<{
 	truncated: boolean;
 }>;
 
+export const AGENT_COMPARISON_CATEGORIES = ["metadata", "sections", "signatures", "transitions", "byte-statistics", "sequence-groups"] as const;
+export type AgentComparisonCategory = typeof AGENT_COMPARISON_CATEGORIES[number];
+
+export type AgentComparisonSnapshot = AgentSnapshotReference;
+
+export type AgentCompareCapturesInput = Readonly<{
+	left: AgentComparisonSnapshot;
+	right: AgentComparisonSnapshot;
+	categories?: readonly AgentComparisonCategory[];
+	limits?: Readonly<Partial<Record<AgentComparisonCategory, number>>>;
+	cursors?: Readonly<Partial<Record<AgentComparisonCategory, string>>>;
+}>;
+
+export type AgentComparisonPage<T> = Readonly<{
+	items: readonly T[];
+	returned: number;
+	nextCursor?: string;
+	truncated: boolean;
+}>;
+
+export type AgentComparisonDifference = Readonly<{
+	field: string;
+	left: unknown;
+	right: unknown;
+}>;
+
+export type AgentSignatureDelta = Readonly<{
+	signature: string;
+	leftCount: number;
+	rightCount: number;
+	delta: number;
+	leftCaptureId: string;
+	rightCaptureId: string;
+	suggestedOperations: readonly Readonly<{ tool: string; arguments: Record<string, unknown> }>[];
+}>;
+
+export type AgentTransitionDelta = Readonly<{
+	fromSignature: string;
+	toSignature: string;
+	leftCount: number;
+	rightCount: number;
+	delta: number;
+	leftChangedPositions: number;
+	rightChangedPositions: number;
+	suggestedOperations: readonly Readonly<{ tool: string; arguments: Record<string, unknown> }>[];
+}>;
+
+export type AgentBytePositionDelta = Readonly<{
+	position: number;
+	leftVocabulary: readonly Readonly<{ value: number; count: number }>[];
+	rightVocabulary: readonly Readonly<{ value: number; count: number }>[];
+	vocabularyChanges: readonly Readonly<{ value: number; leftCount: number; rightCount: number; delta: number }>[];
+	leftVariance: string | null;
+	rightVariance: string | null;
+	leftBitOnePercentages: readonly Readonly<{ bit: number; percentage: number }>[];
+	rightBitOnePercentages: readonly Readonly<{ bit: number; percentage: number }>[];
+	}>;
+
+export type AgentSequenceGroupDelta = Readonly<{
+	key: string;
+	leftGroupId: string | null;
+	rightGroupId: string | null;
+	leftOccurrenceCount: number;
+	rightOccurrenceCount: number;
+	leftLength: number | null;
+	rightLength: number | null;
+	delta: number;
+	suggestedOperations: readonly Readonly<{ tool: string; arguments: Record<string, unknown> }>[];
+}>;
+
+export type AgentComparisonResult = Readonly<{
+	left: AgentComparisonSnapshot;
+	right: AgentComparisonSnapshot;
+	categories: Readonly<Partial<Record<AgentComparisonCategory, AgentComparisonPage<unknown> | Readonly<{ differences: readonly AgentComparisonDifference[] }>>>>;
+}>;
+
 type CanonicalSummaryRow = {
 	id: string;
 	name: string;
@@ -2199,6 +2275,338 @@ export class CanonicalQueryService {
 			appliedFilters: { captureId, rawOffset: startOffset, length, hiddenPolicy },
 			truncated: startOffset < available.start_offset || requestedEndOffset > available.end_offset || values.length < length,
 			suggestedOperations: [{ tool: "query_messages", reason: "Find interpreted frames overlapping this range with reverse raw-range lookup", arguments: messageQueryArguments }]
+		});
+		assertEncodedResponseSize(response);
+		return response;
+	}
+
+	private resolveComparisonSnapshot(reference: AgentComparisonSnapshot): AgentComparisonSnapshot {
+		const captureId = requiredText(reference.captureId, "captureId");
+		const profileId = requiredText(reference.profileId, "profileId");
+		const profileVersion = optionalNonNegativeInteger(reference.profileVersion, "profileVersion");
+		const sourceDataRevision = optionalNonNegativeInteger(reference.sourceDataRevision, "sourceDataRevision");
+		if (profileVersion === undefined || sourceDataRevision === undefined) throw new AgentQueryError("invalid-input", "Comparison snapshots require profileVersion and sourceDataRevision");
+		const resolved = this.resolveAnalysisProfile(captureId, { profileId, profileVersion, sourceDataRevision });
+		return resolved.snapshot;
+	}
+
+	private comparisonPageLimit(input: AgentCompareCapturesInput, category: AgentComparisonCategory): number {
+		const requested = input.limits?.[category];
+		return boundedLimit(requested, 20, 100, `${category} limit`);
+	}
+
+	private comparisonCursor(input: AgentCompareCapturesInput, category: AgentComparisonCategory, keyFields: readonly string[], filters: Record<string, unknown>): AgentCursorPayload | undefined {
+		const cursor = input.cursors?.[category];
+		if (!cursor) return undefined;
+		const decoded = decodeAgentCursor(cursor, `comparison:${category}`, keyFields);
+		assertCursorFilters(decoded, filters, decoded.snapshot);
+		return decoded;
+	}
+
+	private comparisonMetadata(left: AgentComparisonSnapshot, right: AgentComparisonSnapshot): Readonly<{ differences: readonly AgentComparisonDifference[] }> {
+		const read = (captureId: string): Record<string, unknown> => {
+			const capture = this.database.prepare(
+				`SELECT name, description, controller_view, lifecycle, byte_count, baud_rate,
+				        input_format, folder_id, data_revision, metadata_revision, content_revision
+				 FROM captures WHERE id = @captureId`
+			).get({ captureId }) as Record<string, unknown> | undefined;
+			if (!capture) throw new AgentQueryError("not-found", "Comparison capture was not found", { captureId });
+			const parameters = this.database.prepare(
+				"SELECT key_text, value_text FROM capture_parameters WHERE capture_id = @captureId ORDER BY position LIMIT 33"
+			).all({ captureId }) as Array<{ key_text: string; value_text: string }>;
+			return {
+				...capture,
+				parameters: parameters.slice(0, 32).map(parameter => ({ key: parameter.key_text, value: parameter.value_text })),
+				parametersTruncated: parameters.length > 32
+			};
+		};
+		const leftMetadata = read(left.captureId);
+		const rightMetadata = read(right.captureId);
+		const fields = [...new Set([...Object.keys(leftMetadata), ...Object.keys(rightMetadata)])].sort();
+		return {
+			differences: fields.flatMap(field => stableJson(leftMetadata[field]) === stableJson(rightMetadata[field]) ? [] : [{ field, left: leftMetadata[field] ?? null, right: rightMetadata[field] ?? null }])
+		};
+	}
+
+	private comparisonSections(left: AgentComparisonSnapshot, right: AgentComparisonSnapshot): Readonly<{ differences: readonly AgentComparisonDifference[] }> {
+		const read = (profileId: string) => this.database.prepare(
+			`SELECT position, start_offset, framing_mode, frame_length, marker_bytes, marker_position,
+			        time_gap_ms, collapse_runs, collapsed
+			 FROM framing_sections WHERE profile_id = @profileId ORDER BY position`
+		).all({ profileId }) as Array<Record<string, unknown>>;
+		const leftSections = read(left.profileId);
+		const rightSections = read(right.profileId);
+		const byPosition = (rows: Array<Record<string, unknown>>) => new Map(rows.map(row => [Number(row.position), row]));
+		const leftByPosition = byPosition(leftSections);
+		const rightByPosition = byPosition(rightSections);
+		const positions = [...new Set([...leftByPosition.keys(), ...rightByPosition.keys()])].sort((a, b) => a - b);
+		return {
+			differences: positions.flatMap(position => {
+				const leftSection = leftByPosition.get(position) ?? null;
+				const rightSection = rightByPosition.get(position) ?? null;
+				return stableJson(leftSection) === stableJson(rightSection) ? [] : [{ field: `section:${position}`, left: leftSection, right: rightSection }];
+			})
+		};
+	}
+
+	private comparisonSignatures(left: AgentComparisonSnapshot, right: AgentComparisonSnapshot, input: AgentCompareCapturesInput): AgentComparisonPage<AgentSignatureDelta> {
+		const filters = { left, right, category: "signatures" };
+		const cursor = this.comparisonCursor(input, "signatures", ["magnitude", "signature"], filters);
+		const limit = this.comparisonPageLimit(input, "signatures");
+		const params: Record<string, unknown> = { leftProfileId: left.profileId, rightProfileId: right.profileId, limit: limit + 1 };
+		const cursorSql = cursor ? " WHERE magnitude < @cursorMagnitude OR (magnitude = @cursorMagnitude AND signature > @cursorSignature)" : "";
+		if (cursor) { params.cursorMagnitude = cursor.key.magnitude; params.cursorSignature = cursor.key.signature; }
+		const rows = this.database.prepare(
+			`WITH delta AS (
+				SELECT left_rows.signature, left_rows.count AS left_count, COALESCE(right_rows.count, 0) AS right_count
+				FROM frame_signatures left_rows
+				LEFT JOIN frame_signatures right_rows ON right_rows.profile_id = @rightProfileId AND right_rows.signature = left_rows.signature
+				WHERE left_rows.profile_id = @leftProfileId
+				UNION ALL
+				SELECT right_rows.signature, 0, right_rows.count
+				FROM frame_signatures right_rows
+				LEFT JOIN frame_signatures left_rows ON left_rows.profile_id = @leftProfileId AND left_rows.signature = right_rows.signature
+				WHERE right_rows.profile_id = @rightProfileId AND left_rows.signature IS NULL
+			), ranked AS (
+				SELECT signature, left_count, right_count, right_count - left_count AS delta,
+				       ABS(right_count - left_count) AS magnitude
+				FROM delta
+			)
+			SELECT signature, left_count, right_count, delta, magnitude
+			FROM ranked${cursorSql}
+			ORDER BY magnitude DESC, signature ASC
+			LIMIT @limit`
+		).all(params) as Array<{ signature: string; left_count: number; right_count: number; delta: number; magnitude: number }>;
+		const pageRows = rows.slice(0, limit);
+		const items = pageRows.map(row => ({
+			signature: row.signature,
+			leftCount: row.left_count,
+			rightCount: row.right_count,
+			delta: row.delta,
+			leftCaptureId: left.captureId,
+			rightCaptureId: right.captureId,
+			suggestedOperations: [
+				{ tool: "query_messages", arguments: { captureId: left.captureId, profileId: left.profileId, profileVersion: left.profileVersion, sourceDataRevision: left.sourceDataRevision, exactSignature: row.signature } },
+				{ tool: "query_messages", arguments: { captureId: right.captureId, profileId: right.profileId, profileVersion: right.profileVersion, sourceDataRevision: right.sourceDataRevision, exactSignature: row.signature } }
+			]
+		}));
+		const hasMore = rows.length > pageRows.length;
+		const last = pageRows.at(-1);
+		const nextCursor = hasMore && last ? encodeAgentCursor({ contractVersion: 1, scope: "comparison:signatures", filters, snapshot: left, key: { magnitude: Math.abs(last.delta), signature: last.signature } }) : undefined;
+		return { items, returned: items.length, ...(nextCursor ? { nextCursor } : {}), truncated: hasMore };
+	}
+
+	private comparisonTransitions(left: AgentComparisonSnapshot, right: AgentComparisonSnapshot, input: AgentCompareCapturesInput): AgentComparisonPage<AgentTransitionDelta> {
+		const filters = { left, right, category: "transitions" };
+		const cursor = this.comparisonCursor(input, "transitions", ["magnitude", "fromSignature", "toSignature"], filters);
+		const limit = this.comparisonPageLimit(input, "transitions");
+		const params: Record<string, unknown> = { leftProfileId: left.profileId, rightProfileId: right.profileId, limit: limit + 1 };
+		const cursorSql = cursor ? " WHERE magnitude < @cursorMagnitude OR (magnitude = @cursorMagnitude AND (from_signature > @cursorFromSignature OR (from_signature = @cursorFromSignature AND to_signature > @cursorToSignature)))" : "";
+		if (cursor) { params.cursorMagnitude = cursor.key.magnitude; params.cursorFromSignature = cursor.key.fromSignature; params.cursorToSignature = cursor.key.toSignature; }
+		const rows = this.database.prepare(
+			`WITH delta AS (
+				SELECT left_rows.from_signature, left_rows.to_signature, left_rows.count AS left_count, COALESCE(right_rows.count, 0) AS right_count,
+				       left_rows.diffs AS left_diffs, COALESCE(right_rows.diffs, 0) AS right_diffs
+				FROM frame_transitions left_rows
+				LEFT JOIN frame_transitions right_rows ON right_rows.profile_id = @rightProfileId AND right_rows.from_signature = left_rows.from_signature AND right_rows.to_signature = left_rows.to_signature
+				WHERE left_rows.profile_id = @leftProfileId
+				UNION ALL
+				SELECT right_rows.from_signature, right_rows.to_signature, 0, right_rows.count, 0, right_rows.diffs
+				FROM frame_transitions right_rows
+				LEFT JOIN frame_transitions left_rows ON left_rows.profile_id = @leftProfileId AND left_rows.from_signature = right_rows.from_signature AND left_rows.to_signature = right_rows.to_signature
+				WHERE right_rows.profile_id = @rightProfileId AND left_rows.from_signature IS NULL
+			), ranked AS (
+				SELECT from_signature, to_signature, left_count, right_count, right_count - left_count AS delta,
+				       left_diffs, right_diffs, ABS(right_count - left_count) AS magnitude
+				FROM delta
+			)
+			SELECT from_signature, to_signature, left_count, right_count, delta, left_diffs, right_diffs, magnitude
+			FROM ranked${cursorSql}
+			ORDER BY magnitude DESC, from_signature ASC, to_signature ASC
+			LIMIT @limit`
+		).all(params) as Array<{ from_signature: string; to_signature: string; left_count: number; right_count: number; delta: number; left_diffs: number; right_diffs: number; magnitude: number }>;
+		const pageRows = rows.slice(0, limit);
+		const items = pageRows.map(row => ({
+			fromSignature: row.from_signature,
+			toSignature: row.to_signature,
+			leftCount: row.left_count,
+			rightCount: row.right_count,
+			delta: row.delta,
+			leftChangedPositions: row.left_diffs,
+			rightChangedPositions: row.right_diffs,
+			suggestedOperations: [
+				{ tool: "query_messages", arguments: { captureId: left.captureId, profileId: left.profileId, profileVersion: left.profileVersion, sourceDataRevision: left.sourceDataRevision, exactSignature: row.from_signature } },
+				{ tool: "query_messages", arguments: { captureId: right.captureId, profileId: right.profileId, profileVersion: right.profileVersion, sourceDataRevision: right.sourceDataRevision, exactSignature: row.from_signature } }
+			]
+		}));
+		const hasMore = rows.length > pageRows.length;
+		const last = pageRows.at(-1);
+		const nextCursor = hasMore && last ? encodeAgentCursor({ contractVersion: 1, scope: "comparison:transitions", filters, snapshot: left, key: { magnitude: Math.abs(last.delta), fromSignature: last.from_signature, toSignature: last.to_signature } }) : undefined;
+		return { items, returned: items.length, ...(nextCursor ? { nextCursor } : {}), truncated: hasMore };
+	}
+
+	private comparisonBytePositions(left: AgentComparisonSnapshot, right: AgentComparisonSnapshot, input: AgentCompareCapturesInput): AgentComparisonPage<AgentBytePositionDelta> {
+		const filters = { left, right, category: "byte-statistics" };
+		const cursor = this.comparisonCursor(input, "byte-statistics", ["position"], filters);
+		const limit = this.comparisonPageLimit(input, "byte-statistics");
+		const params: Record<string, unknown> = { leftProfileId: left.profileId, rightProfileId: right.profileId, limit: limit + 1 };
+		const cursorSql = cursor ? " WHERE position > @cursorPosition" : "";
+		if (cursor) params.cursorPosition = cursor.key.position;
+		const positions = this.database.prepare(
+			`SELECT position FROM (
+				SELECT position FROM byte_statistics WHERE profile_id = @leftProfileId
+				UNION
+				SELECT position FROM byte_statistics WHERE profile_id = @rightProfileId
+				UNION
+				SELECT position FROM bit_statistics WHERE profile_id = @leftProfileId
+				UNION
+				SELECT position FROM bit_statistics WHERE profile_id = @rightProfileId
+			) positions${cursorSql}
+			ORDER BY position ASC LIMIT @limit`
+		).all(params) as Array<{ position: number }>;
+		const pagePositions = positions.slice(0, limit).map(row => row.position);
+		const read = (profileId: string) => {
+			if (!pagePositions.length) return { vocabularyRows: [] as Array<{ position: number; value: number; count: number }>, bits: [] as Array<{ position: number; bit: number; percentage: number; variance: string }>, varianceRows: [] as Array<{ position: number; bit: number; percentage: number; variance: string }> };
+			const placeholders = pagePositions.map((_position, index) => `@position${index}`);
+			const queryParameters = { profileId, ...Object.fromEntries(pagePositions.map((position, index) => [`position${index}`, position])) };
+			const vocabularyRows = this.database.prepare(`SELECT position, value, count FROM byte_statistics WHERE profile_id = @profileId AND position IN (${placeholders.join(", ")})`).all(queryParameters) as Array<{ position: number; value: number; count: number }>;
+			const bitRows = this.database.prepare(`SELECT position, bit, percentage, variance FROM bit_statistics WHERE profile_id = @profileId AND position IN (${placeholders.join(", ")}) ORDER BY position, bit`).all(queryParameters) as Array<{ position: number; bit: number; percentage: number; variance: string }>;
+			return { vocabularyRows, bits: bitRows, varianceRows: bitRows };
+		};
+		const leftRows = read(left.profileId);
+		const rightRows = read(right.profileId);
+		const items = pagePositions.map(position => {
+			const leftVocabulary = leftRows.vocabularyRows.filter(row => row.position === position).map(row => ({ value: row.value, count: row.count }));
+			const rightVocabulary = rightRows.vocabularyRows.filter(row => row.position === position).map(row => ({ value: row.value, count: row.count }));
+			const values = [...new Set([...leftVocabulary, ...rightVocabulary].map(row => row.value))].sort((a, b) => a - b);
+			const leftByValue = new Map(leftVocabulary.map(row => [row.value, row.count]));
+			const rightByValue = new Map(rightVocabulary.map(row => [row.value, row.count]));
+			const leftBits = leftRows.bits.filter(row => row.position === position).map(row => ({ bit: row.bit, percentage: row.percentage }));
+			const rightBits = rightRows.bits.filter(row => row.position === position).map(row => ({ bit: row.bit, percentage: row.percentage }));
+			return {
+				position,
+				leftVocabulary,
+				rightVocabulary,
+				vocabularyChanges: values.map(value => ({ value, leftCount: leftByValue.get(value) ?? 0, rightCount: rightByValue.get(value) ?? 0, delta: (rightByValue.get(value) ?? 0) - (leftByValue.get(value) ?? 0) })).filter(row => row.delta !== 0),
+				leftVariance: leftBits.length ? (leftRows.varianceRows.find(row => row.position === position)?.variance ?? null) : null,
+				rightVariance: rightBits.length ? (rightRows.varianceRows.find(row => row.position === position)?.variance ?? null) : null,
+				leftBitOnePercentages: leftBits,
+				rightBitOnePercentages: rightBits
+			};
+		});
+		const hasMore = positions.length > pagePositions.length;
+		const last = pagePositions.at(-1);
+		const nextCursor = hasMore && last !== undefined ? encodeAgentCursor({ contractVersion: 1, scope: "comparison:byte-statistics", filters, snapshot: left, key: { position: last } }) : undefined;
+		return { items, returned: items.length, ...(nextCursor ? { nextCursor } : {}), truncated: hasMore };
+	}
+
+	private comparisonSequenceGroups(left: AgentComparisonSnapshot, right: AgentComparisonSnapshot, input: AgentCompareCapturesInput): AgentComparisonPage<AgentSequenceGroupDelta> {
+		const filters = { left, right, category: "sequence-groups" };
+		const cursor = this.comparisonCursor(input, "sequence-groups", ["magnitude", "key"], filters);
+		const limit = this.comparisonPageLimit(input, "sequence-groups");
+		const params: Record<string, unknown> = { leftProfileId: left.profileId, rightProfileId: right.profileId, limit: limit + 1 };
+		const cursorSql = cursor ? " WHERE magnitude < @cursorMagnitude OR (magnitude = @cursorMagnitude AND key_text > @cursorKey)" : "";
+		if (cursor) { params.cursorMagnitude = cursor.key.magnitude; params.cursorKey = cursor.key.key; }
+		const rows = this.database.prepare(
+			`WITH left_groups AS (
+				SELECT groups.key_text, MIN(groups.id) AS group_id, MAX(groups.length) AS group_length,
+				       COUNT(DISTINCT occurrences.occurrence_index) AS occurrence_count
+				FROM sequence_groups groups LEFT JOIN sequence_occurrences occurrences ON occurrences.group_id = groups.id
+				WHERE groups.profile_id = @leftProfileId GROUP BY groups.key_text
+			), right_groups AS (
+				SELECT groups.key_text, MIN(groups.id) AS group_id, MAX(groups.length) AS group_length,
+				       COUNT(DISTINCT occurrences.occurrence_index) AS occurrence_count
+				FROM sequence_groups groups LEFT JOIN sequence_occurrences occurrences ON occurrences.group_id = groups.id
+				WHERE groups.profile_id = @rightProfileId GROUP BY groups.key_text
+			), delta AS (
+				SELECT left_groups.key_text, left_groups.group_id AS left_group_id, right_groups.group_id AS right_group_id,
+				       left_groups.occurrence_count AS left_occurrence_count, COALESCE(right_groups.occurrence_count, 0) AS right_occurrence_count,
+				       left_groups.group_length AS left_length, right_groups.group_length AS right_length
+				FROM left_groups LEFT JOIN right_groups ON right_groups.key_text = left_groups.key_text
+				UNION ALL
+				SELECT right_groups.key_text, NULL, right_groups.group_id, 0, right_groups.occurrence_count, NULL, right_groups.group_length
+				FROM right_groups LEFT JOIN left_groups ON left_groups.key_text = right_groups.key_text
+				WHERE left_groups.key_text IS NULL
+			), ranked AS (
+				SELECT *, right_occurrence_count - left_occurrence_count AS delta,
+				       ABS(right_occurrence_count - left_occurrence_count) AS magnitude
+				FROM delta
+			)
+			SELECT key_text, left_group_id, right_group_id, left_occurrence_count, right_occurrence_count,
+			       left_length, right_length, delta, magnitude
+			FROM ranked${cursorSql}
+			ORDER BY magnitude DESC, key_text ASC LIMIT @limit`
+		).all(params) as Array<{ key_text: string; left_group_id: string | null; right_group_id: string | null; left_occurrence_count: number; right_occurrence_count: number; left_length: number | null; right_length: number | null; delta: number; magnitude: number }>;
+		const pageRows = rows.slice(0, limit);
+		const items = pageRows.map(row => ({
+			key: row.key_text,
+			leftGroupId: row.left_group_id,
+			rightGroupId: row.right_group_id,
+			leftOccurrenceCount: row.left_occurrence_count,
+			rightOccurrenceCount: row.right_occurrence_count,
+			leftLength: row.left_length,
+			rightLength: row.right_length,
+			delta: row.delta,
+			suggestedOperations: [
+				...(row.left_group_id ? [{ tool: "get_sequence_occurrences", arguments: { captureId: left.captureId, groupId: row.left_group_id, profileId: left.profileId, profileVersion: left.profileVersion, sourceDataRevision: left.sourceDataRevision } }] : []),
+				...(row.right_group_id ? [{ tool: "get_sequence_occurrences", arguments: { captureId: right.captureId, groupId: row.right_group_id, profileId: right.profileId, profileVersion: right.profileVersion, sourceDataRevision: right.sourceDataRevision } }] : [])
+			]
+		}));
+		const hasMore = rows.length > pageRows.length;
+		const last = pageRows.at(-1);
+		const nextCursor = hasMore && last ? encodeAgentCursor({ contractVersion: 1, scope: "comparison:sequence-groups", filters, snapshot: left, key: { magnitude: Math.abs(last.delta), key: last.key_text } }) : undefined;
+		return { items, returned: items.length, ...(nextCursor ? { nextCursor } : {}), truncated: hasMore };
+	}
+
+	compareCaptures(input: AgentCompareCapturesInput): AgentResponse<AgentComparisonResult> {
+		const left = this.resolveComparisonSnapshot(input.left);
+		const right = this.resolveComparisonSnapshot(input.right);
+		const categories = input.categories?.length ? [...new Set(input.categories)] : [...AGENT_COMPARISON_CATEGORIES];
+		for (const category of categories) if (!AGENT_COMPARISON_CATEGORIES.includes(category)) throw new AgentQueryError("invalid-input", "Unknown comparison category", { category });
+		const categoryData: Partial<Record<AgentComparisonCategory, unknown>> = {};
+		let truncated = false;
+		for (const category of categories) {
+			switch (category) {
+				case "metadata":
+					if (input.cursors?.metadata) throw new AgentQueryError("invalid-cursor", "Metadata comparison is not pageable", { category });
+					categoryData.metadata = this.comparisonMetadata(left, right);
+					break;
+				case "sections":
+					if (input.cursors?.sections) throw new AgentQueryError("invalid-cursor", "Section comparison is not pageable", { category });
+					categoryData.sections = this.comparisonSections(left, right);
+					break;
+				case "signatures": {
+					const page = this.comparisonSignatures(left, right, input);
+					categoryData.signatures = page;
+					truncated ||= page.truncated;
+					break;
+				}
+				case "transitions": {
+					const page = this.comparisonTransitions(left, right, input);
+					categoryData.transitions = page;
+					truncated ||= page.truncated;
+					break;
+				}
+				case "byte-statistics": {
+					const page = this.comparisonBytePositions(left, right, input);
+					categoryData["byte-statistics"] = page;
+					truncated ||= page.truncated;
+					break;
+				}
+				case "sequence-groups": {
+					const page = this.comparisonSequenceGroups(left, right, input);
+					categoryData["sequence-groups"] = page;
+					truncated ||= page.truncated;
+					break;
+				}
+			}
+		}
+		const response = makeAgentResponse({
+			data: { left, right, categories: categoryData } as AgentComparisonResult,
+			appliedFilters: { left, right, categories, limits: input.limits ?? {}, cursors: input.cursors ?? {} },
+			returned: categories.length,
+			truncated,
+			suggestedOperations: [{ tool: "query_messages", reason: "Inspect a signature, transition, or sequence difference with the explicit snapshot" }]
 		});
 		assertEncodedResponseSize(response);
 		return response;
