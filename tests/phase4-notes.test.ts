@@ -43,6 +43,35 @@ test("agent notes are disabled by default, append-only through the command, and 
 	}
 });
 
+test("frame-range notes reject requests that extend beyond resolved frames", () => {
+	const database = openDatabase(":memory:");
+	try {
+		const { commands, profileId } = seed(database);
+		assert.throws(
+			() => commands.createNote({
+				captureId: "notes-capture",
+				noteId: "partial-frame-range",
+				text: "partial frame range",
+				target: { kind: "frame-range", profileId, startOrdinal: 0, endOrdinal: 999 }
+			}),
+			error => (error as { code?: string; message?: string }).code === "VALIDATION_ERROR"
+				&& error instanceof Error
+				&& error.message === "frame range does not cover all requested ordinals"
+		);
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM stable_notes WHERE id = 'partial-frame-range'").get() as { count: number }).count, 0);
+
+		const created = commands.createNote({
+			captureId: "notes-capture",
+			noteId: "complete-frame-range",
+			text: "complete frame range",
+			target: { kind: "frame-range", profileId, startOrdinal: 0, endOrdinal: 1 }
+		});
+		assert.deepEqual(created.note.target, { kind: "frame-range", profileId, startOrdinal: 0, endOrdinal: 1 });
+	} finally {
+		database.close();
+	}
+});
+
 test("the MCP note tool keeps discovery stable while gating writes and deriving attribution from metadata", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "bus-lens-mcp-notes-test-"));
 	const service = createArchiveHttpService({ databasePath: join(directory, "archive.sqlite"), mcpEndpoint: "http://127.0.0.1:4174/mcp" });

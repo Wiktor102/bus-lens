@@ -2507,6 +2507,7 @@ export class CanonicalCaptureCommandService {
 				)
 				.all({ captureId, profileId, startOrdinal, endOrdinal }) as Array<{ raw_offsets_json: string }>;
 			if (!frames.length) throw new CanonicalCaptureValidationError("frame range resolves to no evidence");
+			if (frames.length !== endOrdinal - startOrdinal + 1) throw new CanonicalCaptureValidationError("frame range does not cover all requested ordinals");
 			const offsets = frames.flatMap(frame => JSON.parse(frame.raw_offsets_json) as number[]);
 			if (!offsets.length) throw new CanonicalCaptureValidationError("frame range resolves to no raw-span evidence");
 			return { targetKind: "frame-range", ...empty, profileId, startOffset: Math.min(...offsets), endOffset: Math.max(...offsets), startRow: startOrdinal, endRow: endOrdinal };
