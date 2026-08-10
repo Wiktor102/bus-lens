@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 
 export type SqliteDatabase = InstanceType<typeof Database>;
-export const CURRENT_SCHEMA_VERSION = 9;
+export const CURRENT_SCHEMA_VERSION = 10;
 
 type Migration = {
 	version: number;
@@ -712,9 +712,93 @@ const migrations: Migration[] = [
 				CREATE INDEX IF NOT EXISTS materialized_frames_agent_raw_span
 					ON materialized_frames (
 						profile_id,
-						CAST(json_extract(raw_offsets_json, '$[0]') AS INTEGER),
-						CAST(json_extract(raw_offsets_json, '$[#-1]') AS INTEGER)
-					);
+					CAST(json_extract(raw_offsets_json, '$[0]') AS INTEGER),
+					CAST(json_extract(raw_offsets_json, '$[#-1]') AS INTEGER)
+				);
+			`);
+		}
+	},
+	{
+		version: 10,
+		up: database => {
+			// A profile is an immutable analytical snapshot. Capture metadata and
+			// parameters are otherwise replaced in place, so preserve the values and
+			// data extent that were current when each profile was materialized.
+			database.exec(`
+				CREATE TABLE IF NOT EXISTS framing_profile_metadata_snapshots (
+					profile_id TEXT PRIMARY KEY NOT NULL REFERENCES framing_profiles(id) ON DELETE CASCADE,
+					capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+					name TEXT NOT NULL,
+					description TEXT NOT NULL,
+					controller_view TEXT NOT NULL,
+					baud_rate INTEGER CHECK (baud_rate IS NULL OR baud_rate > 0),
+					input_format TEXT NOT NULL,
+					lifecycle TEXT NOT NULL,
+					byte_count INTEGER NOT NULL CHECK (byte_count >= 0),
+					folder_id TEXT,
+					data_revision INTEGER NOT NULL CHECK (data_revision >= 0),
+					metadata_revision INTEGER NOT NULL CHECK (metadata_revision >= 0),
+					content_revision INTEGER NOT NULL CHECK (content_revision >= 0),
+					retained_start_offset INTEGER NOT NULL CHECK (retained_start_offset >= 0),
+					parameters_json TEXT NOT NULL CHECK (json_valid(parameters_json)),
+					created_at TEXT NOT NULL
+				);
+				CREATE INDEX IF NOT EXISTS framing_profile_metadata_snapshots_capture
+					ON framing_profile_metadata_snapshots (capture_id, profile_id);
+
+				INSERT OR IGNORE INTO framing_profile_metadata_snapshots (
+					profile_id, capture_id, name, description, controller_view, baud_rate,
+					input_format, lifecycle, byte_count, folder_id, data_revision,
+					metadata_revision, content_revision, retained_start_offset, parameters_json,
+					created_at
+				)
+				SELECT profiles.id, captures.id, captures.name, captures.description,
+					captures.controller_view, captures.baud_rate, captures.input_format,
+					captures.lifecycle, captures.byte_count, captures.folder_id,
+					COALESCE(profiles.source_data_revision, captures.data_revision),
+					captures.metadata_revision, captures.content_revision,
+					COALESCE(profiles.retained_start_offset, captures.retained_start_offset),
+					COALESCE((
+						SELECT json_group_array(json_object('key', ordered.key_text, 'value', ordered.value_text))
+						FROM (
+							SELECT key_text, value_text
+							FROM capture_parameters
+							WHERE capture_id = captures.id
+							ORDER BY position
+						) AS ordered
+					), '[]'),
+					profiles.created_at
+				FROM framing_profiles AS profiles
+				JOIN captures ON captures.id = profiles.capture_id;
+
+				CREATE TRIGGER IF NOT EXISTS framing_profile_metadata_snapshot_insert
+				AFTER INSERT ON framing_profiles
+				BEGIN
+					INSERT INTO framing_profile_metadata_snapshots (
+						profile_id, capture_id, name, description, controller_view, baud_rate,
+						input_format, lifecycle, byte_count, folder_id, data_revision,
+						metadata_revision, content_revision, retained_start_offset, parameters_json,
+						created_at
+					)
+					SELECT NEW.id, captures.id, captures.name, captures.description,
+						captures.controller_view, captures.baud_rate, captures.input_format,
+						captures.lifecycle, captures.byte_count, captures.folder_id,
+						COALESCE(NEW.source_data_revision, captures.data_revision),
+						captures.metadata_revision, captures.content_revision,
+						COALESCE(NEW.retained_start_offset, captures.retained_start_offset),
+						COALESCE((
+							SELECT json_group_array(json_object('key', ordered.key_text, 'value', ordered.value_text))
+							FROM (
+								SELECT key_text, value_text
+								FROM capture_parameters
+								WHERE capture_id = captures.id
+								ORDER BY position
+							) AS ordered
+						), '[]'),
+						NEW.created_at
+					FROM captures
+					WHERE captures.id = NEW.capture_id;
+				END;
 			`);
 		}
 	}

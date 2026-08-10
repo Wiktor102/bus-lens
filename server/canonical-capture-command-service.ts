@@ -1857,6 +1857,10 @@ export class CanonicalCaptureCommandService {
 					.get({ captureId, sessionId }) as { status: string } | undefined;
 				if (!session || session.status !== "finalizing") throw new CanonicalCaptureConflictError("session is no longer finalizing", { captureId, sessionId });
 				const now = this.nowIso();
+				// The profile snapshot includes lifecycle. Finalization commits the
+				// capture as finalized below, so make that state visible before the
+				// profile metadata trigger captures its immutable values.
+				this.database.prepare("UPDATE captures SET lifecycle = 'finalized' WHERE id = @captureId").run({ captureId });
 				this.database
 					.prepare(
 						`INSERT INTO framing_profiles

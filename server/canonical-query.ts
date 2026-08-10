@@ -2305,24 +2305,51 @@ export class CanonicalQueryService {
 	}
 
 	private comparisonMetadata(left: AgentComparisonSnapshot, right: AgentComparisonSnapshot): Readonly<{ differences: readonly AgentComparisonDifference[] }> {
-		const read = (captureId: string): Record<string, unknown> => {
-			const capture = this.database.prepare(
+		const read = (profileId: string): Record<string, unknown> => {
+			const snapshot = this.database.prepare(
 				`SELECT name, description, controller_view, lifecycle, byte_count, baud_rate,
-				        input_format, folder_id, data_revision, metadata_revision, content_revision
-				 FROM captures WHERE id = @captureId`
-			).get({ captureId }) as Record<string, unknown> | undefined;
-			if (!capture) throw new AgentQueryError("not-found", "Comparison capture was not found", { captureId });
-			const parameters = this.database.prepare(
-				"SELECT key_text, value_text FROM capture_parameters WHERE capture_id = @captureId ORDER BY position LIMIT 33"
-			).all({ captureId }) as Array<{ key_text: string; value_text: string }>;
+				        input_format, folder_id, data_revision, metadata_revision, content_revision,
+				        parameters_json
+				 FROM framing_profile_metadata_snapshots WHERE profile_id = @profileId`
+			).get({ profileId }) as {
+				name: string;
+				description: string;
+				controller_view: string;
+				lifecycle: string;
+				byte_count: number;
+				baud_rate: number | null;
+				input_format: string;
+				folder_id: string | null;
+				data_revision: number;
+				metadata_revision: number;
+				content_revision: number;
+				parameters_json: string;
+			} | undefined;
+			if (!snapshot) throw new AgentQueryError("evidence-missing", "The requested profile has no pinned metadata snapshot", { profileId });
+			const parameters = jsonArray<unknown>(snapshot.parameters_json).flatMap(parameter => {
+				if (!parameter || typeof parameter !== "object" || Array.isArray(parameter)) return [];
+				const record = parameter as Record<string, unknown>;
+				const key = optionalString(record.key);
+				return key ? [{ key, value: stringValue(record.value) }] : [];
+			});
 			return {
-				...capture,
-				parameters: parameters.slice(0, 32).map(parameter => ({ key: parameter.key_text, value: parameter.value_text })),
+				name: snapshot.name,
+				description: snapshot.description,
+				controller_view: snapshot.controller_view,
+				lifecycle: snapshot.lifecycle,
+				byte_count: snapshot.byte_count,
+				baud_rate: snapshot.baud_rate,
+				input_format: snapshot.input_format,
+				folder_id: snapshot.folder_id,
+				data_revision: snapshot.data_revision,
+				metadata_revision: snapshot.metadata_revision,
+				content_revision: snapshot.content_revision,
+				parameters: parameters.slice(0, 32),
 				parametersTruncated: parameters.length > 32
 			};
 		};
-		const leftMetadata = read(left.captureId);
-		const rightMetadata = read(right.captureId);
+		const leftMetadata = read(left.profileId);
+		const rightMetadata = read(right.profileId);
 		const fields = [...new Set([...Object.keys(leftMetadata), ...Object.keys(rightMetadata)])].sort();
 		return {
 			differences: fields.flatMap(field => stableJson(leftMetadata[field]) === stableJson(rightMetadata[field]) ? [] : [{ field, left: leftMetadata[field] ?? null, right: rightMetadata[field] ?? null }])

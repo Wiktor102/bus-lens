@@ -72,6 +72,37 @@ test("comparison cursors remain bound to both requested profile revisions", () =
 	}
 });
 
+test("comparison metadata stays pinned when a profile becomes historical", () => {
+	const database = openDatabase(":memory:");
+	try {
+		const left = record(database, "left-metadata-pinned", [1, 2, 3, 4, 5, 6]);
+		const right = record(database, "right-metadata-pinned", [1, 2, 9, 4, 10, 11]);
+		const query = new CanonicalQueryService(database);
+		const request = { left: left.snapshot, right: right.snapshot, categories: ["metadata"] as const };
+		const before = query.compareCaptures(request);
+
+		left.commands.patchMetadata({
+			captureId: left.snapshot.captureId,
+			patch: { name: "patched after snapshot", parameters: [{ key: "mode", value: "new" }] }
+		});
+		left.commands.startSession({ captureId: left.snapshot.captureId, sessionId: "left-metadata-append" });
+		left.commands.appendChunk({
+			captureId: left.snapshot.captureId,
+			sessionId: "left-metadata-append",
+			requestId: "left-metadata-append-request",
+			sequence: 0,
+			expectedStartOffset: 6,
+			bytes: [7, 8]
+		});
+
+		const after = query.compareCaptures(request);
+		assert.deepEqual(after, before);
+		assert.doesNotMatch(JSON.stringify(after), /patched after snapshot|\"new\"/);
+	} finally {
+		database.close();
+	}
+});
+
 test("byte-statistics comparison pages stay encoded-size safe and advance by position", () => {
 	const database = openDatabase(":memory:");
 	try {
