@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 
 export type SqliteDatabase = InstanceType<typeof Database>;
-export const CURRENT_SCHEMA_VERSION = 10;
+export const CURRENT_SCHEMA_VERSION = 11;
 
 type Migration = {
 	version: number;
@@ -803,13 +803,39 @@ const migrations: Migration[] = [
 		}
 	},
 	{
-		version: 9,
+		version: 11,
 		up: database => {
+			// A database produced by the pre-rebase notes branch may have recorded
+			// version 9 for the notes migration, so ensure the base branch's raw-span
+			// index is present before applying the notes schema below.
+			database.exec(`
+				CREATE INDEX IF NOT EXISTS materialized_frames_agent_raw_span
+					ON materialized_frames (
+						profile_id,
+					CAST(json_extract(raw_offsets_json, '$[0]') AS INTEGER),
+					CAST(json_extract(raw_offsets_json, '$[#-1]') AS INTEGER)
+					);
+			`);
+			const noteColumns = new Set(
+				(database.prepare("PRAGMA table_info(stable_notes)").all() as Array<{ name: string }>).map(column => column.name)
+			);
+			if (noteColumns.has("author_type")) {
+				database.exec(`
+					CREATE INDEX IF NOT EXISTS stable_notes_capture_kind ON stable_notes (capture_id, target_kind);
+					CREATE INDEX IF NOT EXISTS stable_notes_capture_raw_offset ON stable_notes (capture_id, raw_offset);
+					CREATE INDEX IF NOT EXISTS stable_notes_profile_target ON stable_notes (profile_id, target_kind);
+					CREATE INDEX IF NOT EXISTS stable_notes_sequence_group ON stable_notes (sequence_group_id);
+					CREATE INDEX IF NOT EXISTS stable_notes_author_type ON stable_notes (capture_id, author_type, created_at DESC);
+				`);
+				const hasSettings = (database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'application_settings'").get() as { 1: number } | undefined);
+				if (hasSettings) database.prepare("INSERT OR IGNORE INTO application_settings (key, value_json, updated_at) VALUES (@key, 'false', CURRENT_TIMESTAMP)").run({ key: "allow_agent_authored_notes" });
+				return;
+			}
 			// Agent notes need durable attribution and two stable range target kinds.
 			// Rebuild the table because SQLite cannot widen the existing target CHECK
 			// constraint with ALTER TABLE.
 			database.exec(`
-				CREATE TABLE stable_notes_v9 (
+				CREATE TABLE stable_notes_v11 (
 					id TEXT PRIMARY KEY NOT NULL,
 					capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
 					text TEXT NOT NULL,
@@ -834,7 +860,7 @@ const migrations: Migration[] = [
 					protocol_version TEXT
 				);
 
-				INSERT INTO stable_notes_v9
+				INSERT INTO stable_notes_v11
 					(id, capture_id, text, created_at, updated_at, target_kind, raw_offset, profile_id,
 					 raw_offsets_json, start_offset, end_offset, sequence_key, start_row, end_row,
 					 message_id, byte_position, frame_id, sequence_group_id, author_type,
@@ -845,7 +871,7 @@ const migrations: Migration[] = [
 				FROM stable_notes;
 
 				DROP TABLE stable_notes;
-				ALTER TABLE stable_notes_v9 RENAME TO stable_notes;
+				ALTER TABLE stable_notes_v11 RENAME TO stable_notes;
 				CREATE INDEX stable_notes_capture_kind ON stable_notes (capture_id, target_kind);
 				CREATE INDEX stable_notes_capture_raw_offset ON stable_notes (capture_id, raw_offset);
 				CREATE INDEX stable_notes_profile_target ON stable_notes (profile_id, target_kind);
