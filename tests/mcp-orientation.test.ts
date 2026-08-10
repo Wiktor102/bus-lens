@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import test from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	CLIENT_CAPABILITIES_META_KEY,
 	CLIENT_INFO_META_KEY,
@@ -11,14 +14,16 @@ import { assertLoopbackHost } from "../server/config.ts";
 import { MCP_REQUEST_LIMIT_BYTES } from "../server/mcp-server.ts";
 
 async function withService(run: (baseUrl: string, service: ReturnType<typeof createArchiveHttpService>) => Promise<void>): Promise<void> {
-	const service = createArchiveHttpService({ databasePath: ":memory:", mcpEndpoint: "http://127.0.0.1:4174/mcp" });
-	await new Promise<void>(resolve => service.server.listen(0, "127.0.0.1", resolve));
-	const address = service.server.address();
-	if (!address || typeof address === "string") throw new Error("test server did not bind to a port");
+	const directory = await mkdtemp(join(tmpdir(), "bus-lens-mcp-test-"));
+	const service = createArchiveHttpService({ databasePath: join(directory, "archive.sqlite"), mcpEndpoint: "http://127.0.0.1:4174/mcp" });
 	try {
+		await new Promise<void>(resolve => service.server.listen(0, "127.0.0.1", resolve));
+		const address = service.server.address();
+		if (!address || typeof address === "string") throw new Error("test server did not bind to a port");
 		await run(`http://127.0.0.1:${address.port}`, service);
 	} finally {
 		await service.close();
+		await rm(directory, { recursive: true, force: true });
 	}
 }
 

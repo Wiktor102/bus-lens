@@ -18,14 +18,16 @@ import {
 	type CaptureDiscoveryFiltersInput
 } from "./canonical-query.ts";
 import type { SqliteDatabase } from "./database.ts";
+import { McpQueryExecutor, MCP_TOOL_TIMEOUT_MS } from "./mcp-query-executor.ts";
+
+export { MCP_TOOL_TIMEOUT_MS } from "./mcp-query-executor.ts";
 
 export const MCP_PROTOCOL_VERSIONS = ["2026-07-28", "2025-11-25"] as const;
 export const MCP_SERVER_NAME = "Bus Lens Agent Access";
 export const MCP_REQUEST_LIMIT_BYTES = 256 * 1024;
 export const MCP_RESPONSE_LIMIT_BYTES = 96 * 1024;
-export const MCP_TOOL_TIMEOUT_MS = 5_000;
 
-const SERVER_INSTRUCTIONS = `Bus Lens is a local-first RS-485 capture analysis workbench. Use an overview-first workflow: list_captures, get_capture_overview, then choose a bounded analytical drill-down. Every analytical result is pinned to a capture/profile/source-data snapshot and is pageable. Raw bytes are available only through an explicit bounded read in a later tool surface. MCP exposes read-only analysis and evidence-linked notes when enabled; it never exposes framing mutation, capture control, replay, queue, serial, or ESP32 operations.`;
+const SERVER_INSTRUCTIONS = `Bus Lens is a local-first RS-485 capture analysis workbench. Use an overview-first workflow: list_captures, get_capture_overview, then choose a bounded analytical drill-down. Every analytical result is pinned to a capture/profile/source-data snapshot and is pageable. Raw bytes are available only through an explicit bounded read in a later tool surface. MCP exposes read-only analysis and evidence-linked notes when enabled; it never exposes framing mutation, capture control, replay, queue, serial, or ESP32 operations. Analytical reads run in a disposable read-only worker and are cancelled if they exceed ${MCP_TOOL_TIMEOUT_MS / 1000} seconds.`;
 
 export const BUS_LENS_GUIDE = `# Bus Lens agent guide
 
@@ -38,6 +40,10 @@ Sequence groups describe repeated signature sequences. Occurrences are the indiv
 ## Storage and limits
 
 Canonical captures have modeled raw chunks, framing profiles, and derived analytical rows. Legacy JSON captures remain discoverable as legacy-not-canonicalized and include UI conversion guidance; analytical evidence is not inferred from a legacy document. Results are structured, size-bounded, and pageable. Use the supplied cursor unchanged with the same filters and snapshot. Raw reads are explicit and bounded; never request a complete capture.
+
+## Execution limit
+
+Analytical reads execute against a separate read-only SQLite connection in a disposable worker. A read that exceeds the local ${MCP_TOOL_TIMEOUT_MS / 1000}-second execution limit is cancelled by terminating that worker; the service's writable database connection is not interrupted or mutated. This safeguard requires a file-backed archive database; in-memory databases are rejected because transferring an unbounded synchronous snapshot would reintroduce event-loop blocking.
 
 ## Recommended overview-first workflow
 
@@ -87,6 +93,7 @@ export type McpToolRegistrar = (server: McpServer, queries: CanonicalQueryServic
 
 export type McpAccessOptions = Readonly<{
 	database: SqliteDatabase;
+	databasePath?: string;
 	endpoint: string;
 	serverVersion: string;
 	agentNotes?: AgentAccessStatus["agentNotes"];
@@ -125,20 +132,6 @@ function synopsisForOverview(response: AgentResponse<AgentCaptureOverview>): str
 	return `${overview.capture.name} has ${overview.counts.frames ?? 0} framed messages across ${overview.sections.length} section${overview.sections.length === 1 ? "" : "s"}; the response is pinned to profile ${overview.snapshot?.profileVersion ?? "unknown"}.`;
 }
 
-async function withTimeout<T>(operation: () => T | Promise<T>, timeoutMs = MCP_TOOL_TIMEOUT_MS): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	try {
-		return await Promise.race([
-			Promise.resolve().then(operation),
-			new Promise<T>((_, reject) => {
-				timer = setTimeout(() => reject(new AgentQueryError("response-too-large", "Tool execution exceeded the local execution limit", { timeoutMs })), timeoutMs);
-			})
-		]);
-	} finally {
-		if (timer) clearTimeout(timer);
-	}
-}
-
 function errorResult(error: unknown): { isError: true; structuredContent: AgentResponse<unknown>; content: [{ type: "text"; text: string }] } {
 	const normalized = error instanceof AgentQueryError
 		? error
@@ -155,7 +148,7 @@ function errorResult(error: unknown): { isError: true; structuredContent: AgentR
 	return { isError: true, structuredContent: response, content: [{ type: "text", text: normalized.message }] };
 }
 
-function registerOrientationTools(server: McpServer, queries: CanonicalQueryService, recordClient: (context: unknown, server: McpServer) => void): void {
+function registerOrientationTools(server: McpServer, queries: McpQueryExecutor, recordClient: (context: unknown, server: McpServer) => void): void {
 	server.registerResource(
 		"guide",
 		"buslens://guide",
@@ -185,7 +178,7 @@ function registerOrientationTools(server: McpServer, queries: CanonicalQueryServ
 		async (input, context) => {
 			recordClient(context, server);
 			try {
-				const response = await withTimeout(() => queries.queryCaptureDiscovery(input as CaptureDiscoveryFiltersInput));
+				const response = await queries.queryCaptureDiscovery(input as CaptureDiscoveryFiltersInput);
 				return { structuredContent: response, content: [{ type: "text" as const, text: synopsisForDiscovery(response) }] };
 			} catch (error) {
 				return errorResult(error);
@@ -209,12 +202,12 @@ function registerOrientationTools(server: McpServer, queries: CanonicalQueryServ
 		async (input, context) => {
 			recordClient(context, server);
 			try {
-				const response = await withTimeout(() => queries.queryCaptureOverview(input.captureId, {
+				const response = await queries.queryCaptureOverview(input.captureId, {
 					captureId: input.captureId,
 					...(input.profileId ? { profileId: input.profileId } : {}),
 					...(input.profileVersion === undefined ? {} : { profileVersion: input.profileVersion }),
 					...(input.sourceDataRevision === undefined ? {} : { sourceDataRevision: input.sourceDataRevision })
-				}));
+				});
 				return { structuredContent: response, content: [{ type: "text" as const, text: synopsisForOverview(response) }] };
 			} catch (error) {
 				return errorResult(error);
@@ -282,6 +275,7 @@ export type McpAccess = Readonly<{
 
 export function createMcpAccess(options: McpAccessOptions): McpAccess {
 	const queries = new CanonicalQueryService(options.database);
+	const queryExecutor = new McpQueryExecutor(options.databasePath ?? options.database.name);
 	const recentClients: RecentClient[] = [];
 	let running = true;
 	const recordClient = (context: unknown, server: McpServer): void => {
@@ -297,7 +291,7 @@ export function createMcpAccess(options: McpAccessOptions): McpAccess {
 			{ name: MCP_SERVER_NAME, version: options.serverVersion },
 			{ instructions: SERVER_INSTRUCTIONS }
 		);
-		registerOrientationTools(server, queries, recordClient);
+		registerOrientationTools(server, queryExecutor, recordClient);
 		options.toolRegistrar?.(server, queries, recordClient);
 		return server;
 	}, {
@@ -358,6 +352,7 @@ export function createMcpAccess(options: McpAccessOptions): McpAccess {
 		},
 		close: async () => {
 			running = false;
+			await queryExecutor.close();
 			await handler.close();
 		}
 	};

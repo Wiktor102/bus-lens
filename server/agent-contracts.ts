@@ -47,6 +47,7 @@ export type AgentQueryErrorCode =
 	| "snapshot-mismatch"
 	| "evidence-missing"
 	| "response-too-large"
+	| "execution-timeout"
 	| "wildcard-too-broad"
 	| "annotation-disabled";
 

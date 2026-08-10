@@ -130,6 +130,7 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 	const maxBodyBytes = options.maxBodyBytes ?? 128 * 1024 * 1024;
 	const mcpAccess = createMcpAccess({
 		database,
+		databasePath: options.databasePath,
 		endpoint: options.mcpEndpoint ?? "http://127.0.0.1/mcp",
 		serverVersion: "1.0.0",
 		agentNotes: options.mcpAgentNotes,
