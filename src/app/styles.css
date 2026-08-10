@@ -2830,3 +2830,81 @@ tr:hover .row-action,
 .toast {
 	font: 700 11px var(--sans);
 }
+
+.agent-access-panel {
+	margin: 0 22px 14px;
+	padding: 16px 18px;
+	border: 1px solid rgba(160, 185, 158, 0.18);
+	border-radius: 12px;
+	background: rgba(20, 31, 24, 0.72);
+}
+.agent-access-heading,
+.agent-access-configs header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 14px;
+}
+.agent-access-heading h2 {
+	margin: 2px 0 0;
+	font-size: 16px;
+}
+.agent-access-grid {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 10px 18px;
+	margin-top: 14px;
+}
+.agent-access-grid > div {
+	min-width: 0;
+}
+.agent-access-grid span,
+.agent-access-grid strong,
+.agent-access-grid code {
+	display: block;
+}
+.agent-access-grid span {
+	margin-bottom: 4px;
+	color: var(--muted);
+	font: 600 10px var(--sans);
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+}
+.agent-access-grid strong,
+.agent-access-grid code {
+	overflow-wrap: anywhere;
+	font-size: 11px;
+}
+.agent-access-panel > .muted {
+	margin: 14px 0 0;
+}
+.agent-access-configs {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 12px;
+	margin-top: 14px;
+}
+.agent-access-configs > div {
+	min-width: 0;
+	padding: 10px;
+	border: 1px solid rgba(160, 185, 158, 0.12);
+	border-radius: 8px;
+}
+.agent-access-configs header {
+	font: 700 11px var(--sans);
+}
+.agent-access-configs pre {
+	overflow: auto;
+	margin: 8px 0 0;
+	padding: 9px;
+	border-radius: 6px;
+	background: rgba(0, 0, 0, 0.22);
+	color: #c6d8c1;
+	font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (max-width: 900px) {
+	.agent-access-grid,
+	.agent-access-configs {
+		grid-template-columns: 1fr;
+	}
+}

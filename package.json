@@ -14,10 +14,13 @@
         "preview": "vite preview --configLoader runner --host 127.0.0.1 --port 4173"
     },
     "dependencies": {
+        "@modelcontextprotocol/node": "2.0.0",
+        "@modelcontextprotocol/server": "2.0.0",
         "@tanstack/virtual-core": "^3.17.6",
         "better-sqlite3": "^13.0.3",
         "react": "^19.2.8",
-        "react-dom": "^19.2.8"
+        "react-dom": "^19.2.8",
+        "zod": "4.4.3"
     },
     "devDependencies": {
         "@types/better-sqlite3": "^9.6.0",

@@ -1,10 +1,12 @@
 import { homedir } from "node:os";
+import { isIP } from "node:net";
 import { dirname, join, resolve } from "node:path";
 
 export const LOOPBACK_HOST = "127.0.0.1";
 export const DEFAULT_APP_PORT = 4173;
 export const DEFAULT_SERVICE_PORT = 4174;
 export const DEFAULT_MAX_BODY_BYTES = 128 * 1024 * 1024;
+export const DEFAULT_MCP_BIND_HOST = LOOPBACK_HOST;
 
 export type Environment = Record<string, string | undefined>;
 
@@ -66,4 +68,17 @@ export function resolveDevPort(environment: Environment = process.env): number {
 export function resolveMaxBodyBytes(environment: Environment = process.env): number {
 	const configured = Number(environment.BUS_LENS_MAX_BODY_BYTES);
 	return Number.isSafeInteger(configured) && configured > 0 ? configured : DEFAULT_MAX_BODY_BYTES;
+}
+
+export function resolveMcpBindHost(environment: Environment = process.env): string {
+	return String(environment.BUS_LENS_MCP_HOST ?? DEFAULT_MCP_BIND_HOST).trim() || DEFAULT_MCP_BIND_HOST;
+}
+
+export function isLoopbackHost(host: string): boolean {
+	const normalized = host.trim().toLocaleLowerCase();
+	return normalized === "localhost" || normalized === "ip6-localhost" || normalized === LOOPBACK_HOST || normalized === "::1" || isIP(normalized) === 6 && normalized === "0:0:0:0:0:0:0:1";
+}
+
+export function assertLoopbackHost(host: string): void {
+	if (!isLoopbackHost(host)) throw new Error(`MCP must bind exclusively to loopback; refusing host ${host}`);
 }
