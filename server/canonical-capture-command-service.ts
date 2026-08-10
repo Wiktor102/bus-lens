@@ -851,7 +851,7 @@ function noteRawSpanEnd(row: NoteRow): number | null {
 		const ends = explicitEnd === null ? offsets : [...offsets, explicitEnd];
 		return ends.length ? Math.max(...ends) : null;
 	}
-	if (row.target_kind === "range" || row.target_kind === "sequence" || row.target_kind === "legacy-sequence") return explicitEnd;
+	if (row.target_kind === "range" || row.target_kind === "raw-range" || row.target_kind === "frame-range" || row.target_kind === "sequence" || row.target_kind === "legacy-sequence") return explicitEnd;
 	return null;
 }
 
