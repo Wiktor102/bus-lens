@@ -21,6 +21,10 @@ export type CaptureNote = {
 	type?: string;
 	text?: string;
 	createdAt?: number;
+	authorType?: "human" | "agent" | string;
+	reportedClientName?: string;
+	reportedClientVersion?: string;
+	protocolVersion?: string;
 	[key: string]: unknown;
 };
 

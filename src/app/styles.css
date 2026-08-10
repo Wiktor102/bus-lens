@@ -3021,6 +3021,20 @@ tr:hover .row-action,
 	margin: 14px 0 0;
 }
 
+.agent-notes-toggle {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.6rem;
+	margin-top: 0.8rem;
+	color: var(--ink);
+	font-size: 0.86rem;
+	font-weight: 700;
+}
+
+.agent-notes-toggle input {
+	accent-color: #8f5be8;
+}
+
 .agent-config-card {
 	margin: 12px 22px 14px;
 	padding: 14px 16px;

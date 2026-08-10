@@ -801,6 +801,60 @@ const migrations: Migration[] = [
 				END;
 			`);
 		}
+	},
+	{
+		version: 9,
+		up: database => {
+			// Agent notes need durable attribution and two stable range target kinds.
+			// Rebuild the table because SQLite cannot widen the existing target CHECK
+			// constraint with ALTER TABLE.
+			database.exec(`
+				CREATE TABLE stable_notes_v9 (
+					id TEXT PRIMARY KEY NOT NULL,
+					capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+					text TEXT NOT NULL,
+					created_at TEXT NOT NULL,
+					updated_at TEXT,
+					target_kind TEXT NOT NULL CHECK (target_kind IN ('capture','byte','frame','range','raw-range','frame-range','sequence-group','sequence','pattern','legacy-sequence')),
+					raw_offset INTEGER CHECK (raw_offset >= 0),
+					profile_id TEXT REFERENCES framing_profiles(id) ON DELETE SET NULL,
+					raw_offsets_json TEXT CHECK (raw_offsets_json IS NULL OR json_valid(raw_offsets_json)),
+					start_offset INTEGER CHECK (start_offset >= 0),
+					end_offset INTEGER CHECK (end_offset >= 0),
+					sequence_key TEXT,
+					start_row INTEGER,
+					end_row INTEGER,
+					message_id TEXT,
+					byte_position INTEGER CHECK (byte_position >= 0),
+					frame_id TEXT,
+					sequence_group_id TEXT REFERENCES sequence_groups(id) ON DELETE SET NULL,
+					author_type TEXT NOT NULL DEFAULT 'human' CHECK (author_type IN ('human','agent')),
+					reported_client_name TEXT,
+					reported_client_version TEXT,
+					protocol_version TEXT
+				);
+
+				INSERT INTO stable_notes_v9
+					(id, capture_id, text, created_at, updated_at, target_kind, raw_offset, profile_id,
+					 raw_offsets_json, start_offset, end_offset, sequence_key, start_row, end_row,
+					 message_id, byte_position, frame_id, sequence_group_id, author_type,
+					 reported_client_name, reported_client_version, protocol_version)
+				SELECT id, capture_id, text, created_at, updated_at, target_kind, raw_offset, profile_id,
+					raw_offsets_json, start_offset, end_offset, sequence_key, start_row, end_row,
+					message_id, byte_position, frame_id, sequence_group_id, 'human', NULL, NULL, NULL
+				FROM stable_notes;
+
+				DROP TABLE stable_notes;
+				ALTER TABLE stable_notes_v9 RENAME TO stable_notes;
+				CREATE INDEX stable_notes_capture_kind ON stable_notes (capture_id, target_kind);
+				CREATE INDEX stable_notes_capture_raw_offset ON stable_notes (capture_id, raw_offset);
+				CREATE INDEX stable_notes_profile_target ON stable_notes (profile_id, target_kind);
+				CREATE INDEX stable_notes_sequence_group ON stable_notes (sequence_group_id);
+				CREATE INDEX stable_notes_author_type ON stable_notes (capture_id, author_type, created_at DESC);
+			`);
+			const hasSettings = (database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'application_settings'").get() as { 1: number } | undefined);
+			if (hasSettings) database.prepare("INSERT OR IGNORE INTO application_settings (key, value_json, updated_at) VALUES (@key, 'false', CURRENT_TIMESTAMP)").run({ key: "allow_agent_authored_notes" });
+		}
 	}
 ];
 

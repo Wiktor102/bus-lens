@@ -184,6 +184,6 @@ test("agent access status reports stateless recent clients rather than connectio
 		assert.equal(status.status, "running");
 		assert.deepEqual(status.supportedProtocolEras, ["2026-07-28", "2025-11-25"]);
 		assert.equal(status.recentClients[0]?.reportedClientName, "orientation-test");
-		assert.equal(service.mcpAccess.getStatus().agentNotes, "not-available-in-this-phase");
+	assert.equal(service.mcpAccess.getStatus().agentNotes, "disabled");
 	});
 });

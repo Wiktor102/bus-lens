@@ -149,6 +149,10 @@ export type AgentNoteSummary = Readonly<{
 	startOffset: number | null;
 	endOffset: number | null;
 	sequenceGroupId: string | null;
+	authorType: "human" | "agent";
+	reportedClientName?: string;
+	reportedClientVersion?: string;
+	protocolVersion?: string;
 }>;
 
 export type AgentSequenceSummary = Readonly<{
@@ -1326,11 +1330,12 @@ export class CanonicalQueryService {
 			"SELECT MIN(ordinal) AS start_ordinal, MAX(ordinal) AS end_ordinal FROM materialized_frames WHERE profile_id = @profileId"
 		).get({ profileId: profile.id }) as { start_ordinal: number | null; end_ordinal: number | null };
 		const noteRows = this.database.prepare(
-			`SELECT id, target_kind, text, created_at, profile_id, raw_offset, start_offset, end_offset, sequence_group_id
+			`SELECT id, target_kind, text, created_at, profile_id, raw_offset, start_offset, end_offset, sequence_group_id,
+			        author_type, reported_client_name, reported_client_version, protocol_version
 			 FROM stable_notes
 			 WHERE capture_id = @captureId AND (profile_id IS NULL OR profile_id = @profileId)
 			 ORDER BY created_at DESC LIMIT 17`
-		).all({ captureId, profileId: profile.id }) as Array<{ id: string; target_kind: string; text: string; created_at: string; profile_id: string | null; raw_offset: number | null; start_offset: number | null; end_offset: number | null; sequence_group_id: string | null }>;
+		).all({ captureId, profileId: profile.id }) as Array<{ id: string; target_kind: string; text: string; created_at: string; profile_id: string | null; raw_offset: number | null; start_offset: number | null; end_offset: number | null; sequence_group_id: string | null; author_type: "human" | "agent"; reported_client_name: string | null; reported_client_version: string | null; protocol_version: string | null }>;
 		const signatureRows = this.database.prepare(
 			"SELECT signature, count FROM frame_signatures WHERE profile_id = @profileId ORDER BY count DESC, signature ASC LIMIT 13"
 		).all({ profileId: profile.id }) as Array<{ signature: string; count: number }>;
@@ -1407,7 +1412,7 @@ export class CanonicalQueryService {
 				collapsed: Boolean(section.collapsed)
 			})),
 			counts: { rawBytes: capture.byteCount, framedBytes, frames: frameCount, visibleFrames },
-			notes: noteRows.slice(0, 16).map(row => ({ id: row.id, targetKind: row.target_kind, textPreview: previewText(row.text), createdAt: row.created_at, profileId: row.profile_id, rawOffset: row.raw_offset, startOffset: row.start_offset, endOffset: row.end_offset, sequenceGroupId: row.sequence_group_id })),
+			notes: noteRows.slice(0, 16).map(row => ({ id: row.id, targetKind: row.target_kind, textPreview: previewText(row.text), createdAt: row.created_at, profileId: row.profile_id, rawOffset: row.raw_offset, startOffset: row.start_offset, endOffset: row.end_offset, sequenceGroupId: row.sequence_group_id, authorType: row.author_type, ...(row.reported_client_name ? { reportedClientName: row.reported_client_name } : {}), ...(row.reported_client_version ? { reportedClientVersion: row.reported_client_version } : {}), ...(row.protocol_version ? { protocolVersion: row.protocol_version } : {}) })),
 			topSignatures: signatureRows.slice(0, 12),
 			topTransitions: transitionRows.slice(0, 12).map(row => ({ fromSignature: row.from_signature, toSignature: row.to_signature, count: row.count, changedPositions: row.diffs })),
 			bytePositions: byteRows.slice(0, 32).map(row => ({ position: row.position, applicableFrameCount: row.applicable_frame_count, vocabularySize: row.vocabulary_size, variance: varianceByPosition.get(row.position) ?? null })),

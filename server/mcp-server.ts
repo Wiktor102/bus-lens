@@ -12,6 +12,7 @@ import { toNodeHandler, type NodeMcpRequestHandler } from "@modelcontextprotocol
 import { z } from "zod";
 import { AgentQueryError, type AgentResponse } from "./agent-contracts.ts";
 import type { AgentCaptureDiscovery, AgentCaptureOverview, CaptureDiscoveryFiltersInput } from "./canonical-query.ts";
+import { ALLOW_AGENT_AUTHORED_NOTES_SETTING, CanonicalCaptureCommandService } from "./canonical-capture-command-service.ts";
 import type { SqliteDatabase } from "./database.ts";
 import { McpQueryExecutor, MCP_TOOL_TIMEOUT_MS } from "./mcp-query-executor.ts";
 
@@ -79,6 +80,12 @@ type RecentClient = Readonly<{
 	lastSeenAt: string;
 }>;
 
+export type McpClientAttribution = Readonly<{
+	reportedClientName: string;
+	reportedClientVersion?: string;
+	protocolVersion: string;
+}>;
+
 export type AgentAccessStatus = Readonly<{
 	endpoint: string;
 	serverName: string;
@@ -90,7 +97,7 @@ export type AgentAccessStatus = Readonly<{
 	recentClients: readonly RecentClient[];
 }>;
 
-export type McpToolRegistrar = (server: McpServer, queries: McpQueryExecutor, recordClient: (context: unknown, server: McpServer) => void) => void;
+export type McpToolRegistrar = (server: McpServer, queries: McpQueryExecutor, recordClient: (context: unknown, server: McpServer) => void, commands: CanonicalCaptureCommandService) => void;
 
 export type McpAccessOptions = Readonly<{
 	database: SqliteDatabase;
@@ -101,7 +108,7 @@ export type McpAccessOptions = Readonly<{
 	toolRegistrar?: McpToolRegistrar;
 }>;
 
-function clientMetadata(context: unknown, server: McpServer): { reportedClientName: string; reportedClientVersion?: string; protocolVersion: string } {
+export function getMcpClientAttribution(context: unknown, server: McpServer): McpClientAttribution {
 	const typed = context as {
 		mcpReq?: { envelope?: Record<string, unknown> };
 		http?: { req?: Request };
@@ -276,10 +283,20 @@ export type McpAccess = Readonly<{
 
 export function createMcpAccess(options: McpAccessOptions): McpAccess {
 	const queryExecutor = new McpQueryExecutor(options.databasePath ?? options.database.name);
+	const commands = new CanonicalCaptureCommandService(options.database);
 	const recentClients: RecentClient[] = [];
 	let running = true;
+	const agentNotesStatus = (): AgentAccessStatus["agentNotes"] => {
+		if (options.agentNotes && options.agentNotes !== "not-available-in-this-phase") return options.agentNotes;
+		const value = options.database.prepare("SELECT value_json FROM application_settings WHERE key = @key").get({ key: ALLOW_AGENT_AUTHORED_NOTES_SETTING }) as { value_json: string } | undefined;
+		try {
+			return value && JSON.parse(value.value_json) === true ? "enabled" : "disabled";
+		} catch {
+			return "disabled";
+		}
+	};
 	const recordClient = (context: unknown, server: McpServer): void => {
-		const client = clientMetadata(context, server);
+		const client = getMcpClientAttribution(context, server);
 		const entry: RecentClient = { ...client, lastSeenAt: new Date().toISOString() };
 		const existingIndex = recentClients.findIndex(item => item.reportedClientName === entry.reportedClientName && item.reportedClientVersion === entry.reportedClientVersion);
 		if (existingIndex >= 0) recentClients.splice(existingIndex, 1);
@@ -292,7 +309,7 @@ export function createMcpAccess(options: McpAccessOptions): McpAccess {
 			{ instructions: SERVER_INSTRUCTIONS }
 		);
 		registerOrientationTools(server, queryExecutor, recordClient);
-		options.toolRegistrar?.(server, queryExecutor, recordClient);
+		options.toolRegistrar?.(server, queryExecutor, recordClient, commands);
 		return server;
 	}, {
 		legacy: "stateless",
@@ -311,7 +328,7 @@ export function createMcpAccess(options: McpAccessOptions): McpAccess {
 		status: running ? "running" : "stopped",
 		supportedProtocolEras: MCP_PROTOCOL_VERSIONS,
 		readAccess: "available",
-		agentNotes: options.agentNotes ?? "not-available-in-this-phase",
+		agentNotes: agentNotesStatus(),
 		recentClients: recentClients
 	});
 	return {

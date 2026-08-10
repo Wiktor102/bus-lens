@@ -652,7 +652,7 @@ export class ArchiveRepository {
 			});
 		}
 		// Notes: stable_notes
-		const notesRows = this.database.prepare("SELECT id, text, created_at, target_kind, start_row, end_row, raw_offset, raw_offsets_json, start_offset, end_offset, sequence_key, message_id, byte_position FROM stable_notes WHERE capture_id = @captureId").all({ captureId: id }) as Array<{
+		const notesRows = this.database.prepare("SELECT id, text, created_at, target_kind, start_row, end_row, raw_offset, raw_offsets_json, start_offset, end_offset, sequence_key, sequence_group_id, message_id, byte_position, author_type, reported_client_name, reported_client_version, protocol_version FROM stable_notes WHERE capture_id = @captureId").all({ captureId: id }) as Array<{
 			id: string;
 			text: string;
 			created_at: string;
@@ -664,13 +664,18 @@ export class ArchiveRepository {
 			start_offset: number | null;
 			end_offset: number | null;
 			sequence_key: string | null;
+			sequence_group_id: string | null;
 			message_id: string | null;
 			byte_position: number | null;
+			author_type: "human" | "agent";
+			reported_client_name: string | null;
+			reported_client_version: string | null;
+			protocol_version: string | null;
 		}>;
 		const captureNotes: JsonDocument[] = [];
 		const annotations: Record<string, JsonDocument> = {};
 		for (const row of notesRows) {
-			if (row.target_kind === "legacy-sequence" || row.target_kind === "range") {
+			if (row.target_kind === "legacy-sequence" || row.target_kind === "range" || row.target_kind === "frame-range" || row.target_kind === "sequence-group") {
 				captureNotes.push({
 					id: row.id,
 					type: "sequence",
@@ -680,14 +685,22 @@ export class ArchiveRepository {
 					end: row.end_row,
 					startRawOffset: row.start_offset,
 					endRawOffset: row.end_offset,
-					targetLabel: `rows ${row.start_row}–${row.end_row}`
+					targetLabel: row.target_kind === "sequence-group"
+						? `sequence group ${row.sequence_group_id ?? row.sequence_key ?? row.id}`
+						: `rows ${row.start_row}–${row.end_row}`,
+					authorType: row.author_type,
+					...(row.reported_client_name ? { reportedClientName: row.reported_client_name } : {}),
+					...(row.reported_client_version ? { reportedClientVersion: row.reported_client_version } : {}),
+					...(row.protocol_version ? { protocolVersion: row.protocol_version } : {})
 				});
 			} else if (row.target_kind === "capture") {
-				captureNotes.push({ id: row.id, type: "capture", text: row.text, createdAt: new Date(row.created_at).getTime() });
+				captureNotes.push({ id: row.id, type: "capture", text: row.text, createdAt: new Date(row.created_at).getTime(), authorType: row.author_type, ...(row.reported_client_name ? { reportedClientName: row.reported_client_name } : {}), ...(row.reported_client_version ? { reportedClientVersion: row.reported_client_version } : {}), ...(row.protocol_version ? { protocolVersion: row.protocol_version } : {}) });
 			} else if (row.target_kind === "byte") {
-				annotations[legacyAnnotationKey(messages, row)] = { noteId: row.id, text: row.text, createdAt: new Date(row.created_at).getTime(), type: "byte", targetLabel: `raw ${row.raw_offset}` };
+				annotations[legacyAnnotationKey(messages, row)] = { noteId: row.id, text: row.text, createdAt: new Date(row.created_at).getTime(), type: "byte", targetLabel: `raw ${row.raw_offset}`, authorType: row.author_type, ...(row.reported_client_name ? { reportedClientName: row.reported_client_name } : {}), ...(row.reported_client_version ? { reportedClientVersion: row.reported_client_version } : {}), ...(row.protocol_version ? { protocolVersion: row.protocol_version } : {}) };
 			} else if (row.target_kind === "frame") {
-				annotations[legacyAnnotationKey(messages, row)] = { noteId: row.id, text: row.text, createdAt: new Date(row.created_at).getTime(), type: "message", targetLabel: row.raw_offsets_json || "" };
+				annotations[legacyAnnotationKey(messages, row)] = { noteId: row.id, text: row.text, createdAt: new Date(row.created_at).getTime(), type: "message", targetLabel: row.raw_offsets_json || "", authorType: row.author_type, ...(row.reported_client_name ? { reportedClientName: row.reported_client_name } : {}), ...(row.reported_client_version ? { reportedClientVersion: row.reported_client_version } : {}), ...(row.protocol_version ? { protocolVersion: row.protocol_version } : {}) };
+			} else if (row.target_kind === "raw-range") {
+				annotations[`raw-range:${row.id}`] = { noteId: row.id, text: row.text, createdAt: new Date(row.created_at).getTime(), type: "byte", targetLabel: `raw ${row.start_offset}–${row.end_offset}`, authorType: row.author_type, ...(row.reported_client_name ? { reportedClientName: row.reported_client_name } : {}), ...(row.reported_client_version ? { reportedClientVersion: row.reported_client_version } : {}), ...(row.protocol_version ? { protocolVersion: row.protocol_version } : {}) };
 			} else if (row.target_kind === "pattern") {
 				// patternRemarks not reconstructed here; stored separately but we omit for brevity
 			}
@@ -1460,14 +1473,19 @@ export class ArchiveRepository {
 		start_offset: number | null;
 		end_offset: number | null;
 		sequence_key: string | null;
+		sequence_group_id: string | null;
 		start_row: number | null;
 		end_row: number | null;
 		message_id: string | null;
 		byte_position: number | null;
+		author_type: "human" | "agent";
+		reported_client_name: string | null;
+		reported_client_version: string | null;
+		protocol_version: string | null;
 	}> {
 		return this.database
 			.prepare(
-				`SELECT id, text, created_at, target_kind, raw_offset, raw_offsets_json, profile_id, start_offset, end_offset, sequence_key, start_row, end_row, message_id, byte_position
+				`SELECT id, text, created_at, target_kind, raw_offset, raw_offsets_json, profile_id, start_offset, end_offset, sequence_key, sequence_group_id, start_row, end_row, message_id, byte_position, author_type, reported_client_name, reported_client_version, protocol_version
 				 FROM stable_notes WHERE capture_id = @captureId ORDER BY created_at DESC`
 			)
 			.all({ captureId }) as Array<{
@@ -1481,10 +1499,15 @@ export class ArchiveRepository {
 			start_offset: number | null;
 			end_offset: number | null;
 			sequence_key: string | null;
+			sequence_group_id: string | null;
 			start_row: number | null;
 			end_row: number | null;
 			message_id: string | null;
 			byte_position: number | null;
+			author_type: "human" | "agent";
+			reported_client_name: string | null;
+			reported_client_version: string | null;
+			protocol_version: string | null;
 		}>;
 	}
 

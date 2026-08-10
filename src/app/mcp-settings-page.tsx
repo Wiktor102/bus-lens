@@ -76,6 +76,7 @@ function AgentConfigCard({ codexConfig, claudeConfig }: { codexConfig: string; c
 
 function AgentAccessPanel() {
 	const [status, setStatus] = useState<AgentAccessStatus | null>(null);
+	const [savingNotes, setSavingNotes] = useState(false);
 
 	useEffect(() => {
 		let disposed = false;
@@ -93,6 +94,22 @@ function AgentAccessPanel() {
 	const endpoint = resolveMcpEndpoint(status?.endpoint, window.location.origin);
 	const codexConfig = createCodexMcpConfig(endpoint);
 	const claudeConfig = createClaudeMcpConfig(endpoint);
+	const setAgentNotes = async (enabled: boolean): Promise<void> => {
+		setSavingNotes(true);
+		try {
+			const response = await fetch("/api/settings/allow_agent_authored_notes", {
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(enabled)
+			});
+			if (!response.ok) throw new Error("Could not update agent-note setting");
+			setStatus(current => current ? { ...current, agentNotes: enabled ? "enabled" : "disabled" } : current);
+		} catch {
+			// The read-only status remains authoritative when the setting write fails.
+		} finally {
+			setSavingNotes(false);
+		}
+	};
 
 	return (
 		<>
@@ -111,6 +128,10 @@ function AgentAccessPanel() {
 					<div><span>Agent notes</span><strong>{status?.agentNotes ?? "not available in this phase"}</strong></div>
 					<div><span>Recent clients</span><strong>{status?.recentClients.length ? status.recentClients.map(client => `${client.reportedClientName}${client.reportedClientVersion ? ` ${client.reportedClientVersion}` : ""}`).join(", ") : "None reported yet"}</strong></div>
 				</div>
+				<label className="agent-notes-toggle">
+					<input type="checkbox" checked={status?.agentNotes === "enabled"} disabled={savingNotes || !status} onChange={event => { const enabled = event.currentTarget.checked; void setAgentNotes(enabled); }} />
+					<span>Allow agent-authored notes</span>
+				</label>
 				<p className="muted">MCP is stateless; “recent clients” are self-reported observations, not authenticated connections.</p>
 			</section>
 			<AgentConfigCard codexConfig={codexConfig} claudeConfig={claudeConfig} />

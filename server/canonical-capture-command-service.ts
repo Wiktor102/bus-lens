@@ -14,6 +14,7 @@ import {
 export const CANONICAL_STORAGE_STATUS = "canonical" as const;
 export const CANONICALIZATION_FAILED_STORAGE_STATUS = "canonicalization-failed" as const;
 export const CANONICAL_RETENTION_LIMIT = 50_000;
+export const ALLOW_AGENT_AUTHORED_NOTES_SETTING = "allow_agent_authored_notes" as const;
 
 export type CanonicalStorageStatus =
 	| typeof CANONICAL_STORAGE_STATUS
@@ -24,6 +25,7 @@ export type CanonicalCommandCode =
 	| "VALIDATION_ERROR"
 	| "NOT_FOUND"
 	| "CONFLICT"
+	| "ANNOTATION_DISABLED"
 	| "IDEMPOTENCY_CONFLICT"
 	| "STORAGE_ERROR";
 
@@ -59,6 +61,13 @@ export class CanonicalCaptureConflictError extends CanonicalCaptureCommandError 
 	constructor(message: string, details: CanonicalCommandErrorDetails = {}) {
 		super("CONFLICT", message, details);
 		this.name = "CanonicalCaptureConflictError";
+	}
+}
+
+export class CanonicalCaptureAnnotationDisabledError extends CanonicalCaptureCommandError {
+	constructor() {
+		super("ANNOTATION_DISABLED", "Agent-authored notes are disabled in Bus Lens settings");
+		this.name = "CanonicalCaptureAnnotationDisabledError";
 	}
 }
 
@@ -303,7 +312,7 @@ export type CanonicalNoteTarget =
 			endRawOffset?: number;
 		}>
 	| Readonly<{
-			kind: "range";
+		kind: "range";
 			profileId?: string | null;
 			startOrdinal?: number;
 			endOrdinal?: number;
@@ -311,6 +320,13 @@ export type CanonicalNoteTarget =
 			endRow?: number;
 			startRawOffset?: number;
 			endRawOffset?: number;
+		}>
+	| Readonly<{ kind: "raw-range"; startRawOffset: number; endRawOffset: number }>
+	| Readonly<{
+			kind: "frame-range";
+			profileId: string;
+			startOrdinal: number;
+			endOrdinal: number;
 		}>
 	| Readonly<{ kind: "sequence-group"; groupId?: string; sequenceKey?: string; profileId?: string | null }>
 	| Readonly<{ kind: "sequence"; startRawOffset: number; endRawOffset: number }>
@@ -323,6 +339,10 @@ export type CanonicalNote = Readonly<{
 	text: string;
 	createdAt: string;
 	updatedAt: string | null;
+	authorType: "human" | "agent";
+	reportedClientName?: string;
+	reportedClientVersion?: string;
+	protocolVersion?: string;
 	target: CanonicalNoteTarget;
 }>;
 
@@ -350,6 +370,24 @@ export type DeleteNoteRequest = Readonly<{
 export type NoteResponse = Readonly<{
 	note: CanonicalNote;
 	contentRevision: number;
+}>;
+
+export type AgentNoteAttribution = Readonly<{
+	authorType: "agent";
+	reportedClientName: string;
+	reportedClientVersion?: string;
+	protocolVersion: string;
+}>;
+
+export type CreateAgentNoteRequest = Readonly<{
+	captureId: string;
+	noteId?: string;
+	text: string;
+	target: CanonicalNoteTarget;
+	profileId?: string;
+	profileVersion?: number;
+	sourceDataRevision?: number;
+	attribution: AgentNoteAttribution;
 }>;
 
 export type ClearCaptureDataRequest = Readonly<{
@@ -601,6 +639,10 @@ type NoteRow = {
 	start_row: number | null;
 	end_row: number | null;
 	sequence_group_id: string | null;
+	author_type: "human" | "agent";
+	reported_client_name: string | null;
+	reported_client_version: string | null;
+	protocol_version: string | null;
 };
 
 type FlattenedChunk = {
@@ -747,6 +789,17 @@ function noteTargetFromRow(row: NoteRow): CanonicalNoteTarget {
 			...(row.start_offset === null ? {} : { startRawOffset: row.start_offset }),
 			...(row.end_offset === null ? {} : { endRawOffset: row.end_offset })
 		};
+	}
+	if (row.target_kind === "frame-range") {
+		return {
+			kind: "frame-range",
+			profileId: row.profile_id ?? "",
+			startOrdinal: row.start_row ?? 0,
+			endOrdinal: row.end_row ?? row.start_row ?? 0
+		};
+	}
+	if (row.target_kind === "raw-range") {
+		return { kind: "raw-range", startRawOffset: row.start_offset ?? 0, endRawOffset: row.end_offset ?? row.start_offset ?? 0 };
 	}
 	if (row.target_kind === "sequence-group" || row.target_kind === "pattern") {
 		if (row.target_kind === "sequence-group") {
@@ -999,8 +1052,9 @@ export class CanonicalCaptureCommandService {
 		const notes = this.database
 			.prepare(
 				`SELECT id, capture_id, text, created_at, updated_at, target_kind, raw_offset, profile_id,
-						raw_offsets_json, start_offset, end_offset, sequence_key, start_row, end_row, sequence_group_id
-				 FROM stable_notes WHERE capture_id = @captureId ORDER BY created_at, id`
+						raw_offsets_json, start_offset, end_offset, sequence_key, start_row, end_row, sequence_group_id,
+						author_type, reported_client_name, reported_client_version, protocol_version
+					 FROM stable_notes WHERE capture_id = @captureId ORDER BY created_at, id`
 			)
 			.all({ captureId: id }) as NoteRow[];
 
@@ -1060,14 +1114,18 @@ export class CanonicalCaptureCommandService {
 				endRawOffset: item.end_raw_offset,
 				hidden: Boolean(item.hidden)
 			})),
-			notes: notes.map(note => ({
-				id: note.id,
-				captureId: note.capture_id,
-				text: note.text,
-				createdAt: note.created_at,
-				updatedAt: note.updated_at,
-				target: noteTargetFromRow(note)
-			}))
+				notes: notes.map(note => ({
+					id: note.id,
+					captureId: note.capture_id,
+					text: note.text,
+					createdAt: note.created_at,
+					updatedAt: note.updated_at,
+					authorType: note.author_type,
+					...(note.reported_client_name ? { reportedClientName: note.reported_client_name } : {}),
+					...(note.reported_client_version ? { reportedClientVersion: note.reported_client_version } : {}),
+					...(note.protocol_version ? { protocolVersion: note.protocol_version } : {}),
+					target: noteTargetFromRow(note)
+				}))
 		};
 	}
 
@@ -2435,6 +2493,32 @@ export class CanonicalCaptureCommandService {
 				endRow: endOrdinal
 			};
 		}
+		if (target.kind === "frame-range") {
+			const profileId = requiredString(target.profileId, "target.profileId");
+			const startOrdinal = nonNegativeInteger(target.startOrdinal, "target.startOrdinal");
+			const endOrdinal = nonNegativeInteger(target.endOrdinal, "target.endOrdinal");
+			if (endOrdinal < startOrdinal) throw new CanonicalCaptureValidationError("target.endOrdinal must not precede target.startOrdinal");
+			const frames = this.database
+				.prepare(
+					`SELECT raw_offsets_json FROM materialized_frames
+					 WHERE capture_id = @captureId AND profile_id = @profileId
+					   AND ordinal >= @startOrdinal AND ordinal <= @endOrdinal
+					 ORDER BY ordinal`
+				)
+				.all({ captureId, profileId, startOrdinal, endOrdinal }) as Array<{ raw_offsets_json: string }>;
+			if (!frames.length) throw new CanonicalCaptureValidationError("frame range resolves to no evidence");
+			const offsets = frames.flatMap(frame => JSON.parse(frame.raw_offsets_json) as number[]);
+			if (!offsets.length) throw new CanonicalCaptureValidationError("frame range resolves to no raw-span evidence");
+			return { targetKind: "frame-range", ...empty, profileId, startOffset: Math.min(...offsets), endOffset: Math.max(...offsets), startRow: startOrdinal, endRow: endOrdinal };
+		}
+		if (target.kind === "raw-range") {
+			const startOffset = nonNegativeInteger(target.startRawOffset, "target.startRawOffset");
+			const endOffset = nonNegativeInteger(target.endRawOffset, "target.endRawOffset");
+			if (endOffset < startOffset) throw new CanonicalCaptureValidationError("target.endRawOffset must not precede target.startRawOffset");
+			this.requireRawOffset(captureId, startOffset);
+			this.requireRawOffset(captureId, endOffset);
+			return { targetKind: "raw-range", ...empty, startOffset, endOffset };
+		}
 		if (target.kind === "pattern") {
 			const sequenceKey = requiredString(target.sequenceKey, "target.sequenceKey");
 			return { targetKind: "pattern", ...empty, sequenceKey };
@@ -2457,12 +2541,24 @@ export class CanonicalCaptureCommandService {
 		const row = this.database
 			.prepare(
 				`SELECT id, capture_id, text, created_at, updated_at, target_kind, raw_offset, profile_id,
-				        raw_offsets_json, start_offset, end_offset, sequence_key, start_row, end_row, sequence_group_id
+				        raw_offsets_json, start_offset, end_offset, sequence_key, start_row, end_row, sequence_group_id,
+				        author_type, reported_client_name, reported_client_version, protocol_version
 				 FROM stable_notes WHERE capture_id = @captureId AND id = @noteId`
 			)
 			.get({ captureId, noteId }) as NoteRow | undefined;
 		if (!row) throw new CanonicalCaptureNotFoundError(`${captureId}/notes/${noteId}`);
-		return { id: row.id, captureId: row.capture_id, text: row.text, createdAt: row.created_at, updatedAt: row.updated_at, target: noteTargetFromRow(row) };
+		return {
+			id: row.id,
+			captureId: row.capture_id,
+			text: row.text,
+			createdAt: row.created_at,
+			updatedAt: row.updated_at,
+			authorType: row.author_type,
+			...(row.reported_client_name ? { reportedClientName: row.reported_client_name } : {}),
+			...(row.reported_client_version ? { reportedClientVersion: row.reported_client_version } : {}),
+			...(row.protocol_version ? { protocolVersion: row.protocol_version } : {}),
+			target: noteTargetFromRow(row)
+		};
 	}
 
 	createNote(request: CreateNoteRequest): NoteResponse {
@@ -2483,6 +2579,73 @@ export class CanonicalCaptureCommandService {
 						  @startOffset, @endOffset, @sequenceKey, @startRow, @endRow, @frameId, @sequenceGroupId)`
 					)
 					.run({ noteId, captureId, text, createdAt, ...target });
+			} catch (error) {
+				if (String(error).includes("UNIQUE constraint")) throw new CanonicalCaptureConflictError("note id already exists", { captureId, noteId });
+				throw error;
+			}
+			return this.incrementContentRevision(captureId);
+		});
+		const contentRevision = transaction() as number;
+		return { note: this.readNote(captureId, noteId), contentRevision };
+	}
+
+	public isAgentNotesEnabled(): boolean {
+		const row = this.database
+			.prepare("SELECT value_json FROM application_settings WHERE key = @key")
+			.get({ key: ALLOW_AGENT_AUTHORED_NOTES_SETTING }) as { value_json: string } | undefined;
+		if (!row) return false;
+		try {
+			return JSON.parse(row.value_json) === true;
+		} catch {
+			return false;
+		}
+	}
+
+	createAgentNote(request: CreateAgentNoteRequest): NoteResponse {
+		const captureId = requiredString(request.captureId, "captureId");
+		const noteId = requiredString(request.noteId ?? this.generateId(), "noteId");
+		const text = requiredString(request.text, "text");
+		if (text.length > 4_000) throw new CanonicalCaptureValidationError("agent note text must be at most 4000 characters");
+		const attribution = request.attribution;
+		const reportedClientName = requiredString(attribution.reportedClientName, "attribution.reportedClientName");
+		const protocolVersion = requiredString(attribution.protocolVersion, "attribution.protocolVersion");
+		if (reportedClientName.length > 200 || protocolVersion.length > 80 || attribution.reportedClientVersion && attribution.reportedClientVersion.length > 80) {
+			throw new CanonicalCaptureValidationError("agent note attribution metadata is too long");
+		}
+		const targetNeedsProfile = request.target.kind === "frame" || request.target.kind === "frame-range" || request.target.kind === "sequence-group";
+		const profileFieldsPresent = request.profileId !== undefined || request.profileVersion !== undefined || request.sourceDataRevision !== undefined;
+		if (targetNeedsProfile && (request.profileId === undefined || request.profileVersion === undefined || request.sourceDataRevision === undefined)) {
+			throw new CanonicalCaptureValidationError("agent evidence targets require profileId, profileVersion, and sourceDataRevision");
+		}
+		if (profileFieldsPresent && (request.profileId === undefined || request.profileVersion === undefined || request.sourceDataRevision === undefined)) {
+			throw new CanonicalCaptureValidationError("profileId, profileVersion, and sourceDataRevision must be supplied together");
+		}
+		if (request.profileVersion !== undefined && (!Number.isSafeInteger(request.profileVersion) || request.profileVersion < 1)) throw new CanonicalCaptureValidationError("profileVersion must be a positive integer");
+		if (request.sourceDataRevision !== undefined && (!Number.isSafeInteger(request.sourceDataRevision) || request.sourceDataRevision < 0)) throw new CanonicalCaptureValidationError("sourceDataRevision must be a non-negative integer");
+		const transaction = this.database.transaction(() => {
+			if (!this.isAgentNotesEnabled()) throw new CanonicalCaptureAnnotationDisabledError();
+			this.requireCanonicalStorage(captureId);
+			const target = this.resolveNoteTarget(captureId, request.target);
+			if (request.profileId !== undefined) {
+				const profile = this.database
+					.prepare("SELECT id, version, source_data_revision, verified FROM framing_profiles WHERE id = @profileId AND capture_id = @captureId")
+					.get({ captureId, profileId: request.profileId }) as { id: string; version: number; source_data_revision: number; verified: number } | undefined;
+				if (!profile) throw new CanonicalCaptureNotFoundError(`${captureId}/profiles/${request.profileId}`);
+				if (profile.version !== request.profileVersion || profile.source_data_revision !== request.sourceDataRevision || !profile.verified) throw new CanonicalCaptureConflictError("agent note profile revision is not available", { captureId, profileId: request.profileId, profileVersion: request.profileVersion, sourceDataRevision: request.sourceDataRevision });
+				if (target.profileId && target.profileId !== request.profileId) throw new CanonicalCaptureConflictError("agent note target does not match its profile revision", { captureId, targetProfileId: target.profileId, profileId: request.profileId });
+			}
+			try {
+				this.database
+					.prepare(
+						`INSERT INTO stable_notes
+						 (id, capture_id, text, created_at, target_kind, raw_offset, profile_id, raw_offsets_json,
+						  start_offset, end_offset, sequence_key, start_row, end_row, frame_id, sequence_group_id,
+						  author_type, reported_client_name, reported_client_version, protocol_version)
+						 VALUES (@noteId, @captureId, @text, @createdAt, @targetKind, @rawOffset, @profileId, @rawOffsetsJson,
+						  @startOffset, @endOffset, @sequenceKey, @startRow, @endRow, @frameId, @sequenceGroupId,
+						  'agent', @reportedClientName, @reportedClientVersion, @protocolVersion)`
+					)
+					.run({ noteId, captureId, text, createdAt: this.nowIso(), ...target, reportedClientName, reportedClientVersion: attribution.reportedClientVersion ?? null, protocolVersion });
 			} catch (error) {
 				if (String(error).includes("UNIQUE constraint")) throw new CanonicalCaptureConflictError("note id already exists", { captureId, noteId });
 				throw error;
@@ -2727,6 +2890,10 @@ export class CanonicalCaptureCommandService {
 			byte_position: number | null;
 			frame_id: string | null;
 			sequence_group_id: string | null;
+			author_type: "human" | "agent";
+			reported_client_name: string | null;
+			reported_client_version: string | null;
+			protocol_version: string | null;
 		};
 		type SourceJob = {
 			id: string;
@@ -2875,7 +3042,8 @@ export class CanonicalCaptureCommandService {
 				.prepare(
 					`SELECT id, text, created_at, updated_at, target_kind, raw_offset, profile_id,
 							raw_offsets_json, start_offset, end_offset, sequence_key, start_row, end_row,
-							message_id, byte_position, frame_id, sequence_group_id
+							message_id, byte_position, frame_id, sequence_group_id, author_type,
+							reported_client_name, reported_client_version, protocol_version
 					 FROM stable_notes WHERE capture_id = @captureId ORDER BY created_at, id`
 				)
 				.all({ captureId: sourceCaptureId }) as SourceNote[];
@@ -3264,9 +3432,11 @@ export class CanonicalCaptureCommandService {
 			const insertNote = this.database.prepare(
 				`INSERT INTO stable_notes
 				 (id, capture_id, text, created_at, updated_at, target_kind, raw_offset, profile_id, raw_offsets_json,
-				  start_offset, end_offset, sequence_key, start_row, end_row, message_id, byte_position, frame_id, sequence_group_id)
-				 VALUES (@id, @captureId, @text, @createdAt, @updatedAt, @targetKind, @rawOffset, @profileId, @rawOffsetsJson,
-				  @startOffset, @endOffset, @sequenceKey, @startRow, @endRow, @messageId, @bytePosition, @frameId, @sequenceGroupId)`
+					 start_offset, end_offset, sequence_key, start_row, end_row, message_id, byte_position, frame_id, sequence_group_id,
+					 author_type, reported_client_name, reported_client_version, protocol_version)
+					 VALUES (@id, @captureId, @text, @createdAt, @updatedAt, @targetKind, @rawOffset, @profileId, @rawOffsetsJson,
+					  @startOffset, @endOffset, @sequenceKey, @startRow, @endRow, @messageId, @bytePosition, @frameId, @sequenceGroupId,
+					  @authorType, @reportedClientName, @reportedClientVersion, @protocolVersion)`
 			);
 			notes.forEach(note =>
 				insertNote.run({
@@ -3287,7 +3457,11 @@ export class CanonicalCaptureCommandService {
 					messageId: note.message_id,
 					bytePosition: note.byte_position,
 					frameId: sourceFrameId(note.frame_id),
-					sequenceGroupId: sourceGroupId(note.sequence_group_id)
+					sequenceGroupId: sourceGroupId(note.sequence_group_id),
+					authorType: note.author_type,
+					reportedClientName: note.reported_client_name,
+					reportedClientVersion: note.reported_client_version,
+					protocolVersion: note.protocol_version
 				})
 			);
 

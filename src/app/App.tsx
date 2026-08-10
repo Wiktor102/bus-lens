@@ -927,6 +927,8 @@ function NotesPanelContent() {
 	const [sequenceStart, setSequenceStart] = useState("1");
 	const [sequenceEnd, setSequenceEnd] = useState("2");
 	const [noteText, setNoteText] = useState("");
+	const [originFilter, setOriginFilter] = useState<"all" | "human" | "agent">("all");
+	const visibleNotes = snapshot.notes.filter(note => originFilter === "all" || (note.authorType ?? "human") === originFilter);
 
 	return (
 		<div className="notes-layout">
@@ -935,23 +937,38 @@ function NotesPanelContent() {
 						<span className="eyebrow">Notebook</span>
 						<h2>Protocol observations</h2>
 					</div>
+					<label className="notes-origin-filter">
+						<span>Origin</span>
+						<select
+							value={originFilter}
+							onChange={event => {
+								const value = event.currentTarget.value as "all" | "human" | "agent";
+								setOriginFilter(value);
+							}}
+						>
+							<option value="all">All notes</option>
+							<option value="human">Human notes</option>
+							<option value="agent">Agent notes</option>
+						</select>
+					</label>
 					<div id="notesList" className="notes-list">
-						{snapshot.notes.length ? (
-							snapshot.notes.map(note => (
+						{visibleNotes.length ? (
+							visibleNotes.map(note => (
 								<article className="note-card" key={note.id}>
 									<header>
 										<span>
+											<span className={`note-origin ${note.authorType === "agent" ? "agent" : "human"}`.trim()}>{note.authorType === "agent" ? `AGENT · ${note.reportedClientName ?? "unknown-mcp-client"}` : "HUMAN"}</span>{" "}
 											{note.label}
 											{note.targetLabel ? ` · ${note.targetLabel}` : ""}
 										</span>
-										<span>{new Date(note.createdAt).toLocaleString()}</span>
+										<span>{new Date(note.createdAt).toLocaleString()}{note.authorType === "agent" && note.protocolVersion ? ` · ${note.protocolVersion}` : ""}</span>
 									</header>
 									<p>{note.text}</p>
 								</article>
 							))
 						) : (
 							<p className="muted">
-								{snapshot.captureId ? "No observations recorded for this capture." : "No capture selected."}
+								{snapshot.captureId ? originFilter === "all" ? "No observations recorded for this capture." : `No ${originFilter} notes recorded for this capture.` : "No capture selected."}
 							</p>
 						)}
 					</div>
