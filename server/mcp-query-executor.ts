@@ -1,8 +1,22 @@
 import { Worker } from "node:worker_threads";
 import { AgentQueryError, type AgentResponse } from "./agent-contracts.ts";
 import type {
+	AgentByteStatisticsInput,
+	AgentByteStatisticsResult,
 	AgentCaptureDiscovery,
 	AgentCaptureOverview,
+	AgentMessageContext,
+	AgentMessageContextInput,
+	AgentMessageQueryInput,
+	AgentMessageQueryResult,
+	AgentRawRead,
+	AgentRawReadInput,
+	AgentSequenceGroupsInput,
+	AgentSequenceGroupsResult,
+	AgentSequenceOccurrencesInput,
+	AgentSequenceOccurrencesResult,
+	AgentTransitionsInput,
+	AgentTransitionsResult,
 	CaptureDiscoveryFiltersInput
 } from "./canonical-query.ts";
 import type { AgentSnapshotReference } from "./agent-contracts.ts";
@@ -120,6 +134,34 @@ export class McpQueryExecutor {
 
 	queryCaptureOverview(captureId: string, snapshot?: Partial<AgentSnapshotReference>): Promise<AgentResponse<AgentCaptureOverview>> {
 		return this.run({ operation: "capture-overview", captureId, snapshot });
+	}
+
+	queryMessages(input: AgentMessageQueryInput): Promise<AgentResponse<AgentMessageQueryResult>> {
+		return this.run<AgentResponse<AgentMessageQueryResult>>({ operation: "messages", input });
+	}
+
+	getMessageContext(input: AgentMessageContextInput): Promise<AgentResponse<AgentMessageContext>> {
+		return this.run<AgentResponse<AgentMessageContext>>({ operation: "message-context", input });
+	}
+
+	getSequenceGroups(input: AgentSequenceGroupsInput): Promise<AgentResponse<AgentSequenceGroupsResult>> {
+		return this.run<AgentResponse<AgentSequenceGroupsResult>>({ operation: "sequence-groups", input });
+	}
+
+	getSequenceOccurrences(input: AgentSequenceOccurrencesInput): Promise<AgentResponse<AgentSequenceOccurrencesResult>> {
+		return this.run<AgentResponse<AgentSequenceOccurrencesResult>>({ operation: "sequence-occurrences", input });
+	}
+
+	getByteStatistics(input: AgentByteStatisticsInput): Promise<AgentResponse<AgentByteStatisticsResult>> {
+		return this.run<AgentResponse<AgentByteStatisticsResult>>({ operation: "byte-statistics", input });
+	}
+
+	getTransitions(input: AgentTransitionsInput): Promise<AgentResponse<AgentTransitionsResult>> {
+		return this.run<AgentResponse<AgentTransitionsResult>>({ operation: "transitions", input });
+	}
+
+	readRawBytes(input: AgentRawReadInput): Promise<AgentResponse<AgentRawRead>> {
+		return this.run<AgentResponse<AgentRawRead>>({ operation: "raw-bytes", input });
 	}
 
 	async close(): Promise<void> {

@@ -16,9 +16,9 @@ import type {
 	AgentSequenceOccurrencesInput,
 	AgentSequenceOccurrencesResult,
 	AgentTransitionsInput,
-	AgentTransitionsResult,
-	CanonicalQueryService
+	AgentTransitionsResult
 } from "./canonical-query.ts";
+import type { McpQueryExecutor } from "./mcp-query-executor.ts";
 
 type RecordClient = (context: unknown, server: McpServer) => void;
 
@@ -36,20 +36,6 @@ function errorResult(error: unknown): { isError: true; structuredContent: AgentR
 		}
 	};
 	return { isError: true, structuredContent: response, content: [{ type: "text", text: normalized.message }] };
-}
-
-async function withTimeout<T>(operation: () => T | Promise<T>): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	try {
-		return await Promise.race([
-			Promise.resolve().then(operation),
-			new Promise<T>((_, reject) => {
-				timer = setTimeout(() => reject(new AgentQueryError("execution-timeout", "Tool execution exceeded the local execution limit", { timeoutMs: 5_000 })), 5_000);
-			})
-		]);
-	} finally {
-		if (timer) clearTimeout(timer);
-	}
 }
 
 function textResult<T>(response: AgentResponse<T>, text: string) {
@@ -70,14 +56,14 @@ function registerAnalysisTool<TInput extends object>(
 	name: string,
 	description: string,
 	inputSchema: z.ZodType<TInput>,
-	call: (input: TInput) => AgentResponse<unknown>,
+	call: (input: TInput) => Promise<AgentResponse<unknown>>,
 	synopsis: (response: AgentResponse<unknown>) => string,
 	recordClient: RecordClient
 ): void {
 	server.registerTool(name, { description, inputSchema, outputSchema: agentResponseSchema }, async (input, context) => {
 		recordClient(context, server);
 		try {
-			const response = await withTimeout(() => call(input as TInput));
+			const response = await call(input as TInput);
 			return textResult(response, synopsis(response));
 		} catch (error) {
 			return errorResult(error);
@@ -85,7 +71,7 @@ function registerAnalysisTool<TInput extends object>(
 	});
 }
 
-export function registerAnalysisTools(server: McpServer, queries: CanonicalQueryService, recordClient: RecordClient): void {
+export function registerAnalysisTools(server: McpServer, queries: McpQueryExecutor, recordClient: RecordClient): void {
 	registerAnalysisTool(
 		server,
 		"query_messages",
@@ -109,7 +95,7 @@ export function registerAnalysisTools(server: McpServer, queries: CanonicalQuery
 			cursor: z.string().optional(),
 			limit: z.number().int().positive().max(200).optional()
 		}),
-		input => queries.queryMessages(input as AgentMessageQueryInput) as AgentResponse<unknown>,
+		input => queries.queryMessages(input as AgentMessageQueryInput),
 		response => `Returned ${response.meta.page?.returned ?? 0} bounded frame${response.meta.page?.returned === 1 ? "" : "s"}. Use a stable frame ID with get_message_context for local neighbors.`,
 		recordClient
 	);
@@ -127,7 +113,7 @@ export function registerAnalysisTools(server: McpServer, queries: CanonicalQuery
 			rowsBefore: z.number().int().positive().max(100).optional(),
 			rowsAfter: z.number().int().positive().max(100).optional()
 		}),
-		input => queries.getMessageContext(input as AgentMessageContextInput) as AgentResponse<unknown>,
+		input => queries.getMessageContext(input as AgentMessageContextInput),
 		response => `Returned ${response.meta.page?.returned ?? (response.data as AgentMessageContext).messages.length} frames around the selected stable frame.`,
 		recordClient
 	);
@@ -144,7 +130,7 @@ export function registerAnalysisTools(server: McpServer, queries: CanonicalQuery
 			cursor: z.string().optional(),
 			limit: z.number().int().positive().max(100).optional()
 		}),
-		input => queries.getSequenceGroups(input as AgentSequenceGroupsInput) as AgentResponse<unknown>,
+		input => queries.getSequenceGroups(input as AgentSequenceGroupsInput),
 		response => `Returned ${response.meta.page?.returned ?? 0} bounded sequence-group summar${response.meta.page?.returned === 1 ? "y" : "ies"}.`,
 		recordClient
 	);
@@ -165,7 +151,7 @@ export function registerAnalysisTools(server: McpServer, queries: CanonicalQuery
 			contextBefore: z.number().int().positive().max(10).optional(),
 			contextAfter: z.number().int().positive().max(10).optional()
 		}),
-		input => queries.getSequenceOccurrences(input as AgentSequenceOccurrencesInput) as AgentResponse<unknown>,
+		input => queries.getSequenceOccurrences(input as AgentSequenceOccurrencesInput),
 		response => `Returned ${response.meta.page?.returned ?? (response.data as AgentSequenceOccurrencesResult).occurrences.length} bounded sequence occurrence${response.meta.page?.returned === 1 ? "" : "s"}.`,
 		recordClient
 	);
@@ -181,7 +167,7 @@ export function registerAnalysisTools(server: McpServer, queries: CanonicalQuery
 			sourceDataRevision: z.number().int().nonnegative().optional(),
 			positions: z.array(z.number().int().nonnegative()).min(1).max(32)
 		}),
-		input => queries.getByteStatistics(input as AgentByteStatisticsInput) as AgentResponse<unknown>,
+		input => queries.getByteStatistics(input as AgentByteStatisticsInput),
 		response => `Returned byte statistics for ${(response.data as AgentByteStatisticsResult).positions.length} requested position${(response.data as AgentByteStatisticsResult).positions.length === 1 ? "" : "s"}.`,
 		recordClient
 	);
@@ -203,7 +189,7 @@ export function registerAnalysisTools(server: McpServer, queries: CanonicalQuery
 			cursor: z.string().optional(),
 			limit: z.number().int().positive().max(100).optional()
 		}),
-		input => queries.getTransitions(input as AgentTransitionsInput) as AgentResponse<unknown>,
+		input => queries.getTransitions(input as AgentTransitionsInput),
 		response => `Returned ${(response.data as AgentTransitionsResult).transitions.length} bounded transition result${(response.data as AgentTransitionsResult).transitions.length === 1 ? "" : "s"}.`,
 		recordClient
 	);
@@ -220,7 +206,7 @@ export function registerAnalysisTools(server: McpServer, queries: CanonicalQuery
 			byteCount: z.number().int().positive().max(4096).optional(),
 			hiddenPolicy: z.enum(["mask", "include", "omit"]).optional()
 		}),
-		input => queries.readRawBytes(input as AgentRawReadInput) as AgentResponse<unknown>,
+		input => queries.readRawBytes(input as AgentRawReadInput),
 		response => `Returned ${(response.data as AgentRawRead).returnedByteCount} raw byte positions in the explicitly requested range.`,
 		recordClient
 	);

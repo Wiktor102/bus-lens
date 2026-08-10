@@ -8,14 +8,35 @@ import {
 } from "./agent-contracts.ts";
 import {
 	CanonicalQueryService,
+	type AgentByteStatisticsInput,
+	type AgentByteStatisticsResult,
 	type AgentCaptureDiscovery,
 	type AgentCaptureOverview,
+	type AgentMessageContext,
+	type AgentMessageContextInput,
+	type AgentMessageQueryInput,
+	type AgentMessageQueryResult,
+	type AgentRawRead,
+	type AgentRawReadInput,
+	type AgentSequenceGroupsInput,
+	type AgentSequenceGroupsResult,
+	type AgentSequenceOccurrencesInput,
+	type AgentSequenceOccurrencesResult,
+	type AgentTransitionsInput,
+	type AgentTransitionsResult,
 	type CaptureDiscoveryFiltersInput
 } from "./canonical-query.ts";
 
 export type McpQueryRequest =
 	| { operation: "capture-discovery"; input: CaptureDiscoveryFiltersInput }
-	| { operation: "capture-overview"; captureId: string; snapshot?: Partial<AgentSnapshotReference> };
+	| { operation: "capture-overview"; captureId: string; snapshot?: Partial<AgentSnapshotReference> }
+	| { operation: "messages"; input: AgentMessageQueryInput }
+	| { operation: "message-context"; input: AgentMessageContextInput }
+	| { operation: "sequence-groups"; input: AgentSequenceGroupsInput }
+	| { operation: "sequence-occurrences"; input: AgentSequenceOccurrencesInput }
+	| { operation: "byte-statistics"; input: AgentByteStatisticsInput }
+	| { operation: "transitions"; input: AgentTransitionsInput }
+	| { operation: "raw-bytes"; input: AgentRawReadInput };
 
 export type McpQueryWorkerResponse<T> =
 	| { ok: true; value: T }
@@ -49,9 +70,36 @@ try {
 	// run migrations or share the service's writable connection across threads.
 	database = new Database(databasePath, { readonly: true, fileMustExist: true, timeout: 0 });
 	const queries = new CanonicalQueryService(database);
-	const value = database.transaction((): AgentResponse<AgentCaptureDiscovery> | AgentResponse<AgentCaptureOverview> => {
-		if (request.operation === "capture-discovery") return queries.queryCaptureDiscovery(request.input);
-		return queries.queryCaptureOverview(request.captureId, request.snapshot);
+	const value = database.transaction(():
+		| AgentResponse<AgentCaptureDiscovery>
+		| AgentResponse<AgentCaptureOverview>
+		| AgentResponse<AgentMessageQueryResult>
+		| AgentResponse<AgentMessageContext>
+		| AgentResponse<AgentSequenceGroupsResult>
+		| AgentResponse<AgentSequenceOccurrencesResult>
+		| AgentResponse<AgentByteStatisticsResult>
+		| AgentResponse<AgentTransitionsResult>
+		| AgentResponse<AgentRawRead> => {
+		switch (request.operation) {
+			case "capture-discovery":
+				return queries.queryCaptureDiscovery(request.input);
+			case "capture-overview":
+				return queries.queryCaptureOverview(request.captureId, request.snapshot);
+			case "messages":
+				return queries.queryMessages(request.input);
+			case "message-context":
+				return queries.getMessageContext(request.input);
+			case "sequence-groups":
+				return queries.getSequenceGroups(request.input);
+			case "sequence-occurrences":
+				return queries.getSequenceOccurrences(request.input);
+			case "byte-statistics":
+				return queries.getByteStatistics(request.input);
+			case "transitions":
+				return queries.getTransitions(request.input);
+			case "raw-bytes":
+				return queries.readRawBytes(request.input);
+		}
 	})();
 	parentPort.postMessage({ ok: true, value } satisfies McpQueryWorkerResponse<typeof value>);
 } catch (error) {

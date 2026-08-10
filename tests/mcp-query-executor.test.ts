@@ -49,6 +49,12 @@ test("canonical MCP queries use a worker-owned read-only connection and preserve
 			assert.equal(error.code, "not-found");
 			return true;
 		});
+
+		await assert.rejects(executor.queryMessages({ captureId: "legacy" }), error => {
+			assert.ok(error instanceof AgentQueryError);
+			assert.equal(error.code, "legacy-not-canonicalized");
+			return true;
+		});
 	} finally {
 		await executor.close();
 		database.close();

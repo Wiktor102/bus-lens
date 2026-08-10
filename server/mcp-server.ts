@@ -11,12 +11,7 @@ import {
 import { toNodeHandler, type NodeMcpRequestHandler } from "@modelcontextprotocol/node";
 import { z } from "zod";
 import { AgentQueryError, type AgentResponse } from "./agent-contracts.ts";
-import {
-	CanonicalQueryService,
-	type AgentCaptureDiscovery,
-	type AgentCaptureOverview,
-	type CaptureDiscoveryFiltersInput
-} from "./canonical-query.ts";
+import type { AgentCaptureDiscovery, AgentCaptureOverview, CaptureDiscoveryFiltersInput } from "./canonical-query.ts";
 import type { SqliteDatabase } from "./database.ts";
 import { McpQueryExecutor, MCP_TOOL_TIMEOUT_MS } from "./mcp-query-executor.ts";
 
@@ -95,7 +90,7 @@ export type AgentAccessStatus = Readonly<{
 	recentClients: readonly RecentClient[];
 }>;
 
-export type McpToolRegistrar = (server: McpServer, queries: CanonicalQueryService, recordClient: (context: unknown, server: McpServer) => void) => void;
+export type McpToolRegistrar = (server: McpServer, queries: McpQueryExecutor, recordClient: (context: unknown, server: McpServer) => void) => void;
 
 export type McpAccessOptions = Readonly<{
 	database: SqliteDatabase;
@@ -280,7 +275,6 @@ export type McpAccess = Readonly<{
 }>;
 
 export function createMcpAccess(options: McpAccessOptions): McpAccess {
-	const queries = new CanonicalQueryService(options.database);
 	const queryExecutor = new McpQueryExecutor(options.databasePath ?? options.database.name);
 	const recentClients: RecentClient[] = [];
 	let running = true;
@@ -298,7 +292,7 @@ export function createMcpAccess(options: McpAccessOptions): McpAccess {
 			{ instructions: SERVER_INSTRUCTIONS }
 		);
 		registerOrientationTools(server, queryExecutor, recordClient);
-		options.toolRegistrar?.(server, queries, recordClient);
+		options.toolRegistrar?.(server, queryExecutor, recordClient);
 		return server;
 	}, {
 		legacy: "stateless",
