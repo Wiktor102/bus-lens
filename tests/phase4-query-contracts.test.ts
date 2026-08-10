@@ -126,6 +126,45 @@ test("agent overview pins an explicit profile revision and remains bounded", asy
 	});
 });
 
+test("agent overview resolves pattern remarks by key within the selected capture", async () => {
+	await withTemporaryArchive(async directory => {
+		const database = openDatabase(join(directory, "archive.sqlite"), () => "2026-08-10T00:00:00.000Z");
+		const repository = new ArchiveRepository(database, { nowIso: () => "2026-08-10T00:00:00.000Z" });
+		const capture = (id: string) => ({
+			id,
+			name: id,
+			parameters: [],
+			byteStream: [
+				{ rawOffset: 0, value: 0x10, timestamp: 1, direction: "rx" },
+				{ rawOffset: 1, value: 0x20, timestamp: 2, direction: "rx" }
+			],
+			frameSections: [{ id: `${id}-section`, start: 0, framingMode: "length", frameSize: 2 }],
+			messages: [{ id: `${id}-message`, timestamp: 1, bytes: [0x10, 0x20], rawOffsets: [0, 1], byteTimestamps: [1, 2] }],
+			notes: []
+		});
+		repository.putCapture("pattern-capture", capture("pattern-capture"));
+		repository.putCapture("other-capture", capture("other-capture"));
+		repository.convertCaptureToCanonical("pattern-capture");
+		repository.convertCaptureToCanonical("other-capture");
+		const queries = new CanonicalQueryService(database);
+		const profileId = queries.queryCaptureOverview("pattern-capture").meta.snapshot!.profileId;
+		database.prepare(
+			`INSERT INTO sequence_groups (id, capture_id, profile_id, key_text, signatures_json, score, length)
+			 VALUES ('pattern-group', 'pattern-capture', @profileId, 'AA×1', '[]', 1, 1)`
+		).run({ profileId });
+		const insertNote = database.prepare(
+			`INSERT INTO stable_notes (id, capture_id, text, created_at, target_kind, profile_id, sequence_key)
+			 VALUES (@id, @captureId, @text, @createdAt, 'pattern', @profileId, @sequenceKey)`
+		);
+		insertNote.run({ id: "local-pattern-note", captureId: "pattern-capture", text: "local pattern", createdAt: "2026-08-10T00:00:01.000Z", profileId: null, sequenceKey: "AA×1" });
+		insertNote.run({ id: "foreign-pattern-note", captureId: "other-capture", text: "foreign pattern", createdAt: "2026-08-10T00:00:02.000Z", profileId: null, sequenceKey: "AA×1" });
+
+		const overview = queries.queryCaptureOverview("pattern-capture");
+		assert.equal(overview.data.sequenceGroups.find(group => group.id === "pattern-group")?.remark, "local pattern");
+		repository.close();
+	});
+});
+
 test("large discovery fixtures return bounded pages and use agent ordering indexes", async () => {
 	await withTemporaryArchive(async directory => {
 		const database = openDatabase(join(directory, "archive.sqlite"));

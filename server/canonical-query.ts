@@ -756,7 +756,7 @@ export class CanonicalQueryService {
 		).all({ profileId: profile.id }) as Array<{ position: number; variance: string }>;
 		const varianceByPosition = new Map(varianceRows.map(row => [row.position, row.variance]));
 		const groupRows = this.database.prepare(
-			`SELECT groups.id, groups.signatures_json, groups.length,
+			`SELECT groups.id, groups.key_text, groups.signatures_json, groups.length,
 			        COUNT(DISTINCT occurrences.occurrence_index) AS occurrence_count,
 			        MIN(occurrences.start_frame_ordinal) AS first_ordinal,
 			        MAX(occurrences.start_frame_ordinal) AS last_ordinal,
@@ -764,9 +764,9 @@ export class CanonicalQueryService {
 			        MAX(occurrences.end_raw_offset) AS last_raw_offset
 			 FROM sequence_groups groups
 			 LEFT JOIN sequence_occurrences occurrences ON occurrences.group_id = groups.id
-			 WHERE groups.profile_id = @profileId
+			 WHERE groups.capture_id = @captureId AND groups.profile_id = @profileId
 			 GROUP BY groups.id ORDER BY occurrence_count DESC, groups.id ASC LIMIT 13`
-		).all({ profileId: profile.id }) as Array<{ id: string; signatures_json: string; length: number; occurrence_count: number; first_ordinal: number | null; last_ordinal: number | null; first_raw_offset: number | null; last_raw_offset: number | null }>;
+		).all({ captureId, profileId: profile.id }) as Array<{ id: string; key_text: string; signatures_json: string; length: number; occurrence_count: number; first_ordinal: number | null; last_ordinal: number | null; first_raw_offset: number | null; last_raw_offset: number | null }>;
 		const sequenceGroups: AgentSequenceSummary[] = groupRows.slice(0, 12).map(row => {
 			const occurrenceTimes = this.database.prepare(
 				`SELECT occurrence_index, start_frame_ordinal, MIN(timestamps_json) AS timestamps_json
@@ -780,8 +780,12 @@ export class CanonicalQueryService {
 				 FROM sequence_occurrences WHERE group_id = @groupId ORDER BY occurrence_index DESC LIMIT 1`
 			).get({ groupId: row.id }) as { occurrence_index: number; start_frame_ordinal: number } | undefined;
 			const note = this.database.prepare(
-				"SELECT text FROM stable_notes WHERE sequence_group_id = @groupId OR (target_kind = 'pattern' AND sequence_key = @sequenceKey) ORDER BY created_at DESC LIMIT 1"
-			).get({ groupId: row.id, sequenceKey: row.id }) as { text: string } | undefined;
+				`SELECT text FROM stable_notes
+				 WHERE capture_id = @captureId
+				   AND (profile_id IS NULL OR profile_id = @profileId)
+				   AND (sequence_group_id = @groupId OR (target_kind = 'pattern' AND sequence_key = @sequenceKey))
+				 ORDER BY created_at DESC LIMIT 1`
+			).get({ captureId, profileId: profile.id, groupId: row.id, sequenceKey: row.key_text }) as { text: string } | undefined;
 			return {
 				id: row.id,
 				signatures: jsonArray<string>(row.signatures_json),
