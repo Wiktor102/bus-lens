@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { request as httpRequest } from "node:http";
 import test from "node:test";
 import {
 	CLIENT_CAPABILITIES_META_KEY,
@@ -7,6 +8,7 @@ import {
 } from "@modelcontextprotocol/server";
 import { createArchiveHttpService } from "../server/http-service.ts";
 import { assertLoopbackHost } from "../server/config.ts";
+import { MCP_REQUEST_LIMIT_BYTES } from "../server/mcp-server.ts";
 
 async function withService(run: (baseUrl: string, service: ReturnType<typeof createArchiveHttpService>) => Promise<void>): Promise<void> {
 	const service = createArchiveHttpService({ databasePath: ":memory:", mcpEndpoint: "http://127.0.0.1:4174/mcp" });
@@ -38,6 +40,30 @@ async function modernCall(baseUrl: string, method: string, params: Record<string
 	};
 	if (method === "tools/call") headers["Mcp-Name"] = String(params.name ?? "");
 	return fetch(`${baseUrl}/mcp`, { method: "POST", headers, body: JSON.stringify(body) });
+}
+
+async function chunkedMcpPost(port: number, body: string): Promise<{ status: number | undefined; body: string }> {
+	return await new Promise((resolve, reject) => {
+		const request = httpRequest({
+			host: "127.0.0.1",
+			port,
+			path: "/mcp",
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				"transfer-encoding": "chunked"
+			}
+		}, response => {
+			let responseBody = "";
+			response.setEncoding("utf8");
+			response.on("data", chunk => { responseBody += chunk; });
+			response.on("end", () => resolve({ status: response.statusCode, body: responseBody }));
+		});
+		request.on("error", reject);
+		for (let offset = 0; offset < body.length; offset += 4096) request.write(body.slice(offset, offset + 4096));
+		request.end();
+	});
 }
 
 test("the MCP endpoint serves modern tools with bounded structured output and guide instructions", async () => {
@@ -98,6 +124,28 @@ test("MCP rejects invalid protocol headers, origins, oversized requests, and non
 		assert.equal(oversizedResponse.status, 413);
 	});
 	assert.throws(() => assertLoopbackHost("0.0.0.0"), /loopback/);
+});
+
+test("MCP rejects an oversized chunked request before the adapter buffers it", async () => {
+	await withService(async (_baseUrl, service) => {
+		const address = service.server.address();
+		if (!address || typeof address === "string") throw new Error("test server did not bind to a port");
+		const body = JSON.stringify({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "initialize",
+			params: {
+				protocolVersion: "2025-11-25",
+				capabilities: {},
+				clientInfo: { name: "chunked-oversized-test" },
+				padding: "x".repeat(MCP_REQUEST_LIMIT_BYTES)
+			}
+		});
+		assert.ok(Buffer.byteLength(body) > MCP_REQUEST_LIMIT_BYTES);
+		const response = await chunkedMcpPost(address.port, body);
+		assert.equal(response.status, 413);
+		assert.match(response.body, /MCP request exceeds the local request limit/);
+	});
 });
 
 test("agent access status reports stateless recent clients rather than connections", async () => {

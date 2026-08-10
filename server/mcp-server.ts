@@ -239,6 +239,38 @@ function boundedHandler(handler: McpHttpHandler, maxResponseBytes: number): McpH
 	};
 }
 
+type BoundedRequestBody = Readonly<{
+	oversized: false;
+	body: Buffer;
+}> | Readonly<{
+	oversized: true;
+}>;
+
+async function readBoundedRequestBody(request: IncomingMessage, maxBytes: number): Promise<BoundedRequestBody> {
+	let size = 0;
+	const chunks: Buffer[] = [];
+	for await (const chunk of request) {
+		const buffer = Buffer.from(chunk);
+		size += buffer.byteLength;
+		if (size > maxBytes) {
+			return { oversized: true };
+		}
+		chunks.push(buffer);
+	}
+	return { oversized: false, body: Buffer.concat(chunks, size) };
+}
+
+function replayableRequest(request: IncomingMessage, body: Buffer): Parameters<NodeMcpRequestHandler>[0] {
+	return {
+		method: request.method,
+		url: request.url,
+		headers: request.headers,
+		async *[Symbol.asyncIterator]() {
+			if (body.byteLength > 0) yield body;
+		}
+	};
+}
+
 export type McpAccess = Readonly<{
 	handler: McpHttpHandler;
 	nodeHandler: NodeMcpRequestHandler;
@@ -312,7 +344,17 @@ export function createMcpAccess(options: McpAccessOptions): McpAccess {
 				request.resume();
 				return;
 			}
-			await nodeHandler(request, response);
+			if (request.method === "GET" || request.method === "HEAD") {
+				await nodeHandler(request, response);
+				return;
+			}
+			const boundedBody = await readBoundedRequestBody(request, MCP_REQUEST_LIMIT_BYTES);
+			if (boundedBody.oversized) {
+				response.writeHead(413, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+				response.end(JSON.stringify({ error: "MCP request exceeds the local request limit" }));
+				return;
+			}
+			await nodeHandler(replayableRequest(request, boundedBody.body), response);
 		},
 		close: async () => {
 			running = false;
