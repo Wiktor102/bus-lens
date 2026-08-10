@@ -1,5 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" shape-rendering="geometricPrecision">
-	<rect x="0.5" y="0.5" width="63" height="63" fill="#0d100e" stroke="#e9eee7" />
-	<path d="M20 10h33l-6 44H14z" fill="none" stroke="#5f685f" stroke-width="2" />
-	<path d="M24 18h6l-4 30h-6zM34 29h6l-4 19h-6zM44 38h5.75l-4 10h-5.75z" fill="#cbf45a" />
+	<rect width="64" height="64" fill="#0d100e" />
+	<g transform="translate(32 32) skewX(-15) translate(-32 -32)">
+		<rect x="10" y="10" width="44" height="44" fill="none" stroke="#5f685f" stroke-width="2" />
+		<path d="M18 18h6v28h-6zM29 29h6v17h-6zM40 38h6v8h-6z" fill="#cbf45a" />
+	</g>
 </svg>
