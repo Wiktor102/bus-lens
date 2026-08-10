@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
-import { isIP } from "node:net";
 import { dirname, join, resolve } from "node:path";
+import { localhostAllowedHostnames } from "@modelcontextprotocol/server";
 
 export const LOOPBACK_HOST = "127.0.0.1";
 export const DEFAULT_APP_PORT = 4173;
@@ -74,9 +74,13 @@ export function resolveMcpBindHost(environment: Environment = process.env): stri
 	return String(environment.BUS_LENS_MCP_HOST ?? DEFAULT_MCP_BIND_HOST).trim() || DEFAULT_MCP_BIND_HOST;
 }
 
+function bindHostToAllowedHostname(host: string): string {
+	const normalized = host.trim().toLowerCase();
+	return normalized.includes(":") ? `[${normalized}]` : normalized;
+}
+
 export function isLoopbackHost(host: string): boolean {
-	const normalized = host.trim().toLocaleLowerCase();
-	return normalized === "localhost" || normalized === "ip6-localhost" || normalized === LOOPBACK_HOST || normalized === "::1" || isIP(normalized) === 6 && normalized === "0:0:0:0:0:0:0:1";
+	return localhostAllowedHostnames().includes(bindHostToAllowedHostname(host));
 }
 
 export function assertLoopbackHost(host: string): void {
