@@ -1196,6 +1196,13 @@ export function convertCaptureDocumentToCanonical(
 			retainedStartOffset
 		);
 		frames = materializeFramesFromStream(activeStream, sections, generateId, normalized.messages || []);
+		const occupiedFrameIds = new Set(
+			(database.prepare("SELECT id FROM materialized_frames").all() as Array<{ id: string }>).map(row => row.id)
+		);
+		frames = frames.map(frame => {
+			const id = allocateCanonicalId(frame.id, occupiedFrameIds, generateId);
+			return id === frame.id ? frame : { ...frame, id };
+		});
 		// Derive analysis from frames
 		const analysisFrames = frames.map(f => ({ signature: f.signature, bytes: f.bytes }));
 		stats = deriveAnalysisStatistics(analysisFrames);
@@ -1571,8 +1578,11 @@ export function convertCaptureDocumentToCanonical(
 
 			// stable notes: map capture.notes and annotations
 			const notes = (doc.notes as Array<Record<string, unknown>>) || [];
+			const usedNoteIds = new Set(
+				(database.prepare("SELECT id FROM stable_notes").all() as Array<{ id: string }>).map(row => row.id)
+			);
 			for (const note of notes) {
-				const id = String(note.id || generateId());
+				const id = allocateCanonicalId(note.id, usedNoteIds, generateId);
 				const text = String(note.text || "");
 				const createdAt = String(note.createdAt ? new Date(Number(note.createdAt)).toISOString() : now);
 				const type = String(note.type || "capture");
@@ -1605,7 +1615,7 @@ export function convertCaptureDocumentToCanonical(
 			const sourceMessages = Array.isArray(doc.messages) ? (doc.messages as Array<Record<string, unknown>>) : [];
 			const sourceByteStream = Array.isArray(doc.byteStream) ? (doc.byteStream as RawByteRecord[]) : [];
 			for (const [key, val] of Object.entries(annotations)) {
-				const id = generateId();
+				const id = allocateCanonicalId(undefined, usedNoteIds, generateId);
 				const text = String(val.text || "");
 				const createdAt = String(val.createdAt ? new Date(Number(val.createdAt)).toISOString() : now);
 				const target = legacyAnnotationTarget(key);
@@ -1657,7 +1667,7 @@ export function convertCaptureDocumentToCanonical(
 			// pattern remarks -> pattern notes
 			const patternRemarks = (doc.patternRemarks as Record<string, Record<string, unknown>>) || {};
 			for (const [patternKey, val] of Object.entries(patternRemarks)) {
-				const id = generateId();
+				const id = allocateCanonicalId(undefined, usedNoteIds, generateId);
 				const text = String(val.text || "");
 				const createdAt = now;
 				database
@@ -1849,6 +1859,24 @@ function noteCreatedAt(value: unknown, fallback: string): string {
 
 function noteObject(value: unknown): Record<string, unknown> {
 	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function allocateCanonicalId(preferred: unknown, used: Set<string>, generateId: () => string): string {
+	let candidate = String(preferred ?? "").trim();
+	for (let attempt = 0; attempt < 32; attempt++) {
+		if (candidate && !used.has(candidate)) {
+			used.add(candidate);
+			return candidate;
+		}
+		candidate = String(generateId()).trim();
+	}
+
+	const base = candidate || "canonical-id";
+	let suffix = 1;
+	while (used.has(`${base}-${suffix}`)) suffix++;
+	const fallback = `${base}-${suffix}`;
+	used.add(fallback);
+	return fallback;
 }
 
 function allocateNoteId(preferred: unknown, used: Set<string>, generateId: () => string): string {

@@ -69,9 +69,9 @@ test("legacy captures with shared section ids get distinct canonical section ide
 			assert.deepEqual([...new Set(frames.map(frame => frame.section_id))], [section.id]);
 		}
 
-		// Conversion must leave the legacy JSON source available for recovery and retry.
-		assert.equal((database.prepare("SELECT document_json FROM capture_documents WHERE id = 'capture-one'").get() as { document_json: string }).document_json, firstJson);
-		assert.equal((database.prepare("SELECT document_json FROM capture_documents WHERE id = 'capture-two'").get() as { document_json: string }).document_json, secondJson);
+		// Conversion keeps one verified recovery copy for the legacy source.
+		assert.equal((database.prepare("SELECT document_json FROM capture_backups WHERE capture_id = 'capture-one'").get() as { document_json: string }).document_json, firstJson);
+		assert.equal((database.prepare("SELECT document_json FROM capture_backups WHERE capture_id = 'capture-two'").get() as { document_json: string }).document_json, secondJson);
 	} finally {
 		repository.close();
 	}
