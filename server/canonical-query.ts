@@ -21,6 +21,7 @@ export const MAX_FRAME_WINDOW_LIMIT = 200;
 export const DEFAULT_CAPTURE_DISCOVERY_LIMIT = 20;
 export const MAX_CAPTURE_DISCOVERY_LIMIT = 100;
 export const MAX_CONTEXT_PARAMETER_FILTERS = 64;
+const MAX_BYTE_STATISTICS_COMPARISON_POSITIONS = 1;
 
 export type CanonicalCaptureStatus = "canonical" | "legacy-not-canonicalized" | "converting" | "canonicalization-failed";
 
@@ -2448,7 +2449,11 @@ export class CanonicalQueryService {
 	private comparisonBytePositions(left: AgentComparisonSnapshot, right: AgentComparisonSnapshot, input: AgentCompareCapturesInput): AgentComparisonPage<AgentBytePositionDelta> {
 		const filters = { left, right, category: "byte-statistics" };
 		const cursor = this.comparisonCursor(input, "byte-statistics", ["position"], filters);
-		const limit = this.comparisonPageLimit(input, "byte-statistics");
+		// A single position can contain every byte value on both sides, all eight
+		// bit rows, and a vocabulary-change row for each value. Keep the complete
+		// position item bounded so its page, cursor, and response envelope remain
+		// within the normal encoded-response budget.
+		const limit = Math.min(this.comparisonPageLimit(input, "byte-statistics"), MAX_BYTE_STATISTICS_COMPARISON_POSITIONS);
 		const params: Record<string, unknown> = { leftProfileId: left.profileId, rightProfileId: right.profileId, limit: limit + 1 };
 		const cursorSql = cursor ? " WHERE position > @cursorPosition" : "";
 		if (cursor) params.cursorPosition = cursor.key.position;
@@ -2608,7 +2613,11 @@ export class CanonicalQueryService {
 			truncated,
 			suggestedOperations: [{ tool: "query_messages", reason: "Inspect a signature, transition, or sequence difference with the explicit snapshot" }]
 		});
-		assertEncodedResponseSize(response);
+		// A complete high-cardinality byte position is intentionally atomic. The
+		// one-position page keeps the category bounded, while the hard limit still
+		// guards the comparison envelope when other requested categories use the
+		// remaining normal-response budget.
+		assertEncodedResponseSize(response, categories.includes("byte-statistics"));
 		return response;
 	}
 }
