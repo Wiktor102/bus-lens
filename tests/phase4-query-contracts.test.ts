@@ -99,13 +99,25 @@ test("agent overview pins an explicit profile revision and remains bounded", asy
 		assert.equal("bytes" in before.data, false);
 		assert.ok(JSON.stringify(before).length <= 96 * 1024);
 
-		repository.createFramingRevision("canonical", [{ start: 0, framingMode: "length", frameSize: 4 }]);
+		const profileANoteId = "profile-a-note";
+		const profileA = before.meta.snapshot!.profileId;
+		const revision = repository.createFramingRevision("canonical", [{ start: 0, framingMode: "length", frameSize: 4 }]);
+		const insertNote = database.prepare(
+			`INSERT INTO stable_notes (id, capture_id, text, created_at, target_kind, profile_id)
+			 VALUES (@id, @captureId, @text, @createdAt, @targetKind, @profileId)`
+		);
+		insertNote.run({ id: profileANoteId, captureId: "canonical", text: "profile A", createdAt: "2026-08-10T00:00:01.000Z", targetKind: "frame", profileId: profileA });
+		insertNote.run({ id: "profile-b-note", captureId: "canonical", text: "profile B", createdAt: "2026-08-10T00:00:02.000Z", targetKind: "frame", profileId: revision.profileId });
+		insertNote.run({ id: "capture-note", captureId: "canonical", text: "capture-wide", createdAt: "2026-08-10T00:00:03.000Z", targetKind: "capture", profileId: null });
+
 		const after = queries.queryCaptureOverview("canonical");
 		assert.ok(after.meta.snapshot);
 		assert.notEqual(after.meta.snapshot?.profileId, before.meta.snapshot?.profileId);
+		assert.deepEqual(new Set(after.data.notes.map(note => note.id)), new Set(["profile-b-note", "capture-note"]));
 		const pinned = queries.queryCaptureOverview("canonical", before.meta.snapshot);
 		assert.equal(pinned.meta.snapshot?.profileId, before.meta.snapshot?.profileId);
 		assert.equal(pinned.meta.snapshot?.profileVersion, before.meta.snapshot?.profileVersion);
+		assert.deepEqual(new Set(pinned.data.notes.map(note => note.id)), new Set([profileANoteId, "capture-note"]));
 		assert.throws(
 			() => queries.queryCaptureOverview("canonical", { ...before.meta.snapshot!, sourceDataRevision: 999 }),
 			(error: unknown) => error instanceof AgentQueryError && error.code === "snapshot-mismatch"

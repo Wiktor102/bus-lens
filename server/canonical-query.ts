@@ -734,8 +734,10 @@ export class CanonicalQueryService {
 		).get({ profileId: profile.id }) as { start_ordinal: number | null; end_ordinal: number | null };
 		const noteRows = this.database.prepare(
 			`SELECT id, target_kind, text, created_at, profile_id, raw_offset, start_offset, end_offset, sequence_group_id
-			 FROM stable_notes WHERE capture_id = @captureId ORDER BY created_at DESC LIMIT 17`
-		).all({ captureId }) as Array<{ id: string; target_kind: string; text: string; created_at: string; profile_id: string | null; raw_offset: number | null; start_offset: number | null; end_offset: number | null; sequence_group_id: string | null }>;
+			 FROM stable_notes
+			 WHERE capture_id = @captureId AND (profile_id IS NULL OR profile_id = @profileId)
+			 ORDER BY created_at DESC LIMIT 17`
+		).all({ captureId, profileId: profile.id }) as Array<{ id: string; target_kind: string; text: string; created_at: string; profile_id: string | null; raw_offset: number | null; start_offset: number | null; end_offset: number | null; sequence_group_id: string | null }>;
 		const signatureRows = this.database.prepare(
 			"SELECT signature, count FROM frame_signatures WHERE profile_id = @profileId ORDER BY count DESC, signature ASC LIMIT 13"
 		).all({ profileId: profile.id }) as Array<{ signature: string; count: number }>;
