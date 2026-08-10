@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 import { ArchiveRepository } from "../server/archive-repository.ts";
 import { AgentQueryError } from "../server/agent-contracts.ts";
-import { CanonicalQueryService } from "../server/canonical-query.ts";
+import { CanonicalQueryService, MAX_CONTEXT_PARAMETER_FILTERS, normalizeCaptureDiscoveryFilters } from "../server/canonical-query.ts";
 import { openDatabase } from "../server/database.ts";
 
 async function withTemporaryArchive(run: (directory: string) => Promise<void>): Promise<void> {
@@ -28,6 +28,27 @@ function legacyDocument(id: string, name: string) {
 		messages: [{ id: `${id}-message`, timestamp: 1, bytes: [0x10, 0x20] }]
 	};
 }
+
+test("agent discovery deduplicates context filters and rejects an unbounded filter set", () => {
+	const normalized = normalizeCaptureDiscoveryFilters({
+		contextParameters: [
+			{ key: " mode ", value: "capture" },
+			{ key: "mode", value: "capture" },
+			{ key: "other", value: "value" }
+		]
+	});
+	assert.deepEqual(normalized.contextParameters, [
+		{ key: "mode", value: "capture" },
+		{ key: "other", value: "value" }
+	]);
+
+	assert.throws(
+		() => normalizeCaptureDiscoveryFilters({
+			contextParameters: Array.from({ length: MAX_CONTEXT_PARAMETER_FILTERS + 1 }, (_, index) => ({ key: `key-${index}`, value: "value" }))
+		}),
+		(error: unknown) => error instanceof AgentQueryError && error.code === "invalid-input"
+	);
+});
 
 test("agent discovery is filtered, stable at equal timestamps, and keyset paginated", async () => {
 	await withTemporaryArchive(async directory => {
