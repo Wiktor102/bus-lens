@@ -1481,7 +1481,7 @@ export class CanonicalQueryService {
 		if (!frame) throw new AgentQueryError("evidence-missing", "The requested frame evidence is no longer available", { frameId });
 		if (input.captureId && input.captureId !== frame.capture_id) throw new AgentQueryError("snapshot-mismatch", "The frame does not belong to the requested capture", { frameId, captureId: input.captureId });
 		const requested: Partial<AgentSnapshotReference> = {
-			profileId: input.profileId,
+			profileId: input.profileId ?? frame.profile_id,
 			...(input.profileVersion === undefined ? {} : { profileVersion: input.profileVersion }),
 			...(input.sourceDataRevision === undefined ? {} : { sourceDataRevision: input.sourceDataRevision })
 		};

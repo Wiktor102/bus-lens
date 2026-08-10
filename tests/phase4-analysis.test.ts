@@ -99,6 +99,14 @@ test("message cursors keep the original profile pinned across reframing", () => 
 		const continued = query.queryMessages({ captureId: "analysis-capture", limit: 1, cursor: first.meta.page?.nextCursor });
 		assert.equal(continued.meta.snapshot?.profileId, profileId);
 		assert.equal(continued.data.messages[0]?.ordinal, 1);
+		const historicalFrameId = first.data.messages[0]!.frameId;
+		const historicalContext = query.getMessageContext({ frameId: historicalFrameId });
+		assert.equal(historicalContext.meta.snapshot?.profileId, profileId);
+		assert.equal(historicalContext.data.centerFrameId, historicalFrameId);
+		assert.throws(
+			() => query.getMessageContext({ frameId: historicalFrameId, profileVersion: 999 }),
+			error => (error as { code?: string }).code === "snapshot-mismatch"
+		);
 	} finally {
 		database.close();
 	}
