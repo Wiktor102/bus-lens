@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 
 export type SqliteDatabase = InstanceType<typeof Database>;
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 7;
 
 type Migration = {
 	version: number;
@@ -665,6 +665,31 @@ const migrations: Migration[] = [
 						data_revision
 					);
 			`);
+		}
+	},
+	{
+		version: 7,
+		up: database => {
+			// Agent reads use keyset ordering and explicit profile revisions. These
+			// indexes keep discovery, frame paging, and analytical summaries bounded
+			// without changing the existing complete-capture UI paths.
+			const tables = new Set(
+				(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(row => row.name)
+			);
+			const indexes: Array<[string, string, string]> = [
+				["captures_agent_discovery", "captures", "updated_at DESC, id ASC"],
+				["captures_agent_filters", "captures", "lifecycle, created_at, updated_at DESC, id ASC"],
+				["capture_storage_agent_discovery", "capture_storage", "status, updated_at DESC, capture_id ASC"],
+				["capture_parameters_agent_filter", "capture_parameters", "capture_id, key_text, value_text"],
+				["framing_profiles_agent_revision", "framing_profiles", "capture_id, version, id"],
+				["materialized_frames_agent_ordinal", "materialized_frames", "profile_id, ordinal, id"],
+				["frame_signatures_agent_count", "frame_signatures", "profile_id, count DESC, signature ASC"],
+				["frame_transitions_agent_count", "frame_transitions", "profile_id, count DESC, from_signature, to_signature"],
+				["sequence_occurrences_agent_group_ordinal", "sequence_occurrences", "group_id, start_frame_ordinal, occurrence_index"]
+			];
+			for (const [index, table, columns] of indexes) {
+				if (tables.has(table)) database.exec(`CREATE INDEX IF NOT EXISTS ${index} ON ${table} (${columns})`);
+			}
 		}
 	}
 ];
