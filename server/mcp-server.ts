@@ -75,7 +75,7 @@ const responseMetaSchema = z.object({
 	truncated: z.boolean(),
 	suggestedOperations: z.array(z.object({ tool: z.string(), reason: z.string(), arguments: z.record(z.string(), z.unknown()).optional() }))
 });
-const agentResponseSchema = z.object({ data: z.unknown(), meta: responseMetaSchema });
+export const agentResponseSchema = z.object({ data: z.unknown(), meta: responseMetaSchema });
 
 type RecentClient = Readonly<{
 	reportedClientName: string;

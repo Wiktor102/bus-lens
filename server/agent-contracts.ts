@@ -96,7 +96,7 @@ export function encodeAgentCursor(payload: AgentCursorPayload): string {
 	return Buffer.from(json, "utf8").toString("base64url");
 }
 
-export function decodeAgentCursor(cursor: string, expectedScope: string): AgentCursorPayload {
+export function decodeAgentCursor(cursor: string, expectedScope: string, requiredKeyFields: readonly string[] = ["updatedAt", "id"]): AgentCursorPayload {
 	if (typeof cursor !== "string" || cursor.length < 8 || cursor.length > 4096) {
 		throw new AgentQueryError("invalid-cursor", "The pagination cursor is invalid or expired", { reason: "malformed" });
 	}
@@ -107,7 +107,10 @@ export function decodeAgentCursor(cursor: string, expectedScope: string): AgentC
 		throw new AgentQueryError("invalid-cursor", "The pagination cursor is invalid or expired", { reason: "malformed" });
 	}
 	if (!isRecord(parsed) || parsed.contractVersion !== AGENT_CONTRACT_VERSION || parsed.scope !== expectedScope || !isRecord(parsed.key)
-		|| typeof parsed.key.updatedAt !== "string" || typeof parsed.key.id !== "string") {
+		|| requiredKeyFields.some(field => {
+			const value = (parsed.key as Record<string, unknown>)[field];
+			return typeof value !== "string" && typeof value !== "number" && value !== null;
+		})) {
 		throw new AgentQueryError("invalid-cursor", "The pagination cursor is invalid or expired", { reason: "scope-mismatch" });
 	}
 	return parsed as unknown as AgentCursorPayload;

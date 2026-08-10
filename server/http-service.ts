@@ -21,6 +21,7 @@ import {
 	type FramingSectionRequest
 } from "./canonical-capture-command-service.ts";
 import { createMcpAccess, type AgentAccessStatus, type McpAccess, type McpToolRegistrar } from "./mcp-server.ts";
+import { registerAnalysisTools } from "./mcp-analysis.ts";
 
 const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
 const MIME_TYPES: Record<string, string> = {
@@ -134,7 +135,7 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 		endpoint: options.mcpEndpoint ?? "http://127.0.0.1/mcp",
 		serverVersion: "1.0.0",
 		agentNotes: options.mcpAgentNotes,
-		toolRegistrar: options.mcpToolRegistrar
+		toolRegistrar: options.mcpToolRegistrar ?? registerAnalysisTools
 	});
 	const server = createServer(async (request, response) => {
 		try {
