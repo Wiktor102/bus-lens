@@ -238,7 +238,9 @@ function CaptureHeader() {
 								setMenuOpen(false);
 							}}
 						>
-							<span aria-hidden="true">↥</span>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M12 19V5M7.5 9.5 12 5l4.5 4.5" />
+							</svg>
 							<span>Upgrade</span>
 						</button>
 					) : null}
