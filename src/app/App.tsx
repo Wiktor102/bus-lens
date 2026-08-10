@@ -54,6 +54,7 @@ import {
 	type ViewStateAction,
 	type ViewStateSnapshot
 } from "../shared/view-state";
+import { createClaudeMcpConfig, createCodexMcpConfig, resolveMcpEndpoint } from "./agent-config";
 import "./styles.css";
 
 function TopBar() {
@@ -1023,9 +1024,9 @@ function AgentAccessPanel() {
 		return () => { disposed = true; };
 	}, []);
 
-	const endpoint = status?.endpoint ?? `${window.location.origin}/mcp`;
-	const codexConfig = JSON.stringify({ mcpServers: { "bus-lens": { url: endpoint } } }, null, 2);
-	const claudeConfig = JSON.stringify({ "bus-lens": { type: "http", url: endpoint } }, null, 2);
+	const endpoint = resolveMcpEndpoint(status?.endpoint, window.location.origin);
+	const codexConfig = createCodexMcpConfig(endpoint);
+	const claudeConfig = createClaudeMcpConfig(endpoint);
 	const copyConfig = async (name: string, value: string): Promise<void> => {
 		try {
 			await navigator.clipboard.writeText(value);
