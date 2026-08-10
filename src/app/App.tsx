@@ -239,7 +239,7 @@ function CaptureHeader() {
 							}}
 						>
 							<span aria-hidden="true">↥</span>
-							<span>Upgrade capture storage</span>
+							<span>Upgrade</span>
 						</button>
 					) : null}
 					<button

@@ -517,6 +517,11 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		dependencies.showToast(item.folderId ? `Moved to ${folderNameById.get(item.folderId)}` : "Moved to Unfiled");
 	}
 
+	function upgradeCapture(captureId: string): void {
+		const item = state.captures.find(captureItem => String(captureItem.id) === String(captureId));
+		if (item?.id) dependencies.openCanonicalization?.(String(item.id));
+	}
+
 	function saveFolder(name: string, editingId: string | null) {
 		const trimmedName = String(name).trim();
 		const duplicate = state.folders.some(
@@ -1046,6 +1051,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			const c = capture();
 			if (c?.id) dependencies.openCanonicalization?.(String(c.id));
 		},
+		upgradeCapture,
 		selectArchiveCapture,
 		toggleArchiveFolder,
 		moveArchiveCapture,
