@@ -452,6 +452,8 @@ function CaptureContextMenu({
 	positionRef.current = position;
 
 	const capture = state ? snapshot.captures.find(item => item.id === state.captureId) : undefined;
+	const storageStatus = capture ? captureStorageUiStatus(capture.storageStatus) : null;
+	const canUpgrade = storageStatus === "legacy" || storageStatus === "failed";
 	const currentFolderId = capture?.folderId || null;
 	const orderedFolders = [
 		...snapshot.folders.filter(folder => folder.id === currentFolderId),
@@ -564,6 +566,22 @@ function CaptureContextMenu({
 						<span>New folder…</span>
 					</button>
 				</div>
+			) : null}
+			{canUpgrade ? (
+				<button
+					type="button"
+					role="menuitem"
+					id="upgradeCaptureBtn"
+					data-context-action="upgrade"
+					onClick={() => {
+						if (!state) return;
+						onClose();
+						actions.upgradeCapture(state.captureId);
+					}}
+				>
+					<span aria-hidden="true">↥</span>
+					<span>Upgrade</span>
+				</button>
 			) : null}
 			<button
 				type="button"
