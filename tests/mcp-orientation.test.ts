@@ -13,6 +13,11 @@ import { createArchiveHttpService } from "../server/http-service.ts";
 import { assertLoopbackHost } from "../server/config.ts";
 import { MCP_REQUEST_LIMIT_BYTES } from "../server/mcp-server.ts";
 
+type JsonSchema = {
+	properties?: Record<string, JsonSchema>;
+	required?: string[];
+};
+
 async function withService(run: (baseUrl: string, service: ReturnType<typeof createArchiveHttpService>) => Promise<void>): Promise<void> {
 	const directory = await mkdtemp(join(tmpdir(), "bus-lens-mcp-test-"));
 	const service = createArchiveHttpService({ databasePath: join(directory, "archive.sqlite"), mcpEndpoint: "http://127.0.0.1:4174/mcp" });
@@ -89,6 +94,23 @@ test("the MCP endpoint serves modern tools with bounded structured output and gu
 		});
 		assert.equal(resourceResponse.status, 200);
 		assert.match(await resourceResponse.text(), /overview-first workflow/);
+	});
+});
+
+test("MCP output schemas require complete pageable metadata while allowing non-pageable responses", async () => {
+	await withService(async baseUrl => {
+		const response = await modernCall(baseUrl, "tools/list", {});
+		assert.equal(response.status, 200);
+		const payload = await response.json() as { result: { tools: Array<{ name: string; outputSchema?: JsonSchema }> } };
+		const outputSchema = payload.result.tools.find(tool => tool.name === "list_captures")?.outputSchema;
+		assert.ok(outputSchema);
+
+		const metaSchema = outputSchema.properties?.meta;
+		const pageSchema = metaSchema?.properties?.page;
+		assert.ok(metaSchema);
+		assert.ok(pageSchema);
+		assert.deepEqual([...new Set(pageSchema.required)].sort(), ["effectiveLimit", "requestedLimit", "returned"]);
+		assert.equal(metaSchema.required?.includes("page"), false);
 	});
 });
 

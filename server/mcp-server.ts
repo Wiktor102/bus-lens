@@ -65,7 +65,13 @@ const responseMetaSchema = z.object({
 		sourceDataRevision: z.number().int()
 	}).optional(),
 	appliedFilters: z.record(z.string(), z.unknown()),
-	page: z.object({ returned: z.number().int(), nextCursor: z.string().optional() }).optional(),
+	page: z.object({
+		requestedLimit: z.number().int(),
+		returned: z.number().int(),
+		effectiveLimit: z.number().int().nonnegative(),
+		nextCursor: z.string().optional(),
+		truncationReason: z.enum(["page-limit", "response-size"]).optional()
+	}).optional(),
 	truncated: z.boolean(),
 	suggestedOperations: z.array(z.object({ tool: z.string(), reason: z.string(), arguments: z.record(z.string(), z.unknown()).optional() }))
 });
