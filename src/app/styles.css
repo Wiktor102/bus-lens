@@ -125,6 +125,67 @@ button {
 	align-items: center;
 	height: 38px;
 }
+.mcp-status-control {
+	display: inline-flex;
+	align-items: stretch;
+	height: 38px;
+	border: 1px solid var(--line);
+	background: transparent;
+}
+.mcp-status-value {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 0 11px;
+	color: var(--muted);
+	font: 600 12px var(--sans);
+	white-space: nowrap;
+}
+.mcp-status-value i {
+	display: inline-block;
+	width: 7px;
+	height: 7px;
+	background: var(--faint);
+	border-radius: 50%;
+}
+.mcp-status-control.connected {
+	border-color: var(--acid-dim);
+	color: var(--acid);
+}
+.mcp-status-control.connected .mcp-status-value {
+	color: var(--acid);
+}
+.mcp-status-control.connected .mcp-status-value i {
+	background: var(--acid);
+	box-shadow: 0 0 10px var(--acid);
+}
+.mcp-settings-link {
+	display: grid;
+	place-items: center;
+	width: 38px;
+	border-left: 1px solid var(--line);
+	color: inherit;
+	text-decoration: none;
+	transition: 0.18s ease;
+}
+.mcp-status-control.connected .mcp-settings-link {
+	border-left-color: var(--acid-dim);
+}
+.mcp-settings-link:hover,
+.mcp-settings-link:focus-visible {
+	background: color-mix(in srgb, var(--acid) 10%, transparent);
+	color: var(--acid);
+	outline: 0;
+}
+.mcp-settings-link svg {
+	width: 17px;
+	height: 17px;
+	fill: none;
+	stroke: currentColor;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 1.5;
+}
 .transport-divider {
 	width: 1px;
 	height: 24px;
@@ -2622,6 +2683,15 @@ tr:hover .row-action,
 	}
 	.status-badge {
 		display: none;
+	}
+	.mcp-status-value {
+		display: none;
+	}
+	.mcp-status-control {
+		border: 0;
+	}
+	.mcp-settings-link {
+		border: 1px solid var(--line);
 	}
 	.capture-header {
 		padding: 18px;

@@ -93,10 +93,23 @@ function TopBar() {
 				</div>
 			</div>
 			<div className="transport">
-				<a id="mcpSettingsBtn" className="btn btn-secondary" href={MCP_SETTINGS_PATH}>MCP settings</a>
-				<span id="mcpStatusBadge" className={`status-badge mcp-status-badge ${mcpStatus === "running" ? "connected" : ""}`.trim()}>
-					<i /> MCP {mcpStatus}
-				</span>
+				<div className={`mcp-status-control ${mcpStatus === "running" ? "connected" : ""}`.trim()}>
+					<span id="mcpStatusBadge" className="mcp-status-value" role="status" aria-live="polite">
+						<i /> MCP {mcpStatus}
+					</span>
+					<a
+						id="mcpSettingsBtn"
+						className="mcp-settings-link"
+						href={MCP_SETTINGS_PATH}
+						aria-label="Open MCP settings"
+						title="MCP settings"
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" />
+							<path d="m19.4 15 .1.1a1.7 1.7 0 0 1-2.4 2.4l-.1-.1a1.7 1.7 0 0 0-2.9 1.2v.2a1.7 1.7 0 0 1-3.4 0v-.2a1.7 1.7 0 0 0-2.9-1.2l-.1.1a1.7 1.7 0 0 1-2.4-2.4l.1-.1A1.7 1.7 0 0 0 6.2 12a1.7 1.7 0 0 0-1.8-1.7h-.2a1.7 1.7 0 0 1 0-3.4h.2A1.7 1.7 0 0 0 6.2 5.7l-.1-.1a1.7 1.7 0 0 1 2.4-2.4l.1.1a1.7 1.7 0 0 0 2.9-1.2v-.2a1.7 1.7 0 0 1 3.4 0v.2a1.7 1.7 0 0 0 2.9 1.2l.1-.1a1.7 1.7 0 0 1 2.4 2.4l-.1.1A1.7 1.7 0 0 0 19.8 7h.2a1.7 1.7 0 0 1 0 3.4h-.2a1.7 1.7 0 0 0-.4 4.6Z" />
+						</svg>
+					</a>
+				</div>
 				<span className="transport-divider" aria-hidden="true" />
 				<span id="connectionBadge" className={`status-badge ${snapshot.connected ? "connected" : ""}`.trim()}>
 					<i /> {snapshot.connectionLabel}
