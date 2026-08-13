@@ -16,6 +16,7 @@ import {
 	getCanonicalizationDialogSnapshot,
 	subscribeToCanonicalizationDialog
 } from "../capture/canonicalization-bridge";
+import { Check, Plus, X } from "lucide-react";
 
 function isCancelSubmit(event: FormEvent<HTMLFormElement>): boolean {
 	return ((event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null)?.value === "cancel";
@@ -33,7 +34,7 @@ function DialogHeading({ eyebrow, title }: { eyebrow: string; title: string }) {
 				<h2>{title}</h2>
 			</div>
 			<button className="icon-btn" value="cancel" formMethod="dialog" formNoValidate aria-label="Close">
-				×
+				<X aria-hidden="true" />
 			</button>
 		</div>
 	);
@@ -133,7 +134,7 @@ export function ContextDialog() {
 							className="text-btn"
 							onClick={() => setDraft(current => (current ? { ...current, parameters: appendContextParameter(current.parameters) } : current))}
 						>
-							＋ Add parameter
+							<Plus aria-hidden="true" /> Add parameter
 						</button>
 					</div>
 					<div id="parameterRows" className="parameter-rows">
@@ -183,7 +184,7 @@ export function ContextDialog() {
 											)
 									}
 								>
-									×
+									<X aria-hidden="true" />
 								</button>
 							</div>
 						))}
@@ -272,7 +273,7 @@ export function AnnotationDialog() {
 						<h2 id="annotationTitle">{annotationCommand?.title || "Note on message"}</h2>
 					</div>
 					<button className="icon-btn" value="cancel" formMethod="dialog" formNoValidate aria-label="Close">
-						×
+						<X aria-hidden="true" />
 					</button>
 				</div>
 				<div id="annotationTarget" className="annotation-target">
@@ -371,7 +372,7 @@ export function PatternRemarkDialog() {
 						<h2 id="patternRemarkTitle">{patternCommand?.title || "Sequence note"}</h2>
 					</div>
 					<button className="icon-btn" value="cancel" formMethod="dialog" formNoValidate aria-label="Close">
-						×
+						<X aria-hidden="true" />
 					</button>
 				</div>
 				<div id="patternRemarkTarget" className="pattern-remark-target">
@@ -510,7 +511,7 @@ export function CanonicalizationDialog() {
 					<span className="eyebrow">Storage migration</span>
 					<h2>Upgrade capture storage</h2>
 				</div>
-				<button className="icon-btn" type="button" aria-label="Close" onClick={() => actions.close()}>×</button>
+				<button className="icon-btn" type="button" aria-label="Close" onClick={() => actions.close()}><X aria-hidden="true" /></button>
 			</div>
 			<p className="modal-lede">
 				{snapshot.captureName || "This capture"} will be converted only after you explicitly start the operation.
@@ -582,5 +583,5 @@ function VerificationChecks({ verification }: { verification: { rawBytesMatched:
 		["Notes", verification.notesMatched],
 		["Analysis", verification.analysisMatched]
 	] as const;
-	return <div className="verification-checks">{checks.map(([label, passed]) => <span key={label} className={passed ? "passed" : "failed"}>{passed ? "✓" : "×"} {label}</span>)}</div>;
+	return <div className="verification-checks">{checks.map(([label, passed]) => <span key={label} className={passed ? "passed" : "failed"}>{passed ? <Check aria-hidden="true" /> : <X aria-hidden="true" />} {label}</span>)}</div>;
 }

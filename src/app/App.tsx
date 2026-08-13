@@ -48,6 +48,20 @@ import { getMessageStreamSnapshot, subscribeToMessageStream } from "../features/
 import { MessageStream } from "../features/message-stream/message-stream-view";
 import { publishViewStateSnapshot } from "../shared/view-state-bridge";
 import {
+	ArrowUp,
+	Copy,
+	Filter,
+	Minus,
+	MoreHorizontal,
+	Play,
+	Plug2,
+	Search,
+	Settings,
+	Slash,
+	Trash2,
+	X
+} from "lucide-react";
+import {
 	EMPTY_VIEW_STATE_SNAPSHOT,
 	reduceViewState,
 	type DisplayMode,
@@ -57,6 +71,15 @@ import {
 import { MCP_SETTINGS_PATH, McpSettingsPage, type AgentAccessStatus } from "./mcp-settings-page";
 import { StatusSplitControl } from "./status-split-control";
 import "./styles.css";
+
+function ConnectionIcon({ connected }: { connected: boolean }) {
+	return (
+		<span className="connection-icon" aria-hidden="true">
+			<Plug2 />
+			{connected ? <Slash className="connection-icon-slash" /> : null}
+		</span>
+	);
+}
 
 function TopBar() {
 	const snapshot = useSyncExternalStore(
@@ -106,10 +129,7 @@ function TopBar() {
 							aria-label="Open MCP settings"
 							title="MCP settings"
 						>
-							<svg viewBox="0 0 24 24" aria-hidden="true">
-								<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-								<circle cx="12" cy="12" r="3" />
-							</svg>
+							<Settings aria-hidden="true" />
 						</a>
 					}
 				/>
@@ -127,10 +147,7 @@ function TopBar() {
 							title={snapshot.connectLabel}
 							onClick={() => void actions.toggleConnection()}
 						>
-							<svg viewBox="0 0 24 24" aria-hidden="true">
-								<path d="M9 3v5M15 3v5M7 8h10v3a5 5 0 0 1-10 0V8ZM12 16v5" />
-								{snapshot.connected ? <path d="m5 5 14 14" /> : null}
-							</svg>
+							<ConnectionIcon connected={snapshot.connected} />
 						</button>
 					}
 				/>
@@ -276,69 +293,60 @@ function CaptureHeader() {
 						aria-label="Capture menu"
 						onClick={() => setMenuOpen(open => !open)}
 					>
-						•••
+						<MoreHorizontal aria-hidden="true" />
 					</button>
-				<div id="moreMenu" className={`popover capture-menu ${menuOpen ? "" : "hidden"}`.trim()}>
-					{storage.canUpgrade ? (
+					<div id="moreMenu" className={`popover capture-menu ${menuOpen ? "" : "hidden"}`.trim()}>
+						{storage.canUpgrade ? (
+							<button
+								id="upgradeCaptureStorageBtn"
+								type="button"
+								onClick={() => {
+									storageActions.upgrade();
+									setMenuOpen(false);
+								}}
+							>
+								<ArrowUp aria-hidden="true" />
+								<span>Upgrade</span>
+							</button>
+						) : null}
 						<button
-							id="upgradeCaptureStorageBtn"
+							id="duplicateCaptureBtn"
 							type="button"
 							onClick={() => {
-								storageActions.upgrade();
+								actions.duplicate();
 								setMenuOpen(false);
 							}}
+							disabled={storage.locked}
 						>
-							<svg viewBox="0 0 24 24" aria-hidden="true">
-								<path d="M12 19V5M7.5 9.5 12 5l4.5 4.5" />
-							</svg>
-							<span>Upgrade</span>
+							<Copy aria-hidden="true" />
+							<span>Duplicate capture</span>
 						</button>
-					) : null}
-					<button
-						id="duplicateCaptureBtn"
-						type="button"
-						onClick={() => {
-							actions.duplicate();
-							setMenuOpen(false);
-						}}
-						disabled={storage.locked}
-					>
-						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<rect x="8" y="8" width="11.5" height="11.5" rx="1" />
-							<path d="M16 8V5.5a1.5 1.5 0 0 0-1.5-1.5h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8" />
-						</svg>
-						<span>Duplicate capture</span>
-					</button>
-					<button
-						id="clearMessagesBtn"
-						type="button"
-						onClick={() => {
-							actions.clearMessages();
-							setMenuOpen(false);
-						}}
-						disabled={storage.locked}
-					>
-						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<path d="M4.5 7.5h15M9 7.5V5h6v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5M14 11v5" />
-						</svg>
-						<span>Clear messages</span>
-					</button>
-					<button
-						id="deleteCaptureBtn"
-						className="danger"
-						type="button"
-						onClick={() => {
-							actions.deleteCapture();
-							setMenuOpen(false);
-						}}
-						disabled={storage.locked}
-					>
-						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<path d="M5 7.5h14M9 7.5V5h6v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5M14 11v5" />
-						</svg>
-						<span>Delete capture</span>
-					</button>
-				</div>
+						<button
+							id="clearMessagesBtn"
+							type="button"
+							onClick={() => {
+								actions.clearMessages();
+								setMenuOpen(false);
+							}}
+							disabled={storage.locked}
+						>
+							<Trash2 aria-hidden="true" />
+							<span>Clear messages</span>
+						</button>
+						<button
+							id="deleteCaptureBtn"
+							className="danger"
+							type="button"
+							onClick={() => {
+								actions.deleteCapture();
+								setMenuOpen(false);
+							}}
+							disabled={storage.locked}
+						>
+							<Trash2 aria-hidden="true" />
+							<span>Delete capture</span>
+						</button>
+					</div>
 				</div>
 		</div>
 	);
@@ -427,9 +435,7 @@ function Toolbar({ viewState, dispatchViewState, messageFilterRef, messageFilter
 						if (!viewState.filterOpen) requestAnimationFrame(() => messageFilterRef.current?.focus());
 					}}
 				>
-					<svg viewBox="0 0 24 24" aria-hidden="true">
-						<path d="M3.75 5.25h16.5l-6.6 7.45v5.3l-3.3 1.75V12.7l-6.6-7.45Z" />
-					</svg>
+					<Filter aria-hidden="true" />
 				</button>
 			</div>
 		</div>
@@ -461,7 +467,7 @@ function StreamPanel({ viewState, dispatchViewState, messageFilterRef, messageFi
 			) : null}
 			<div id="streamFilter" className={`stream-filter ${viewState.filterOpen ? "" : "collapsed"}`.trim()}>
 				<label>
-					<span>⌕</span>
+					<Search aria-hidden="true" />
 					<input
 						id="messageFilter"
 						ref={messageFilterRef}
@@ -580,7 +586,7 @@ function SendPanel({ open, onOpenChange }: SendPanelProps) {
 					aria-label={open ? "Minimize composer" : "Open composer"}
 					onClick={() => onOpenChange(false)}
 				>
-					—
+					<Minus aria-hidden="true" />
 				</button>
 			</header>
 			<div id="sendPopupContent" className="send-popup-content">
@@ -684,7 +690,7 @@ function SendPanel({ open, onOpenChange }: SendPanelProps) {
 										type="button"
 										onClick={() => actions.sendQueueItem(item.id)}
 									>
-										▶
+										<Play aria-hidden="true" />
 									</button>
 									<button
 										className="icon-btn"
@@ -694,7 +700,7 @@ function SendPanel({ open, onOpenChange }: SendPanelProps) {
 										type="button"
 										onClick={() => actions.removeQueueItem(item.id)}
 									>
-										×
+										<X aria-hidden="true" />
 									</button>
 								</div>
 							))

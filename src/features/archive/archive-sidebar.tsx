@@ -11,12 +11,10 @@ import {
 import { getArchiveActions, getArchiveSnapshot, subscribeToArchive } from "./archive-bridge";
 import { buildArchiveGroups, type ArchiveCapture, type ArchiveGroup, type ArchiveStorageFilter } from "./archive-list";
 import { captureStorageLabel, captureStorageUiStatus } from "../capture/capture-storage";
+import { ArrowUp, Check, ChevronRight, Download, Folder, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
 
 const FOLDER_ICON = (
-	<svg viewBox="0 0 24 24" aria-hidden="true">
-		<path d="M3.75 6.75h5.1l1.8 2.1h9.6v8.4a1.5 1.5 0 0 1-1.5 1.5h-15a1.5 1.5 0 0 1-1.5-1.5v-9a1.5 1.5 0 0 1 1.5-1.5Z" />
-		<path d="M2.25 10.35h18" />
-	</svg>
+	<Folder aria-hidden="true" />
 );
 
 type CaptureContextMenuState = {
@@ -197,10 +195,7 @@ export function ArchiveSidebar() {
 							aria-label="New folder"
 							onClick={() => openNewFolder()}
 						>
-							<svg viewBox="0 0 24 24" aria-hidden="true">
-								<path d="M3.75 6.75h5.1l1.8 2.1h9.6v8.4a1.5 1.5 0 0 1-1.5 1.5h-15a1.5 1.5 0 0 1-1.5-1.5v-9a1.5 1.5 0 0 1 1.5-1.5Z" />
-								<path d="M2.25 10.35h18" />
-							</svg>
+							{FOLDER_ICON}
 						</button>
 						<button
 							id="newCaptureBtn"
@@ -209,12 +204,12 @@ export function ArchiveSidebar() {
 							aria-label="New capture"
 							onClick={actions.openNewCapture}
 						>
-							＋
+							<Plus aria-hidden="true" />
 						</button>
 					</div>
 				</div>
 			<label className="search-box">
-				<span>⌕</span>
+				<Search aria-hidden="true" />
 				<input
 					id="captureSearch"
 					type="search"
@@ -284,7 +279,7 @@ export function ArchiveSidebar() {
 			</div>
 			<div className="sidebar-actions">
 				<button id="importBtn" className="text-btn" onClick={() => fileInputRef.current?.click()}>
-					↥ Import
+					<Upload aria-hidden="true" /> Import
 				</button>
 				<button
 					id="exportBtn"
@@ -292,7 +287,7 @@ export function ArchiveSidebar() {
 					disabled={!snapshot.captures.length}
 					onClick={actions.openExport}
 				>
-					↧ Export
+					<Download aria-hidden="true" /> Export
 				</button>
 				<input
 					id="fileInput"
@@ -408,10 +403,7 @@ function FolderContextMenu({
 					onRename(state.folderId);
 				}}
 			>
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="m5 16.5-.75 3.25 3.25-.75L18.75 7.75a2.12 2.12 0 0 0-3-3L5 16.5Z" />
-					<path d="m14.25 6.75 3 3" />
-				</svg>
+				<Pencil aria-hidden="true" />
 				<span>Rename</span>
 			</button>
 			<button
@@ -425,9 +417,7 @@ function FolderContextMenu({
 					onDelete(state.folderId);
 				}}
 			>
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M5.5 7.5h13M9.5 7.5V5h5v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5.5M14 11v5.5" />
-				</svg>
+				<Trash2 aria-hidden="true" />
 				<span>Delete</span>
 			</button>
 		</div>
@@ -533,7 +523,7 @@ function CaptureContextMenu({
 			>
 				<span className="capture-context-icon">{FOLDER_ICON}</span>
 				<span>Move to</span>
-				<span className="capture-context-chevron" aria-hidden="true">›</span>
+				<span className="capture-context-chevron" aria-hidden="true"><ChevronRight /></span>
 			</button>
 			{moveOpen ? (
 				<div className="capture-context-submenu" role="menu" aria-label="Move capture to folder">
@@ -548,7 +538,7 @@ function CaptureContextMenu({
 							onClick={() => handleMove(destination.id)}
 						>
 							<span>{destination.name}</span>
-							{currentFolderId === destination.id ? <span aria-hidden="true">✓</span> : null}
+							{currentFolderId === destination.id ? <Check aria-hidden="true" /> : null}
 						</button>
 					))}
 					<button
@@ -562,7 +552,7 @@ function CaptureContextMenu({
 							onCreateFolder(state.captureId);
 						}}
 					>
-						<span aria-hidden="true">＋</span>
+						<Plus aria-hidden="true" />
 						<span>New folder…</span>
 					</button>
 				</div>
@@ -579,9 +569,7 @@ function CaptureContextMenu({
 						actions.upgradeCapture(state.captureId);
 					}}
 				>
-					<svg viewBox="0 0 24 24" aria-hidden="true">
-						<path d="M12 19V5M7.5 9.5 12 5l4.5 4.5" />
-					</svg>
+					<ArrowUp aria-hidden="true" />
 					<span>Upgrade</span>
 				</button>
 			) : null}
@@ -596,9 +584,7 @@ function CaptureContextMenu({
 					actions.deleteCapture(state.captureId);
 				}}
 			>
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M5.5 7.5h13M9.5 7.5V5h5v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5.5M14 11v5.5" />
-				</svg>
+				<Trash2 aria-hidden="true" />
 				<span>Delete</span>
 			</button>
 		</div>
@@ -670,7 +656,7 @@ export function ArchiveFolderDialog({
 						<h2>{title}</h2>
 					</div>
 					<button className="icon-btn" value="cancel" formMethod="dialog" formNoValidate aria-label="Close">
-						×
+						<X aria-hidden="true" />
 					</button>
 				</div>
 				<label className="field">

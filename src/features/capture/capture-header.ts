@@ -42,7 +42,7 @@ export const EMPTY_CAPTURE_HEADER_SNAPSHOT: CaptureHeaderSnapshot = {
 	description: "",
 	stateText: "EMPTY",
 	live: false,
-	metadata: [{ kind: "message", value: "Use ＋ to create a capture, or import an existing dump." }],
+	metadata: [{ kind: "message", value: "Use the new-capture button to create a capture, or import an existing dump." }],
 	summary: EMPTY_HEADER_SUMMARY
 };
 
