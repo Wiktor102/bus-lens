@@ -11,6 +11,11 @@ import {
 	type ContextDialogDraft,
 	type ExportFormat
 } from "./dialog-model";
+import {
+	getCanonicalizationDialogActions,
+	getCanonicalizationDialogSnapshot,
+	subscribeToCanonicalizationDialog
+} from "../capture/canonicalization-bridge";
 
 function isCancelSubmit(event: FormEvent<HTMLFormElement>): boolean {
 	return ((event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null)?.value === "cancel";
@@ -463,4 +468,119 @@ export function ExportDialog() {
 			</form>
 		</dialog>
 	);
+}
+
+export function CanonicalizationDialog() {
+	const snapshot = useSyncExternalStore(
+		subscribeToCanonicalizationDialog,
+		getCanonicalizationDialogSnapshot,
+		getCanonicalizationDialogSnapshot
+	);
+	const actions = getCanonicalizationDialogActions();
+	const dialogRef = useRef<HTMLDialogElement>(null);
+	const preflight = snapshot.preflight;
+	const job = snapshot.job;
+	const terminalFailure = job?.status === "failed";
+	const terminalSuccess = job?.status === "completed" && job.verified;
+	const canStart = Boolean(preflight?.eligible && !preflight.recordingActive && !snapshot.starting && !snapshot.loading);
+
+	useEffect(() => {
+		const dialog = dialogRef.current;
+		if (!dialog) return;
+		if (!snapshot.open) {
+			if (dialog.open) dialog.close();
+			return;
+		}
+		if (!dialog.open) dialog.showModal();
+	}, [snapshot.open]);
+
+	return (
+		<dialog
+			id="canonicalizationDialog"
+			className="modal canonicalization-modal"
+			ref={dialogRef}
+			onCancel={event => {
+				event.preventDefault();
+				actions.close();
+			}}
+			onClose={() => actions.close()}
+		>
+			<div className="modal-heading">
+				<div>
+					<span className="eyebrow">Storage migration</span>
+					<h2>Upgrade capture storage</h2>
+				</div>
+				<button className="icon-btn" type="button" aria-label="Close" onClick={() => actions.close()}>×</button>
+			</div>
+			<p className="modal-lede">
+				{snapshot.captureName || "This capture"} will be converted only after you explicitly start the operation.
+			</p>
+			<ul className="canonicalization-safeguards">
+				<li>The original capture will be backed up.</li>
+				<li>Raw bytes, framing, sections, notes, annotations, sequences, and metadata will be verified.</li>
+				<li>The capture cannot be edited during conversion.</li>
+				<li>Successful conversion enables canonical queries and agent analysis.</li>
+				<li>Conversion does not alter the original serial data.</li>
+			</ul>
+			{preflight ? (
+				<div className="canonicalization-preflight" aria-label="Conversion preflight">
+					<div><span>Capture size</span><strong>{preflight.captureSize.toLocaleString()} bytes</strong></div>
+					<div><span>Messages</span><strong>{preflight.messageCount.toLocaleString()}</strong></div>
+					<div><span>Notes</span><strong>{preflight.noteCount.toLocaleString()}</strong></div>
+					<div><span>Storage</span><strong>{preflight.existingStorageStatus || "legacy-not-canonicalized"}</strong></div>
+					<div><span>Recording</span><strong>{preflight.recordingActive ? "Active" : "Stopped"}</strong></div>
+					<div><span>Eligibility</span><strong>{preflight.eligible ? "Eligible" : preflight.estimatedEligibility}</strong></div>
+				</div>
+			) : snapshot.loading ? <p className="validation-hint">Checking conversion eligibility…</p> : null}
+			{snapshot.error || preflight?.error ? <p className="conversion-error" role="alert">{snapshot.error || preflight?.error}</p> : null}
+			{job && (job.status === "running" || job.status === "pending") ? (
+				<div className="conversion-progress" role="status" aria-live="polite">
+					<strong>CONVERTING</strong>
+					<span>{Math.round(job.progress * 100)}% · verification in progress</span>
+				</div>
+			) : null}
+			{terminalSuccess ? (
+				<div className="conversion-success" role="status">
+					<strong>Verification passed</strong>
+					<span>The capture has been reloaded from canonical storage.</span>
+					{job.verification ? <VerificationChecks verification={job.verification} /> : null}
+				</div>
+			) : null}
+			{terminalFailure ? (
+				<div className="conversion-failure" role="alert">
+					<strong>Verification failed</strong>
+					<span>{job.error || "The legacy capture was kept unchanged."}</span>
+					{job.verification ? <VerificationChecks verification={job.verification} /> : null}
+				</div>
+			) : null}
+			<div className="modal-actions">
+				<button className="btn btn-secondary" type="button" onClick={actions.download} disabled={!snapshot.captureId || snapshot.starting}>
+					Download original JSON
+				</button>
+				<span />
+				{terminalFailure ? (
+					<button className="btn btn-primary" type="button" onClick={actions.retry} disabled={snapshot.starting}>
+						Retry conversion
+					</button>
+				) : terminalSuccess ? (
+					<button className="btn btn-primary" type="button" onClick={() => actions.close()}>Done</button>
+				) : (
+					<button id="startCanonicalizationBtn" className="btn btn-primary" type="button" onClick={actions.start} disabled={!canStart}>
+						{snapshot.starting ? "Starting…" : preflight?.recordingActive ? "Stop recording first" : "Start conversion"}
+					</button>
+				)}
+			</div>
+		</dialog>
+	);
+}
+
+function VerificationChecks({ verification }: { verification: { rawBytesMatched: boolean; framesMatched: boolean; sectionsMatched: boolean; notesMatched: boolean; analysisMatched: boolean } }) {
+	const checks = [
+		["Raw bytes", verification.rawBytesMatched],
+		["Frames", verification.framesMatched],
+		["Sections", verification.sectionsMatched],
+		["Notes", verification.notesMatched],
+		["Analysis", verification.analysisMatched]
+	] as const;
+	return <div className="verification-checks">{checks.map(([label, passed]) => <span key={label} className={passed ? "passed" : "failed"}>{passed ? "✓" : "×"} {label}</span>)}</div>;
 }

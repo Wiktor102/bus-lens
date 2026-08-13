@@ -8,6 +8,7 @@ import {
 } from "../../domain/framing.ts";
 import {
 	normalizeCaptureSummaryData,
+	reconstructLegacyByteStream,
 	type CaptureSummaryData,
 	type FramedMessage,
 	type RawByteRecord
@@ -78,6 +79,7 @@ export type Capture = Omit<CaptureSummaryData, "notes"> & {
 	name?: string;
 	view?: string;
 	createdAt?: string;
+	updatedAt?: string;
 	baudRate?: number;
 	inputFormat?: string;
 	folderId?: string | null;
@@ -95,6 +97,16 @@ export type Capture = Omit<CaptureSummaryData, "notes"> & {
 	frameSections?: CaptureSection[];
 	/** The next unassigned absolute raw offset. */
 	nextRawOffset?: number;
+	storageStatus?: "legacy-not-canonicalized" | "converting" | "canonical" | "canonicalization-failed";
+	lifecycle?: string;
+	dataRevision?: number;
+	byteCount?: number;
+	metadataRevision?: number;
+	contentRevision?: number;
+	retainedStartOffset?: number;
+	activeFramingProfileId?: string | null;
+	isRetainedTail?: boolean;
+	framingDraftRevision?: number;
 };
 
 export type PreviewByteRecord = RawByteRecord & { rawPosition: number };
@@ -244,13 +256,7 @@ export function normalizeCapture(capture: Capture, generateId = createId): Captu
 	capture.markerPosition ||= "start";
 	capture.frameTimeGap = Math.max(0.01, +capture.frameTimeGap! || 5);
 	if (!Array.isArray(capture.byteStream)) {
-		capture.byteStream = capture.messages.flatMap(message =>
-			message.bytes.map((value, index) => ({
-				value,
-				timestamp: message.byteTimestamps?.[index] ?? message.timestamp,
-				hidden: Boolean(message.hiddenBytes?.[index])
-			}))
-		);
+		capture.byteStream = reconstructLegacyByteStream(capture.messages);
 	}
 	capture.byteStream.forEach(record => {
 		record.direction ||= "rx";

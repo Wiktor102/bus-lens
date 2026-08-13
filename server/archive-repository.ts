@@ -1,7 +1,66 @@
 import { randomUUID } from "node:crypto";
 import type { SqliteDatabase } from "./database.ts";
+import {
+	convertCaptureDocumentToCanonical as convertDocumentCanonical,
+	createFramingRevision as createCanonicalRevision,
+	getActiveProfile as getCanonicalActiveProfile,
+	getPreviousProfiles as listCanonicalPreviousProfiles,
+	type VerificationReport
+} from "./canonical.ts";
 
 export type JsonDocument = Record<string, unknown>;
+
+export type CaptureStorageStatus =
+	| "legacy-not-canonicalized"
+	| "converting"
+	| "canonical"
+	| "canonicalization-failed";
+
+export type CanonicalizationStatus =
+	| "legacy-not-canonicalized"
+	| "converting"
+	| "canonical"
+	| "failed";
+
+export type CanonicalizationVerification = {
+	rawBytesMatched: boolean;
+	framesMatched: boolean;
+	sectionsMatched: boolean;
+	notesMatched: boolean;
+	analysisMatched: boolean;
+};
+
+export type CanonicalizationPreflight = {
+	captureId: string;
+	status: CanonicalizationStatus;
+	storageStatus: CaptureStorageStatus | null;
+	existingStorageStatus: CaptureStorageStatus | null;
+	captureSize: number;
+	byteCount: number;
+	messageCount: number;
+	noteCount: number;
+	recordingActive: boolean;
+	isRecording: boolean;
+	eligible: boolean;
+	estimatedEligibility: "eligible" | "already-canonical" | "converting" | "recording-active" | "missing" | "invalid";
+	activeJobId?: string;
+	verification?: CanonicalizationVerification | null;
+	error?: string;
+};
+
+export type CanonicalizationJob = {
+	id: string;
+	captureId: string;
+	status: "pending" | "running" | "completed" | "failed";
+	progress: number;
+	verified: boolean;
+	verification: CanonicalizationVerification | null;
+	report: VerificationReport | null;
+	error: string | null;
+	createdAt: string;
+	updatedAt: string;
+	completedAt: string | null;
+};
 
 export type DocumentRecord = {
 	id: string;
@@ -75,11 +134,19 @@ type StoredImportRow = {
 type DocumentTable = "capture_documents" | "folders" | "send_queue" | "send_history";
 
 export class RepositoryConflictError extends Error {
-	readonly code = "VERSION_CONFLICT";
+	readonly code: string;
 
-	constructor(message = "The document was changed by another writer") {
+	constructor(message = "The document was changed by another writer", code = "VERSION_CONFLICT") {
 		super(message);
 		this.name = "RepositoryConflictError";
+		this.code = code;
+	}
+}
+
+export class CanonicalCommandRequiredError extends RepositoryConflictError {
+	constructor() {
+		super("Canonical captures must be changed through command-specific endpoints", "canonical-command-required");
+		this.name = "CanonicalCommandRequiredError";
 	}
 }
 
@@ -107,6 +174,28 @@ function serializeDocument(document: JsonDocument): string {
 	const serialized = JSON.stringify(document);
 	if (!serialized) throw new RepositoryValidationError("Document could not be serialized as JSON");
 	return serialized;
+}
+
+function canonicalizationVerification(report: VerificationReport | null): CanonicalizationVerification | null {
+	if (!report) return null;
+	const extended = report as VerificationReport & { notesMatched?: boolean; metadataMatched?: boolean };
+	return {
+		rawBytesMatched: report.rawByteCount.ok,
+		framesMatched: report.messageCount.ok && report.signaturesOk && report.messageVisibilityOk,
+		sectionsMatched: report.sectionBoundaries.ok,
+		notesMatched: extended.notesMatched ?? true,
+		analysisMatched: report.byteStatisticsOk && report.bitStatisticsOk && report.transitionsOk && report.sequenceGroupsOk
+	};
+}
+
+function canonicalizationStatusFor(
+	storageStatus: CaptureStorageStatus | undefined,
+	jobStatus: string | undefined
+): CanonicalizationStatus {
+	if (storageStatus === "canonical") return "canonical";
+	if (storageStatus === "converting" || jobStatus === "pending" || jobStatus === "running") return "converting";
+	if (storageStatus === "canonicalization-failed" || jobStatus === "failed") return "failed";
+	return "legacy-not-canonicalized";
 }
 
 function documentRecord(row: StoredDocumentRow): DocumentRecord {
@@ -140,6 +229,78 @@ function timestampAsIso(value: unknown, fallback: string): string {
 	}
 	if (typeof value === "number" && Number.isFinite(value)) return new Date(value).toISOString();
 	return fallback;
+}
+
+function numericOffsets(value: unknown): number[] | null {
+	if (!Array.isArray(value)) return null;
+	const offsets = value.map(Number);
+	return offsets.every(offset => Number.isSafeInteger(offset) && offset >= 0) ? offsets : null;
+}
+
+function rawOffsetsForMessage(message: JsonDocument): number[] | null {
+	const persisted = numericOffsets(message.rawOffsets) || numericOffsets(message._rawPositions);
+	if (persisted) return persisted;
+	const start = Number(message._byteStart);
+	return Number.isSafeInteger(start) && start >= 0 && Array.isArray(message.bytes)
+		? message.bytes.map((_, index) => start + index)
+		: null;
+}
+
+function parseRawOffsets(value: string | null): number[] | null {
+	if (!value) return null;
+	try {
+		return numericOffsets(JSON.parse(value));
+	} catch {
+		return null;
+	}
+}
+
+function sameOffsets(left: number[], right: number[]): boolean {
+	return left.length === right.length && left.every((offset, index) => offset === right[index]);
+}
+
+type StableAnnotationTarget = {
+	message_id: string | null;
+	byte_position: number | null;
+	raw_offset: number | null;
+	raw_offsets_json: string | null;
+};
+
+function messageForStableAnnotation(messages: JsonDocument[], row: StableAnnotationTarget): JsonDocument | undefined {
+	const byId = row.message_id ? messages.find(message => String(message.id) === row.message_id) : undefined;
+	if (byId) return byId;
+	const rawOffsets = parseRawOffsets(row.raw_offsets_json);
+	if (rawOffsets) {
+		const exact = messages.find(message => {
+			const messageOffsets = rawOffsetsForMessage(message);
+			return messageOffsets ? sameOffsets(messageOffsets, rawOffsets) : false;
+		});
+		if (exact) return exact;
+		const containing = messages.find(message => {
+			const messageOffsets = rawOffsetsForMessage(message);
+			return Boolean(messageOffsets && rawOffsets.some(offset => messageOffsets.includes(offset)));
+		});
+		if (containing) return containing;
+	}
+	const rawOffset = row.raw_offset;
+	if (rawOffset !== null) {
+		return messages.find(message => rawOffsetsForMessage(message)?.includes(rawOffset));
+	}
+	return undefined;
+}
+
+function legacyAnnotationKey(messages: JsonDocument[], row: StableAnnotationTarget & { id: string; target_kind: string }): string {
+	const message = messageForStableAnnotation(messages, row);
+	const messageId = message?.id === undefined ? row.message_id : String(message.id);
+	if (!messageId) return row.id;
+	if (row.target_kind !== "byte") return messageId;
+	const messageOffsets = message ? rawOffsetsForMessage(message) : null;
+	const resolvedPosition =
+		row.raw_offset !== null && messageOffsets ? messageOffsets.indexOf(row.raw_offset) : -1;
+	const bytePosition = resolvedPosition >= 0 ? resolvedPosition : row.byte_position;
+	return typeof bytePosition === "number" && Number.isSafeInteger(bytePosition) && bytePosition >= 0
+		? `${messageId}:${bytePosition}`
+		: row.id;
 }
 
 export class ArchiveRepository {
@@ -246,17 +407,344 @@ export class ArchiveRepository {
 			.run({ entityType, entityId, folderId, position });
 	}
 
+	getCaptureStorageStatus(id: string): CaptureStorageStatus | undefined {
+		const row = this.database
+			.prepare("SELECT status FROM capture_storage WHERE capture_id = @id")
+			.get({ id }) as { status: CaptureStorageStatus } | undefined;
+		return row?.status;
+	}
+
+	private markLegacyCapture(id: string): void {
+		this.database
+			.prepare(
+				`INSERT INTO capture_storage (capture_id, status, updated_at, last_error)
+				 VALUES (@captureId, 'legacy-not-canonicalized', @updatedAt, NULL)
+				 ON CONFLICT (capture_id) DO UPDATE SET
+				 status = capture_storage.status,
+				 updated_at = excluded.updated_at`
+			)
+			.run({ captureId: id, updatedAt: this.nowIso() });
+	}
+
 	getCapture(id: string): DocumentRecord | undefined {
-		return this.getDocument("capture_documents", id);
+		const status = this.getCaptureStorageStatus(id);
+		if (status === "canonical") return this.getCanonicalCapture(id);
+		if (status === "legacy-not-canonicalized" || status === "converting" || status === "canonicalization-failed") {
+			return this.getDocument("capture_documents", id);
+		}
+		return undefined;
 	}
 
 	listCaptures(): DocumentRecord[] {
-		return this.listDocuments("capture_documents", "updated_at DESC, id ASC");
+		const storageRows = this.database
+			.prepare("SELECT capture_id, status FROM capture_storage ORDER BY updated_at DESC, capture_id ASC")
+			.all() as Array<{ capture_id: string; status: CaptureStorageStatus }>;
+		const canonicalIds = storageRows.filter(row => row.status === "canonical").map(row => row.capture_id);
+		const legacyIds = storageRows
+			.filter(row => row.status !== "canonical")
+			.map(row => row.capture_id);
+		const synthesized = canonicalIds
+			.map(id => this.getCanonicalCapture(id))
+			.filter((r): r is DocumentRecord => Boolean(r));
+		const unconverted = legacyIds
+			.map(id => this.getDocument("capture_documents", id))
+			.filter((record): record is DocumentRecord => Boolean(record));
+		// Preserve archive_order ordering as primary sort if available, else fall back to synthesized+unconverted by updated_at
+		const order = this.database
+			.prepare("SELECT entity_id, position FROM archive_order WHERE entity_type='capture' ORDER BY position, entity_id")
+			.all() as Array<{ entity_id: string; position: number }>;
+		if (order.length) {
+			const pos = new Map(order.map(o => [o.entity_id, o.position]));
+			const all = [...synthesized, ...unconverted];
+			all.sort((a, b) => {
+				const pa = pos.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+				const pb = pos.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+				return pa - pb || b.updatedAt.localeCompare(a.updatedAt);
+			});
+			return all;
+		}
+		return [...synthesized, ...unconverted];
+	}
+
+	/** Returns synthesized DocumentRecord from canonical tables if converted, otherwise undefined */
+	getCanonicalCapture(id: string): DocumentRecord | undefined {
+		if (this.getCaptureStorageStatus(id) !== "canonical") return undefined;
+		const cap = this.database.prepare(
+			`SELECT id, name, description, controller_view, lifecycle, byte_count,
+			        baud_rate, input_format, data_revision, metadata_revision,
+			        content_revision, retained_start_offset, created_at, updated_at,
+			        folder_id, active_framing_profile_id
+			 FROM captures WHERE id = @id`
+		).get({ id }) as
+			| {
+				id: string;
+				name: string;
+				description: string;
+				controller_view: string;
+				lifecycle: string;
+				byte_count: number;
+				baud_rate: number;
+				input_format: string;
+				data_revision: number;
+				metadata_revision: number;
+				content_revision: number;
+				retained_start_offset: number;
+				created_at: string;
+				updated_at: string;
+				folder_id: string | null;
+				active_framing_profile_id: string | null;
+			}
+			| undefined;
+		if (!cap) return undefined;
+		const parameters = this.database
+			.prepare("SELECT key_text, value_text FROM capture_parameters WHERE capture_id = @captureId ORDER BY position")
+			.all({ captureId: id }) as Array<{ key_text: string; value_text: string }>;
+		const byteVisibility = new Map(
+			(this.database
+				.prepare("SELECT raw_offset, hidden FROM raw_byte_visibility WHERE capture_id = @captureId")
+				.all({ captureId: id }) as Array<{ raw_offset: number; hidden: number }>)
+				.map(row => [row.raw_offset, Boolean(row.hidden)])
+		);
+		// Reassemble byteStream from raw_chunks
+		const chunks = this.database
+			.prepare(
+				`SELECT bytes, timestamps_json, directions_json, hidden_json, start_offset, session_id, session_ids_json
+				 FROM raw_chunks
+				 WHERE capture_id = @captureId AND start_offset + byte_count > @retainedStartOffset
+				 ORDER BY chunk_index`
+			)
+			.all({ captureId: id, retainedStartOffset: cap.retained_start_offset }) as Array<{
+			bytes: Buffer;
+			timestamps_json: string;
+			directions_json: string;
+			hidden_json: string;
+			start_offset: number;
+			session_id: string | null;
+			session_ids_json: string;
+		}>;
+		const byteStream: JsonDocument[] = [];
+		for (const ch of chunks) {
+			const timestamps: number[] = JSON.parse(ch.timestamps_json) as number[];
+			const directions: string[] = JSON.parse(ch.directions_json) as string[];
+			const hidden: boolean[] = JSON.parse(ch.hidden_json) as boolean[];
+			const sessionIds: Array<string | null> = JSON.parse(ch.session_ids_json || "[]") as Array<string | null>;
+			const bytes = ch.bytes instanceof Buffer ? [...ch.bytes] : Array.from(new Uint8Array(ch.bytes as unknown as Uint8Array));
+			for (let i = 0; i < bytes.length; i++) {
+				const rawOffset = ch.start_offset + i;
+				if (rawOffset < cap.retained_start_offset) continue;
+				const sessionId = sessionIds[i] ?? ch.session_id;
+				byteStream.push({
+					rawOffset,
+					value: bytes[i],
+					timestamp: timestamps[i] ?? 0,
+					direction: directions[i] || "rx",
+					hidden: byteVisibility.get(rawOffset) ?? Boolean(hidden[i]),
+					...(sessionId ? { sessionId } : {})
+				});
+			}
+		}
+		const canonicalSessions = this.database
+			.prepare("SELECT id, first_received_at, last_received_at FROM capture_sessions WHERE capture_id = @captureId ORDER BY ordinal")
+			.all({ captureId: id }) as Array<{ id: string; first_received_at: number | null; last_received_at: number | null }>;
+		const captureSessions: JsonDocument[] = canonicalSessions.map(session => ({
+					id: session.id,
+					...(session.first_received_at === null ? {} : { firstReceivedAt: session.first_received_at }),
+					...(session.last_received_at === null ? {} : { lastReceivedAt: session.last_received_at })
+				}));
+		// Active framing profile
+		const activeProfile = this.database
+			.prepare(
+				`SELECT id, version, algorithm_version FROM framing_profiles
+				 WHERE id = @profileId AND capture_id = @captureId LIMIT 1`
+			)
+			.get({ profileId: cap.active_framing_profile_id, captureId: id }) as
+				| { id: string; version: number; algorithm_version: number }
+				| undefined;
+		const framingDraft = this.database
+			.prepare("SELECT revision FROM framing_drafts WHERE capture_id = @captureId ORDER BY revision DESC LIMIT 1")
+			.get({ captureId: id }) as { revision: number } | undefined;
+		let frameSections: JsonDocument[] = [];
+		let messages: JsonDocument[] = [];
+		if (activeProfile) {
+			const frameVisibility = new Map(
+				(this.database
+					.prepare(
+						`SELECT start_raw_offset, end_raw_offset, hidden
+						 FROM frame_visibility WHERE capture_id = @captureId AND profile_id = @profileId`
+					)
+					.all({ captureId: id, profileId: activeProfile.id }) as Array<{
+						start_raw_offset: number;
+						end_raw_offset: number;
+						hidden: number;
+					}>)
+					.map(row => [`${row.start_raw_offset}:${row.end_raw_offset}`, Boolean(row.hidden)])
+			);
+			const sections = this.database
+				.prepare(
+					"SELECT id, start_offset, framing_mode, frame_length, marker_bytes, marker_position, time_gap_ms, collapse_runs, collapsed FROM framing_sections WHERE profile_id = @profileId ORDER BY position"
+				)
+				.all({ profileId: activeProfile.id }) as Array<{
+				id: string;
+				start_offset: number;
+				framing_mode: string;
+				frame_length: number | null;
+				marker_bytes: string | null;
+				marker_position: string | null;
+				time_gap_ms: number | null;
+				collapse_runs: number;
+				collapsed: number;
+			}>;
+			frameSections = sections.map(s => {
+				let marker = "";
+				if (s.marker_bytes) {
+					try {
+						const arr: number[] = JSON.parse(s.marker_bytes) as number[];
+						marker = arr.map(b => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+					} catch {}
+				}
+				return {
+					id: s.id,
+					start: s.start_offset,
+					framingMode: s.framing_mode,
+					frameSize: s.frame_length ?? 3,
+					frameMarker: marker,
+					markerPosition: s.marker_position ?? "start",
+					frameTimeGap: s.time_gap_ms ?? 5,
+					collapseRuns: Boolean(s.collapse_runs),
+					collapsed: Boolean(s.collapsed)
+				};
+			});
+			const frames = this.database
+				.prepare(
+					"SELECT id, ordinal, section_id, raw_offsets_json, bytes_json, timestamps_json, directions_json, hidden, signature FROM materialized_frames WHERE profile_id = @profileId ORDER BY ordinal"
+				)
+				.all({ profileId: activeProfile.id }) as Array<{
+				id: string;
+				ordinal: number;
+				section_id: string;
+				raw_offsets_json: string;
+				bytes_json: string;
+				timestamps_json: string;
+				directions_json: string;
+				hidden: number;
+				signature: string;
+			}>;
+			messages = frames.map(f => {
+				const rawOffsets: number[] = JSON.parse(f.raw_offsets_json) as number[];
+				const bytes: number[] = JSON.parse(f.bytes_json) as number[];
+				const timestamps: number[] = JSON.parse(f.timestamps_json) as number[];
+				const frameVisibilityKey = `${rawOffsets[0] ?? 0}:${rawOffsets.at(-1) ?? 0}`;
+				return {
+					id: f.id,
+					timestamp: timestamps[0] ?? 0,
+					byteTimestamps: timestamps,
+					bytes,
+					directions: JSON.parse(f.directions_json) as string[],
+					hidden: frameVisibility.get(frameVisibilityKey) ?? Boolean(f.hidden),
+					hiddenBytes: bytes.map(() => false),
+					sourceIndex: f.ordinal,
+					sectionId: f.section_id,
+					_byteStart: 0,
+					_byteEnd: bytes.length,
+					rawOffsets,
+					_rawPositions: rawOffsets
+				};
+			});
+		}
+		// Notes: stable_notes
+		const notesRows = this.database.prepare("SELECT id, text, created_at, target_kind, start_row, end_row, raw_offset, raw_offsets_json, start_offset, end_offset, sequence_key, message_id, byte_position FROM stable_notes WHERE capture_id = @captureId").all({ captureId: id }) as Array<{
+			id: string;
+			text: string;
+			created_at: string;
+			target_kind: string;
+			start_row: number | null;
+			end_row: number | null;
+			raw_offset: number | null;
+			raw_offsets_json: string | null;
+			start_offset: number | null;
+			end_offset: number | null;
+			sequence_key: string | null;
+			message_id: string | null;
+			byte_position: number | null;
+		}>;
+		const captureNotes: JsonDocument[] = [];
+		const annotations: Record<string, JsonDocument> = {};
+		for (const row of notesRows) {
+			if (row.target_kind === "legacy-sequence" || row.target_kind === "range") {
+				captureNotes.push({
+					id: row.id,
+					type: "sequence",
+					text: row.text,
+					createdAt: new Date(row.created_at).getTime(),
+					start: row.start_row,
+					end: row.end_row,
+					startRawOffset: row.start_offset,
+					endRawOffset: row.end_offset,
+					targetLabel: `rows ${row.start_row}–${row.end_row}`
+				});
+			} else if (row.target_kind === "capture") {
+				captureNotes.push({ id: row.id, type: "capture", text: row.text, createdAt: new Date(row.created_at).getTime() });
+			} else if (row.target_kind === "byte") {
+				annotations[legacyAnnotationKey(messages, row)] = { noteId: row.id, text: row.text, createdAt: new Date(row.created_at).getTime(), type: "byte", targetLabel: `raw ${row.raw_offset}` };
+			} else if (row.target_kind === "frame") {
+				annotations[legacyAnnotationKey(messages, row)] = { noteId: row.id, text: row.text, createdAt: new Date(row.created_at).getTime(), type: "message", targetLabel: row.raw_offsets_json || "" };
+			} else if (row.target_kind === "pattern") {
+				// patternRemarks not reconstructed here; stored separately but we omit for brevity
+			}
+		}
+		// Retrieve patternRemarks from stable_notes where target_kind='pattern' to reconstitute
+		const patternRemarks: Record<string, JsonDocument> = {};
+		for (const row of notesRows) {
+			if (row.target_kind === "pattern" && row.sequence_key) patternRemarks[row.sequence_key] = { noteId: row.id, text: row.text, updatedAt: new Date(row.created_at).getTime() };
+		}
+
+		const document: JsonDocument = {
+			id: cap.id,
+			name: cap.name,
+			description: cap.description,
+			view: cap.controller_view,
+			createdAt: cap.created_at,
+			updatedAt: cap.updated_at,
+			lifecycle: cap.lifecycle,
+			byteCount: cap.byte_count,
+			folderId: cap.folder_id,
+			baudRate: cap.baud_rate,
+			inputFormat: cap.input_format,
+			params: parameters.map(parameter => ({ key: parameter.key_text, value: parameter.value_text })),
+			parameters: parameters.map(parameter => ({ key: parameter.key_text, value: parameter.value_text })),
+			storageStatus: "canonical",
+			dataRevision: cap.data_revision,
+			metadataRevision: cap.metadata_revision,
+			contentRevision: cap.content_revision,
+			...(framingDraft ? { framingDraftRevision: framingDraft.revision } : {}),
+			retainedStartOffset: cap.retained_start_offset,
+			activeFramingProfileId: cap.active_framing_profile_id,
+			isRetainedTail: cap.retained_start_offset > 0,
+			byteStream,
+			frameSections,
+			messages,
+			notes: captureNotes,
+			annotations,
+			patternRemarks,
+			nextRawOffset: byteStream.length ? Math.max(...byteStream.map(b => (b.rawOffset as number) + 1)) : 0,
+			captureSessions
+		};
+		return {
+			id: cap.id,
+			version: Math.max(1, cap.metadata_revision + cap.content_revision),
+			document,
+			createdAt: cap.created_at,
+			updatedAt: cap.updated_at
+		};
 	}
 
 	putCapture(id: string, document: JsonDocument, expectedVersion?: number): DocumentRecord {
 		const transaction = this.database.transaction(() => {
+			const storageStatus = this.getCaptureStorageStatus(id);
+			if (storageStatus === "canonical") throw new CanonicalCommandRequiredError();
+			if (storageStatus === "converting") throw new RepositoryConflictError("Capture conversion is in progress", "canonicalization-in-progress");
 			const record = this.putDocument("capture_documents", id, document, expectedVersion);
+			this.markLegacyCapture(record.id);
 			const existingOrder = this.database
 				.prepare("SELECT position FROM archive_order WHERE entity_type = 'capture' AND entity_id = @id")
 				.get({ id }) as { position: number } | undefined;
@@ -273,8 +761,18 @@ export class ArchiveRepository {
 
 	deleteCapture(id: string): boolean {
 		const transaction = this.database.transaction(() => {
+			const existed = Boolean(this.getCaptureStorageStatus(id));
+			this.database.prepare("DELETE FROM raw_chunks WHERE capture_id = @id").run({ id });
+			this.database.prepare("DELETE FROM stable_notes WHERE capture_id = @id").run({ id });
+			this.database.prepare("DELETE FROM finalization_jobs WHERE capture_id = @id").run({ id });
+			this.database.prepare("DELETE FROM capture_backups WHERE capture_id = @id").run({ id });
+			// Cascading deletes from captures will clear profiles/frames; do explicit for safety
+			this.database.prepare("DELETE FROM framing_profiles WHERE capture_id = @id").run({ id });
+			this.database.prepare("DELETE FROM captures WHERE id = @id").run({ id });
 			this.database.prepare("DELETE FROM archive_order WHERE entity_type = 'capture' AND entity_id = @id").run({ id });
-			return this.database.prepare("DELETE FROM capture_documents WHERE id = @id").run({ id }).changes > 0;
+			const docDeleted = this.database.prepare("DELETE FROM capture_documents WHERE id = @id").run({ id }).changes > 0;
+			this.database.prepare("DELETE FROM capture_storage WHERE capture_id = @id").run({ id });
+			return docDeleted || existed;
 		});
 		return transaction();
 	}
@@ -587,6 +1085,407 @@ export class ArchiveRepository {
 			createdAt: row.created_at,
 			completedAt: row.completed_at
 		};
+	}
+
+	// -----------------------------------------------------------------------
+	// Canonical raw chunks / framing / analysis — PR 4
+	// -----------------------------------------------------------------------
+
+	/** Convert one legacy JSON capture explicitly; capture_documents remains the compatibility source. */
+	convertCaptureToCanonical(id: string): ReturnType<typeof convertDocumentCanonical> {
+		return convertDocumentCanonical(this.database, id, { nowIso: () => this.nowIso(), generateId: () => this.generateId() });
+	}
+
+	/** Migrate all unconverted capture documents. Supports mixed state: converted remain readable. */
+	convertAllCaptures(): Array<ReturnType<typeof convertDocumentCanonical>> {
+		const ids = (this.database.prepare("SELECT id FROM capture_documents").all() as Array<{ id: string }>).map(r => r.id);
+		const results: Array<ReturnType<typeof convertDocumentCanonical>> = [];
+		for (const id of ids) {
+			if (this.isCaptureConverted(id)) continue;
+			results.push(this.convertCaptureToCanonical(id));
+		}
+		return results;
+	}
+
+	isCaptureConverted(id: string): boolean {
+		return this.getCaptureStorageStatus(id) === "canonical";
+	}
+
+	/**
+	 * Read-only information used to decide whether the explicit migration action
+	 * can be offered. This method never materializes canonical data for a legacy
+	 * capture and never starts conversion.
+	 */
+	getCanonicalizationPreflight(id: string): CanonicalizationPreflight {
+		const captureId = String(id);
+		const storageStatus = this.getCaptureStorageStatus(captureId) ?? null;
+		const jobRow = this.database
+			.prepare("SELECT id, status, error, verification_report_json FROM finalization_jobs WHERE id = @jobId AND capture_id = @captureId")
+			.get({ jobId: `conv-${captureId}`, captureId }) as { id: string; status: string; error: string | null; verification_report_json: string | null } | undefined;
+		const status = canonicalizationStatusFor(storageStatus ?? undefined, jobRow?.status);
+		let preflightReport: VerificationReport | null = null;
+		if (jobRow?.verification_report_json) {
+			try { preflightReport = JSON.parse(jobRow.verification_report_json) as VerificationReport; } catch { preflightReport = null; }
+		}
+
+		let captureSize = 0;
+		let messageCount = 0;
+		let noteCount = 0;
+		let recordingActive = false;
+		let exists = false;
+		let validDocument = true;
+		let error: string | undefined;
+
+		if (status === "canonical") {
+			const row = this.database
+				.prepare("SELECT byte_count, lifecycle FROM captures WHERE id = @captureId")
+				.get({ captureId }) as { byte_count: number; lifecycle: string } | undefined;
+			if (row) {
+				exists = true;
+				captureSize = row.byte_count;
+				recordingActive = row.lifecycle === "recording" || Boolean(
+					this.database
+						.prepare("SELECT 1 FROM capture_sessions WHERE capture_id = @captureId AND status IN ('recording','finalizing') LIMIT 1")
+						.get({ captureId })
+				);
+				const profile = this.database
+					.prepare("SELECT active_framing_profile_id FROM captures WHERE id = @captureId")
+					.get({ captureId }) as { active_framing_profile_id: string | null } | undefined;
+				messageCount = profile?.active_framing_profile_id
+					? (this.database
+							.prepare("SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId")
+							.get({ profileId: profile.active_framing_profile_id }) as { count: number }).count
+					: 0;
+				noteCount = (this.database
+					.prepare("SELECT COUNT(*) AS count FROM stable_notes WHERE capture_id = @captureId")
+					.get({ captureId }) as { count: number }).count;
+			} else {
+				exists = false;
+				validDocument = false;
+				error = "canonical capture rows are incomplete";
+			}
+		} else {
+			const row = this.database
+				.prepare("SELECT document_json FROM capture_documents WHERE id = @captureId")
+				.get({ captureId }) as { document_json: string } | undefined;
+			if (row) {
+				exists = true;
+				try {
+					const document = JSON.parse(row.document_json) as Record<string, unknown>;
+					const byteStream = Array.isArray(document.byteStream) ? document.byteStream : [];
+					const messages = Array.isArray(document.messages) ? document.messages : [];
+					const notes = Array.isArray(document.notes) ? document.notes : [];
+					const annotations = document.annotations && typeof document.annotations === "object" ? document.annotations as object : {};
+					const patternRemarks = document.patternRemarks && typeof document.patternRemarks === "object" ? document.patternRemarks as object : {};
+					captureSize = byteStream.length;
+					messageCount = messages.length;
+					noteCount = notes.length + Object.keys(annotations).length + Object.keys(patternRemarks).length;
+					recordingActive = document.lifecycle === "recording" || document.recording === true;
+				} catch (parseError) {
+					validDocument = false;
+					error = parseError instanceof Error ? parseError.message : String(parseError);
+				}
+			} else {
+				exists = false;
+				validDocument = false;
+				error = "capture document not found";
+			}
+		}
+
+		const estimatedEligibility = !exists
+			? "missing"
+			: !validDocument
+				? "invalid"
+				: status === "canonical"
+					? "already-canonical"
+					: status === "converting"
+						? "converting"
+						: recordingActive
+							? "recording-active"
+							: "eligible";
+		const eligible = (status === "legacy-not-canonicalized" || status === "failed") && validDocument && !recordingActive;
+		return {
+			captureId,
+			status,
+			storageStatus,
+			existingStorageStatus: storageStatus,
+			captureSize,
+			byteCount: captureSize,
+			messageCount,
+			noteCount,
+			recordingActive,
+			isRecording: recordingActive,
+			eligible,
+			estimatedEligibility,
+			...(error || jobRow?.error ? { error: error || jobRow?.error || undefined } : {}),
+			...(jobRow ? { activeJobId: jobRow.id, verification: canonicalizationVerification(preflightReport) } : {})
+		};
+	}
+
+	private readCanonicalizationJobRow(captureId: string, jobId: string): CanonicalizationJob | undefined {
+		const row = this.database
+			.prepare(
+				`SELECT id, capture_id, status, verified, error, created_at, updated_at,
+						completed_at, verification_report_json
+				 FROM finalization_jobs WHERE id = @jobId AND capture_id = @captureId`
+			)
+			.get({ jobId, captureId }) as
+			| {
+					id: string;
+					capture_id: string;
+					status: "pending" | "running" | "completed" | "failed";
+					verified: number;
+					error: string | null;
+					created_at: string;
+					updated_at: string;
+					completed_at: string | null;
+					verification_report_json: string | null;
+				}
+			| undefined;
+		if (!row) return undefined;
+		let report: VerificationReport | null = null;
+		if (row.verification_report_json) {
+			try { report = JSON.parse(row.verification_report_json) as VerificationReport; } catch { report = null; }
+		}
+		if (!report && row.status === "completed") {
+			const backup = this.getCaptureBackup(captureId);
+			if (backup?.verification_report_json) {
+				try { report = JSON.parse(backup.verification_report_json) as VerificationReport; } catch { report = null; }
+			}
+		}
+		return {
+			id: row.id,
+			captureId: row.capture_id,
+			status: row.status,
+			progress: row.status === "completed" || row.status === "failed" ? 1 : row.status === "running" ? 0.5 : 0,
+			verified: Boolean(row.verified),
+			verification: canonicalizationVerification(report),
+			report,
+			error: row.error,
+			createdAt: row.created_at,
+			updatedAt: row.updated_at,
+			completedAt: row.completed_at
+		};
+	}
+
+	getCanonicalizationJob(captureId: string, jobId: string): CanonicalizationJob | undefined {
+		return this.readCanonicalizationJobRow(String(captureId), String(jobId));
+	}
+
+	getLatestCanonicalizationJob(captureId: string): CanonicalizationJob | undefined {
+		const id = String(captureId);
+		const row = this.database
+			.prepare("SELECT id FROM finalization_jobs WHERE capture_id = @captureId ORDER BY updated_at DESC, id DESC LIMIT 1")
+			.get({ captureId: id }) as { id: string } | undefined;
+		return row ? this.readCanonicalizationJobRow(id, row.id) : undefined;
+	}
+
+	/** Start one explicit conversion, then return its durable finalization job. */
+	startCanonicalization(captureId: string): CanonicalizationJob {
+		const id = String(captureId);
+		const preflight = this.getCanonicalizationPreflight(id);
+		if (preflight.status === "canonical") {
+			const existing = this.getLatestCanonicalizationJob(id);
+			if (existing) return existing;
+			throw new RepositoryConflictError("capture is canonical but has no finalization job", "canonicalization-job-missing");
+		}
+		if (preflight.status === "converting") {
+			throw new RepositoryConflictError("capture conversion is already in progress", "canonicalization-in-progress");
+		}
+		if (preflight.recordingActive) {
+			throw new RepositoryConflictError("capture cannot be converted while recording", "canonicalization-recording-active");
+		}
+		if (!preflight.eligible) {
+			throw new RepositoryConflictError(preflight.error || "capture is not eligible for conversion", "canonicalization-not-eligible");
+		}
+
+		const jobId = `conv-${id}`;
+		const now = this.nowIso();
+		const prepare = this.database.transaction(() => {
+			const row = this.database
+				.prepare("SELECT status FROM capture_storage WHERE capture_id = @captureId")
+				.get({ captureId: id }) as { status: CaptureStorageStatus } | undefined;
+			if (!row) throw new RepositoryValidationError("capture storage status is missing");
+			if (row.status === "canonical") return;
+			if (row.status === "converting") throw new RepositoryConflictError("capture conversion is already in progress", "canonicalization-in-progress");
+			this.database
+				.prepare("UPDATE capture_storage SET status = 'converting', updated_at = @updatedAt, last_error = NULL WHERE capture_id = @captureId")
+				.run({ captureId: id, updatedAt: now });
+			this.database
+				.prepare(
+					`INSERT INTO finalization_jobs
+						(id, capture_id, status, created_at, updated_at, error, verified, data_revision,
+						 source_data_revision, attempt_count, started_at, completed_at, verification_report_json)
+					 VALUES (@id, @captureId, 'running', @createdAt, @updatedAt, NULL, 0, 0,
+						 NULL, 1, @startedAt, NULL, NULL)
+					 ON CONFLICT (id) DO UPDATE SET
+						 status = 'running', updated_at = excluded.updated_at, error = NULL, verified = 0,
+						 data_revision = 0, source_data_revision = NULL, attempt_count = finalization_jobs.attempt_count + 1,
+						 started_at = excluded.started_at, completed_at = NULL, profile_id = NULL,
+						 verification_report_json = NULL`
+				)
+				.run({ id: jobId, captureId: id, createdAt: now, updatedAt: now, startedAt: now });
+		});
+		prepare();
+
+		this.convertCaptureToCanonical(id);
+		const job = this.getCanonicalizationJob(id, jobId);
+		if (!job) throw new RepositoryValidationError("canonicalization job was not persisted");
+		return job;
+	}
+
+	getLegacyBackupDocument(captureId: string): { captureId: string; source: "legacy-document" | "recovery-backup"; documentJson: string; document: JsonDocument | null; verified: boolean } | undefined {
+		const id = String(captureId);
+		const documentRow = this.database
+			.prepare("SELECT document_json FROM capture_documents WHERE id = @captureId")
+			.get({ captureId: id }) as { document_json: string } | undefined;
+		if (documentRow) {
+			let document: JsonDocument | null = null;
+			try { document = parseDocument(documentRow.document_json); } catch { document = null; }
+			return { captureId: id, source: "legacy-document", documentJson: documentRow.document_json, document, verified: false };
+		}
+		const backup = this.getCaptureBackup(id);
+		if (!backup) return undefined;
+		let document: JsonDocument | null = null;
+		try { document = parseDocument(backup.document_json); } catch { document = null; }
+		return { captureId: id, source: "recovery-backup", documentJson: backup.document_json, document, verified: Boolean(backup.verified) };
+	}
+
+	getCaptureBackup(id: string): { document_json: string; verified: number; verification_report_json: string | null } | undefined {
+		return this.database.prepare("SELECT document_json, verified, verification_report_json FROM capture_backups WHERE capture_id = @id").get({ id }) as
+			| { document_json: string; verified: number; verification_report_json: string | null }
+			| undefined;
+	}
+
+	listCaptureBackups(): Array<{ capture_id: string; verified: number }> {
+		return this.database.prepare("SELECT capture_id, verified FROM capture_backups").all() as Array<{ capture_id: string; verified: number }>;
+	}
+
+	getActiveFramingProfile(captureId: string): { id: string; version: number } | undefined {
+		return getCanonicalActiveProfile(this.database, captureId);
+	}
+
+	listFramingProfiles(captureId: string): Array<{ id: string; version: number; is_active: number; algorithm_version: number }> {
+		return this.database
+			.prepare("SELECT id, version, is_active, algorithm_version FROM framing_profiles WHERE capture_id = @captureId ORDER BY version")
+			.all({ captureId }) as Array<{ id: string; version: number; is_active: number; algorithm_version: number }>;
+	}
+
+	getPreviousFramingProfiles(captureId: string): Array<{ id: string; version: number; is_active: number }> {
+		return listCanonicalPreviousProfiles(this.database, captureId);
+	}
+
+	createFramingRevision(
+		captureId: string,
+		sections: Array<{ id?: string; start: number; framingMode: string; frameSize?: number; frameMarker?: string; markerPosition?: string; frameTimeGap?: number; collapseRuns?: boolean; collapsed?: boolean }>
+	): ReturnType<typeof createCanonicalRevision> {
+		// Normalize to expected input shape
+		const normalized = sections.map(s => ({
+			id: s.id,
+			start: Number(s.start) || 0,
+			framingMode: (["length", "marker", "time"].includes(String(s.framingMode)) ? s.framingMode : "length") as "length" | "marker" | "time",
+			frameSize: s.frameSize,
+			frameMarker: s.frameMarker,
+			markerPosition: s.markerPosition as "start" | "end" | undefined,
+			frameTimeGap: s.frameTimeGap,
+			collapseRuns: Boolean(s.collapseRuns),
+			collapsed: Boolean(s.collapsed)
+		}));
+		return createCanonicalRevision(this.database, captureId, normalized, {
+			nowIso: () => this.nowIso(),
+			generateId: () => this.generateId()
+		});
+	}
+
+	getFinalizationJobs(captureId: string): Array<{ id: string; status: string; verified: number; error: string | null }> {
+		return this.database
+			.prepare("SELECT id, status, verified, error FROM finalization_jobs WHERE capture_id = @captureId ORDER BY updated_at DESC")
+			.all({ captureId }) as Array<{ id: string; status: string; verified: number; error: string | null }>;
+	}
+
+	getFrameSignatures(profileId: string): Array<{ signature: string; count: number }> {
+		return this.database.prepare("SELECT signature, count FROM frame_signatures WHERE profile_id = @profileId ORDER BY count DESC").all({ profileId }) as Array<{
+			signature: string;
+			count: number;
+		}>;
+	}
+
+	getFrameTransitions(profileId: string): Array<{ from_signature: string; to_signature: string; count: number; diffs: number }> {
+		return this.database
+			.prepare("SELECT from_signature, to_signature, count, diffs FROM frame_transitions WHERE profile_id = @profileId ORDER BY count DESC")
+			.all({ profileId }) as Array<{ from_signature: string; to_signature: string; count: number; diffs: number }>;
+	}
+
+	getByteStatistics(profileId: string): Array<{ position: number; value: number; count: number }> {
+		return this.database.prepare("SELECT position, value, count FROM byte_statistics WHERE profile_id = @profileId ORDER BY position, count DESC").all({ profileId }) as Array<{
+			position: number;
+			value: number;
+			count: number;
+		}>;
+	}
+
+	getBitStatistics(profileId: string): Array<{ position: number; bit: number; percentage: number; variance: string }> {
+		return this.database.prepare("SELECT position, bit, percentage, variance FROM bit_statistics WHERE profile_id = @profileId ORDER BY position, bit DESC").all({ profileId }) as Array<{
+			position: number;
+			bit: number;
+			percentage: number;
+			variance: string;
+		}>;
+	}
+
+	getSequenceGroups(profileId: string): Array<{ id: string; key_text: string; signatures_json: string; score: number; length: number }> {
+		return this.database.prepare("SELECT id, key_text, signatures_json, score, length FROM sequence_groups WHERE profile_id = @profileId ORDER BY score DESC").all({ profileId }) as Array<{
+			id: string;
+			key_text: string;
+			signatures_json: string;
+			score: number;
+			length: number;
+		}>;
+	}
+
+	getSequenceOccurrences(groupId: string): Array<{ occurrence_index: number; offset: number; start_frame_ordinal: number; start_raw_offset: number; end_raw_offset: number; length: number }> {
+		return this.database
+			.prepare("SELECT occurrence_index, offset, start_frame_ordinal, start_raw_offset, end_raw_offset, length FROM sequence_occurrences WHERE group_id = @groupId ORDER BY occurrence_index, offset")
+			.all({ groupId }) as Array<{ occurrence_index: number; offset: number; start_frame_ordinal: number; start_raw_offset: number; end_raw_offset: number; length: number }>;
+	}
+
+	getStableNotes(captureId: string): Array<{
+		id: string;
+		text: string;
+		created_at: string;
+		target_kind: string;
+		raw_offset: number | null;
+		raw_offsets_json: string | null;
+		profile_id: string | null;
+		start_offset: number | null;
+		end_offset: number | null;
+		sequence_key: string | null;
+		start_row: number | null;
+		end_row: number | null;
+		message_id: string | null;
+		byte_position: number | null;
+	}> {
+		return this.database
+			.prepare(
+				`SELECT id, text, created_at, target_kind, raw_offset, raw_offsets_json, profile_id, start_offset, end_offset, sequence_key, start_row, end_row, message_id, byte_position
+				 FROM stable_notes WHERE capture_id = @captureId ORDER BY created_at DESC`
+			)
+			.all({ captureId }) as Array<{
+			id: string;
+			text: string;
+			created_at: string;
+			target_kind: string;
+			raw_offset: number | null;
+			raw_offsets_json: string | null;
+			profile_id: string | null;
+			start_offset: number | null;
+			end_offset: number | null;
+			sequence_key: string | null;
+			start_row: number | null;
+			end_row: number | null;
+			message_id: string | null;
+			byte_position: number | null;
+		}>;
 	}
 
 	close(): void {

@@ -12,6 +12,14 @@ import {
 	type JsonDocument
 } from "./archive-repository.ts";
 import { openDatabase, type SqliteDatabase } from "./database.ts";
+import { CanonicalQueryService } from "./canonical-query.ts";
+import {
+	CanonicalCaptureCommandError,
+	CanonicalCaptureCommandService,
+	type CaptureMetadataPatch,
+	type CreateCaptureRequest,
+	type FramingSectionRequest
+} from "./canonical-capture-command-service.ts";
 
 const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
 const MIME_TYPES: Record<string, string> = {
@@ -33,6 +41,7 @@ type ServiceOptions = {
 export type ArchiveHttpService = {
 	server: Server;
 	repository: ArchiveRepository;
+	commandService: CanonicalCaptureCommandService;
 	database: SqliteDatabase;
 	close: () => Promise<void>;
 };
@@ -110,6 +119,8 @@ async function serveStatic(response: ServerResponse, staticDirectory: string, pa
 export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpService {
 	const database = openDatabase(options.databasePath);
 	const repository = new ArchiveRepository(database);
+	const canonicalQueries = new CanonicalQueryService(database);
+	const commandService = new CanonicalCaptureCommandService(database);
 	const staticDirectory = options.staticDirectory ? resolve(options.staticDirectory) : undefined;
 	const maxBodyBytes = options.maxBodyBytes ?? 128 * 1024 * 1024;
 	const server = createServer(async (request, response) => {
@@ -123,6 +134,180 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { ok: true });
 			if (request.method === "GET" && url.pathname === "/api/archive") {
 				return send(response, 200, { captures: repository.listCaptures(), folders: repository.listFolders(), index: repository.getArchiveIndex(), queue: repository.listQueue(), history: repository.listHistory(), settings: repository.getSettings() });
+			}
+			if (segments[1] === "canonical" && segments[2] === "captures") {
+				if (request.method === "GET" && !segments[3]) return send(response, 200, canonicalQueries.listCaptureSummaries());
+				const captureId = segments[3];
+				if (request.method === "GET" && captureId && segments[4] === "overview") {
+					const overview = canonicalQueries.getCaptureOverview(captureId);
+					return overview ? send(response, 200, overview) : send(response, 404, { error: "Not found" });
+				}
+				if (request.method === "GET" && captureId && segments[4] === "frames") {
+					const offset = url.searchParams.has("offset") ? Number(url.searchParams.get("offset")) : 0;
+					const limit = url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : undefined;
+					if ((url.searchParams.has("offset") && !Number.isSafeInteger(offset)) || (limit !== undefined && !Number.isSafeInteger(limit))) {
+						throw new RepositoryValidationError("offset and limit must be integers");
+					}
+					const window = canonicalQueries.getFrameWindow(captureId, offset, limit);
+					return window ? send(response, 200, window) : send(response, 404, { error: "Not found" });
+				}
+			}
+			if (segments[1] === "captures" && !segments[2] && request.method === "POST") {
+				const body = documentFrom(await jsonBody(request, maxBodyBytes));
+				const captureId = String(body.id ?? body.captureId ?? "");
+				const existed = commandService.getStorageStatus(captureId).status === "canonical";
+				const state = commandService.createCapture(body as CreateCaptureRequest);
+				return send(response, existed ? 200 : 201, state);
+			}
+			if (segments[1] === "captures" && segments[2]) {
+				const captureId = segments[2];
+				if (segments[3] === "canonicalization") {
+					if (!segments[4] && request.method === "GET") {
+						const preflight = repository.getCanonicalizationPreflight(captureId);
+						return preflight.estimatedEligibility === "missing" ? send(response, 404, { error: preflight.error || "Not found" }) : send(response, 200, preflight);
+					}
+					if (!segments[4] && request.method === "POST") {
+						const preflight = repository.getCanonicalizationPreflight(captureId);
+						if (preflight.estimatedEligibility === "missing") return send(response, 404, { error: preflight.error || "Not found" });
+						return send(response, 200, repository.startCanonicalization(captureId));
+					}
+					if (segments[4] === "jobs" && segments[5] && request.method === "GET") {
+						const job = repository.getCanonicalizationJob(captureId, segments[5]);
+						return job ? send(response, 200, job) : send(response, 404, { error: "Not found" });
+					}
+				}
+				if (segments[3] === "legacy-backup" && request.method === "GET") {
+					const backup = repository.getLegacyBackupDocument(captureId);
+					return backup ? send(response, 200, backup) : send(response, 404, { error: "No legacy backup available" });
+				}
+				if (segments[3] === "metadata" && request.method === "PATCH") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					const patch = documentFrom(body.patch ?? body) as CaptureMetadataPatch;
+					return send(response, 200, commandService.patchMetadata({
+						captureId,
+						patch,
+						expectedMetadataRevision: body.expectedMetadataRevision === undefined
+							? undefined
+							: Number(body.expectedMetadataRevision)
+					}));
+				}
+				if (segments[3] === "sessions" && !segments[4] && request.method === "POST") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes) ?? {});
+					const result = commandService.startSession({
+						captureId,
+						sessionId: body.sessionId === undefined ? undefined : String(body.sessionId),
+						startedAt: body.startedAt === undefined ? undefined : String(body.startedAt)
+					});
+					return send(response, 200, {
+						sessionId: result.session.id,
+						nextChunkSequence: result.session.nextChunkSequence,
+						nextRawOffset: result.session.nextRawOffset,
+						dataRevision: result.dataRevision
+					});
+				}
+				if (segments[3] === "raw-chunks" && request.method === "POST") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					return send(response, 200, commandService.appendChunk({
+						...body,
+						captureId,
+						sessionId: String(body.sessionId ?? ""),
+						requestId: String(body.requestId ?? ""),
+						sequence: Number(body.sequence),
+						expectedStartOffset: Number(body.expectedStartOffset)
+					}));
+				}
+				if (segments[3] === "sessions" && segments[4] && segments[5] === "finalize" && request.method === "POST") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes) ?? {});
+					return send(response, 200, commandService.finalizeSession({
+						captureId,
+						sessionId: segments[4],
+						expectedDataRevision: body.expectedDataRevision === undefined ? undefined : Number(body.expectedDataRevision)
+					}));
+				}
+				if (segments[3] === "framing-draft" && request.method === "PATCH") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					return send(response, 200, commandService.updateFramingDraft({
+						captureId,
+						sections: body.sections as FramingSectionRequest[],
+						expectedRevision: body.expectedRevision === undefined ? undefined : Number(body.expectedRevision)
+					}));
+				}
+				if (segments[3] === "framing-revisions" && request.method === "POST") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					return send(response, 200, commandService.reframe({
+						captureId,
+						sections: body.sections as FramingSectionRequest[],
+						expectedActiveProfileId: body.expectedActiveProfileId === undefined
+							? undefined
+							: body.expectedActiveProfileId === null ? null : String(body.expectedActiveProfileId),
+						expectedDataRevision: Number(body.expectedDataRevision),
+						algorithmVersion: body.algorithmVersion === undefined ? undefined : Number(body.algorithmVersion)
+					}));
+				}
+				if (segments[3] === "notes") {
+					const noteId = segments[4];
+					if (!noteId && request.method === "GET") return send(response, 200, commandService.getCaptureState(captureId).notes);
+					if (!noteId && request.method === "POST") {
+						const body = documentFrom(await jsonBody(request, maxBodyBytes));
+						return send(response, 201, commandService.createNote({
+							captureId,
+							noteId: body.noteId === undefined ? undefined : String(body.noteId),
+							text: String(body.text ?? ""),
+							target: documentFrom(body.target) as never,
+							createdAt: body.createdAt as string | number | undefined
+						}));
+					}
+					if (noteId && request.method === "PATCH") {
+						const body = documentFrom(await jsonBody(request, maxBodyBytes));
+						return send(response, 200, commandService.updateNote({
+							captureId,
+							noteId,
+							text: body.text === undefined ? undefined : String(body.text),
+							target: body.target === undefined ? undefined : documentFrom(body.target) as never
+						}));
+					}
+					if (noteId && request.method === "DELETE") {
+						commandService.deleteNote({ captureId, noteId });
+						return send(response, 204, {});
+					}
+				}
+				if (segments[3] === "bytes" && segments[4] && segments[5] === "visibility") {
+					const rawOffset = Number(segments[4]);
+					if (request.method === "PUT") {
+						const body = documentFrom(await jsonBody(request, maxBodyBytes));
+						return send(response, 200, commandService.setByteVisibility({ captureId, rawOffset, hidden: Boolean(body.hidden) }));
+					}
+					if (request.method === "DELETE") {
+						commandService.deleteByteVisibility(captureId, rawOffset);
+						return send(response, 204, {});
+					}
+				}
+				if (segments[3] === "frames" && segments[4] && segments[5] === "visibility") {
+					const frameId = segments[4];
+					if (request.method === "PUT") {
+						const body = documentFrom(await jsonBody(request, maxBodyBytes));
+						return send(response, 200, commandService.setFrameVisibility({ captureId, frameId, hidden: Boolean(body.hidden) }));
+					}
+					if (request.method === "DELETE") {
+						commandService.deleteFrameVisibility({ captureId, frameId });
+						return send(response, 204, {});
+					}
+				}
+				if (segments[3] === "data" && request.method === "DELETE") {
+					return send(response, 200, commandService.clearCaptureData({ captureId }));
+				}
+				if (segments[3] === "duplicate" && request.method === "POST") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					const duplicateCaptureId = body.duplicateCaptureId ?? body.id;
+					return send(response, 201, commandService.duplicateCapture({
+						captureId,
+						duplicateCaptureId: duplicateCaptureId === undefined ? undefined : String(duplicateCaptureId)
+					}));
+				}
+				if (!segments[3] && request.method === "DELETE" && commandService.getStorageStatus(captureId).status === "canonical") {
+					commandService.deleteCapture(captureId);
+					return send(response, 204, {});
+				}
 			}
 			if (segments[1] === "archive-index") {
 				if (request.method === "GET") return send(response, 200, repository.getArchiveIndex());
@@ -138,6 +323,86 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 					if (!Array.isArray(archive.captures) || !Array.isArray(archive.folders)) throw new RepositoryValidationError("Legacy archive is invalid");
 					return send(response, 201, repository.migrateLegacyArchive(String(body.fingerprint ?? ""), archive, body.report));
 				}
+			}
+			// Canonicalization is an explicit admin/background operation. Startup and
+			// ordinary legacy-capture saves deliberately do not invoke these routes.
+			if (segments[1] === "migrations" && segments[2] === "canonical") {
+				if (request.method === "POST") {
+					const ids = repository.listCaptures().map(capture => String(capture.id));
+					const results: unknown[] = [];
+					for (const id of ids) {
+						const preflight = repository.getCanonicalizationPreflight(id);
+						if (preflight.status === "canonical") {
+							results.push({ captureId: id, status: "skipped", reason: "already-canonical", verified: true });
+							continue;
+						}
+						if (preflight.recordingActive) {
+							results.push({ captureId: id, status: "skipped", reason: "recording-active", verified: true });
+							continue;
+						}
+						try {
+							const job = repository.startCanonicalization(id);
+							results.push(job);
+							if (job.status === "failed") break;
+						} catch (error) {
+							results.push({ captureId: id, status: "failed", verified: false, error: error instanceof Error ? error.message : String(error) });
+							break;
+						}
+					}
+					return send(response, 200, { results, verified: results.every(result => (result as { verified?: boolean }).verified === true) });
+				}
+				if (request.method === "GET") {
+					const captures = repository.listCaptures();
+					const converted = captures.filter(c => repository.isCaptureConverted(String(c.id))).length;
+					return send(response, 200, { total: captures.length, converted, unconverted: captures.length - converted, backups: repository.listCaptureBackups() });
+				}
+			}
+			if (segments[1] === "captures" && segments[2] && segments[3] === "convert" && request.method === "POST") {
+				const captureId = segments[2];
+				return send(response, 200, repository.startCanonicalization(captureId));
+			}
+			if (segments[1] === "captures" && segments[2] && segments[3] === "reframe" && request.method === "POST") {
+				const captureId = segments[2];
+				const body = documentFrom(await jsonBody(request, maxBodyBytes)) as { sections: Array<Record<string, unknown>> };
+				if (!Array.isArray(body.sections)) throw new RepositoryValidationError("sections array is required");
+				// Atomic reframing: materialize new revision completely before activating
+				const revision = repository.createFramingRevision(captureId, body.sections as Array<{ id?: string; start: number; framingMode: string; frameSize?: number; frameMarker?: string; markerPosition?: string; frameTimeGap?: number; collapseRuns?: boolean; collapsed?: boolean }>);
+				return send(response, 200, revision);
+			}
+			if (segments[1] === "captures" && segments[2] && segments[3] === "profiles" && request.method === "GET") {
+				const captureId = segments[2];
+				return send(response, 200, repository.listFramingProfiles(captureId).map(profile => ({
+					id: profile.id,
+					version: profile.version,
+					algorithmVersion: profile.algorithm_version,
+					isActive: Boolean(profile.is_active)
+				})));
+			}
+			if (segments[1] === "captures" && segments[2] && segments[3] === "analysis" && request.method === "GET") {
+				const captureId = segments[2];
+				const active = repository.getActiveFramingProfile(captureId);
+				if (!active) return send(response, 404, { error: "no active framing profile" });
+				return send(response, 200, {
+					profile: active,
+					signatures: repository.getFrameSignatures(active.id),
+					transitions: repository.getFrameTransitions(active.id),
+					byteStatistics: repository.getByteStatistics(active.id),
+					bitStatistics: repository.getBitStatistics(active.id),
+					sequenceGroups: repository.getSequenceGroups(active.id).map(g => ({
+						...g,
+						occurrences: repository.getSequenceOccurrences(g.id)
+					}))
+				});
+			}
+			if (segments[1] === "captures" && segments[2] && segments[3] === "notes" && request.method === "GET") {
+				return send(response, 200, repository.getStableNotes(segments[2]));
+			}
+			if (segments[1] === "captures" && segments[2] && segments[3] === "backup" && request.method === "GET") {
+				const backup = repository.getCaptureBackup(segments[2]);
+				return backup ? send(response, 200, backup) : send(response, 404, { error: "no backup" });
+			}
+			if (segments[1] === "captures" && segments[2] && segments[3] === "finalization" && request.method === "GET") {
+				return send(response, 200, repository.getFinalizationJobs(segments[2]));
 			}
 			if (segments[1] === "settings") {
 				const key = segments[2];
@@ -176,11 +441,21 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			// A browser may cancel an in-flight request while its page is closing.
 			// There is no response to send and this is not a service failure.
 			if (request.aborted || response.destroyed) return;
+			if (error instanceof CanonicalCaptureCommandError) {
+				const status = error.code === "NOT_FOUND"
+					? 404
+					: error.code === "CONFLICT" || error.code === "IDEMPOTENCY_CONFLICT"
+						? 409
+						: error.code === "VALIDATION_ERROR"
+							? 400
+							: 500;
+				return send(response, status, { error: error.message, code: error.code, details: error.details });
+			}
 			if (error instanceof RepositoryConflictError) return send(response, 409, { error: error.message, code: error.code });
 			if (error instanceof RepositoryValidationError || error instanceof SyntaxError) return send(response, 400, { error: error.message });
 			console.error("Archive service request failed", error);
 			return send(response, 500, { error: "Internal server error" });
 		}
 	});
-	return { server, repository, database, close: () => new Promise(resolveClose => server.close(() => { database.close(); resolveClose(); })) };
+	return { server, repository, commandService, database, close: () => new Promise(resolveClose => server.close(() => { database.close(); resolveClose(); })) };
 }

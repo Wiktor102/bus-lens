@@ -117,6 +117,8 @@ export type MessageStreamSnapshot = {
 	annotations: Record<string, MessageStreamAnnotation>;
 	visibleCount: string;
 	patternCount: string;
+	retainedTail: boolean;
+	durableByteCount: number;
 	hasVisibleMessages: boolean;
 	hasMatchingRows: boolean;
 	emptyState: {
@@ -143,6 +145,8 @@ function emptyMessageStreamSnapshot(): MessageStreamSnapshot {
 		annotations: {},
 		visibleCount: "0 rows",
 		patternCount: "0 groups",
+		retainedTail: false,
+		durableByteCount: 0,
 		hasVisibleMessages: false,
 		hasMatchingRows: false,
 		emptyState: {
@@ -425,6 +429,8 @@ export function deriveMessageStreamSnapshot(
 				? visibleSummary
 				: `${visibleSummary} · ${telegramCount.toLocaleString()} telegrams`,
 		patternCount: `${patterns.groups.length} group${patterns.groups.length === 1 ? "" : "s"}`,
+		retainedTail: Boolean(capture.isRetainedTail || (capture.retainedStartOffset ?? 0) > 0),
+		durableByteCount: Number(capture.byteCount ?? capture.byteStream?.length ?? 0),
 		hasVisibleMessages,
 		hasMatchingRows,
 		emptyState: {

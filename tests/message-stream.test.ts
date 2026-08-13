@@ -129,3 +129,15 @@ test("keeps a pending marker section header and marker prompt visible while it h
 		["pending", "marker-prompt"]
 	);
 });
+
+test("marks retained projections as a durable tail instead of a complete capture", () => {
+	const current = sectionedCapture();
+	current.retainedStartOffset = 25;
+	current.isRetainedTail = true;
+	current.byteCount = 50_025;
+
+	const snapshot = deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT);
+
+	assert.equal(snapshot.retainedTail, true);
+	assert.equal(snapshot.durableByteCount, 50_025);
+});

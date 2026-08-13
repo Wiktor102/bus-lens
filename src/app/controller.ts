@@ -2,6 +2,13 @@ import { registerArchiveActions } from "../features/archive/archive-bridge.ts";
 import { createAppRuntime } from "./app-runtime.ts";
 import { download } from "../features/data-transfer/browser-download.ts";
 import { registerCaptureHeaderActions } from "../features/capture/capture-header-bridge.ts";
+import { registerCaptureStorageActions } from "../features/capture/capture-storage-bridge.ts";
+import {
+	EMPTY_CANONICALIZATION_DIALOG_SNAPSHOT,
+	getCanonicalizationDialogSnapshot,
+	publishCanonicalizationDialogSnapshot,
+	registerCanonicalizationDialogActions
+} from "../features/capture/canonicalization-bridge.ts";
 import { rebuildPreview, visibleByteEntries } from "../features/capture/capture-framing.ts";
 import { createCaptureController } from "../features/capture/capture-controller.ts";
 import { createDataTransferController } from "../features/data-transfer/data-transfer.ts";
@@ -15,9 +22,14 @@ import { createSnapshotRuntime } from "./snapshot-runtime.ts";
 import { registerSendActions } from "../features/send/send-bridge.ts";
 import { registerTransportActions } from "../features/transport/transport-bridge.ts";
 import { getViewStateSnapshot } from "../shared/view-state-bridge.ts";
+import {
+	EMPTY_PERSISTENCE_ERROR,
+	publishPersistenceError,
+	registerPersistenceErrorActions
+} from "../shared/persistence-error-bridge.ts";
 
 export type ControllerLifecycle = {
-	beforeUnload: () => void;
+	beforeUnload: (event?: { preventDefault: () => void; returnValue?: string }) => void;
 };
 
 let initializedController: ControllerLifecycle | undefined;
@@ -28,6 +40,7 @@ export function initializeController(): ControllerLifecycle {
 	const runtime = createAppRuntime();
 	let transport!: SerialController;
 	let sendController!: SendController;
+	let openCanonicalizationDialog = (_captureId: string): void => {};
 	const snapshots = createSnapshotRuntime({
 		state: runtime.state,
 		capture: runtime.capture,
@@ -49,7 +62,41 @@ export function initializeController(): ControllerLifecycle {
 		renderMessages: snapshots.renderMessages,
 		isPatternsPanelActive: () => getViewStateSnapshot().activePanel === "patterns",
 		stopSendQueue: () => sendController?.stopSendQueue(),
-		publishSendState: snapshots.publishSendState
+		publishSendState: snapshots.publishSendState,
+		publishPersistenceError: error => publishPersistenceError(error ? {
+			visible: true,
+			captureId: error.captureId,
+			message: error.message,
+			canRetry: true,
+			canExportRecovery: true
+		} : EMPTY_PERSISTENCE_ERROR),
+		isCanonicalCapture: runtime.isCanonicalCapture,
+		isCaptureConversionLocked: runtime.isCaptureConversionLocked,
+		recordingWriter: runtime.captureWriter ? {
+			startSession: async (captureId, sessionId) => {
+				if (!await runtime.ensureCanonicalCapture(captureId)) throw new Error("capture is not canonical");
+				await runtime.waitForCaptureWrite(captureId);
+				return runtime.captureWriter!.startSession({ captureId, sessionId });
+			},
+			appendChunk: request => runtime.captureWriter!.appendChunk(request),
+			finalizeSession: (captureId, sessionId, expectedDataRevision) =>
+				runtime.captureWriter!.finalizeSession({ captureId, sessionId, expectedDataRevision }),
+			refreshCapture: runtime.refreshCapture
+		} : undefined
+	});
+
+	registerPersistenceErrorActions({
+		retry: () => { void transport.retryPersistence(); },
+		exportRecovery: () => {
+			const capture = transport.recoveryDocument();
+			if (!capture) return;
+			download(
+				JSON.stringify(capture, null, 2),
+				`bus-lens-${String(capture.id ?? "capture")}-recovery.json`,
+				"application/json"
+			);
+		},
+		dismiss: () => publishPersistenceError(EMPTY_PERSISTENCE_ERROR)
 	});
 
 	sendController = createSendController({
@@ -76,8 +123,186 @@ export function initializeController(): ControllerLifecycle {
 		publishArchiveState: snapshots.publishArchiveState,
 		publishCaptureHeaderState: snapshots.publishCaptureHeaderState,
 		publishNotesState: snapshots.publishNotesState,
-		publishDialogCommand
+		publishDialogCommand,
+		captureWriter: runtime.captureWriter,
+		isCanonicalCapture: runtime.isCanonicalCapture,
+		waitForCaptureWrite: runtime.waitForCaptureWrite,
+		isCaptureConversionLocked: runtime.isCaptureConversionLocked,
+		setCaptureStorageStatus: runtime.setCaptureStorageStatus,
+		openCanonicalization: captureId => openCanonicalizationDialog(captureId),
+		refreshCapture: runtime.refreshCapture,
+		reportPersistenceFailure: (captureId, error) => publishPersistenceError({
+			visible: true,
+			captureId,
+			message: error instanceof Error ? error.message : String(error),
+			canRetry: false,
+			canExportRecovery: false
+		})
 	});
+
+	let canonicalizationToken = 0;
+	let canonicalizationStarting = false;
+
+	function publishCanonicalization(update: Partial<ReturnType<typeof getCanonicalizationDialogSnapshot>>): void {
+		publishCanonicalizationDialogSnapshot({ ...getCanonicalizationDialogSnapshot(), ...update });
+	}
+
+	function closeCanonicalizationDialog(): void {
+		canonicalizationToken += 1;
+		canonicalizationStarting = false;
+		publishCanonicalizationDialogSnapshot(EMPTY_CANONICALIZATION_DIALOG_SNAPSHOT);
+	}
+
+	function openCanonicalization(captureId: string): void {
+		const item = runtime.state.captures.find(capture => String(capture.id) === String(captureId));
+		if (!item) return;
+		const status = runtime.getCaptureStorageStatus(captureId) ?? item.storageStatus;
+		if (status === "canonical" || status === "converting") return;
+		const token = ++canonicalizationToken;
+		publishCanonicalizationDialogSnapshot({
+			open: true,
+			captureId: String(captureId),
+			captureName: String(item.name ?? "Untitled capture"),
+			preflight: null,
+			job: null,
+			loading: true,
+			starting: false,
+			error: null
+		});
+		void runtime.getCanonicalizationPreflight(captureId).then(preflight => {
+			const recordingActive = transport.isRecording();
+			const guardedPreflight = recordingActive
+				? {
+						...preflight,
+						recordingActive: true,
+						isRecording: true,
+						eligible: false,
+						estimatedEligibility: "recording-active" as const,
+						error: "Stop recording before converting this capture"
+					}
+				: preflight;
+			if (token !== canonicalizationToken) return;
+			publishCanonicalization({ preflight: guardedPreflight, loading: false, error: guardedPreflight.error || null });
+		}).catch(error => {
+			if (token !== canonicalizationToken) return;
+			publishCanonicalization({ loading: false, error: error instanceof Error ? error.message : String(error) });
+		});
+	}
+
+	openCanonicalizationDialog = openCanonicalization;
+
+	async function downloadLegacyBackup(): Promise<void> {
+		const captureId = getCanonicalizationDialogSnapshot().captureId;
+		if (!captureId) return;
+		try {
+			const backup = await runtime.getLegacyBackup(captureId);
+			download(backup.documentJson, `bus-lens-${captureId}-legacy.json`, "application/json");
+			runtime.showToast(backup.source === "recovery-backup" ? "Recovery JSON downloaded" : "Original JSON downloaded");
+		} catch (error) {
+			runtime.showToast(`Could not export original JSON: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	async function monitorCanonicalization(captureId: string, initialJob: Awaited<ReturnType<typeof runtime.startCanonicalization>>, token: number): Promise<void> {
+		let job = initialJob;
+		while (job.status === "pending" || job.status === "running") {
+			await new Promise(resolve => setTimeout(resolve, 250));
+			job = await runtime.getCanonicalizationJob(captureId, job.id);
+			if (token === canonicalizationToken) publishCanonicalization({ job, loading: false });
+		}
+
+		if (job.status === "completed" && job.verified) {
+			runtime.setCaptureStorageStatus(captureId, "canonical");
+			await runtime.refreshCapture(captureId);
+			snapshots.render();
+			runtime.showToast("Capture upgraded; verification passed");
+		} else if (job.status === "failed") {
+			runtime.setCaptureStorageStatus(captureId, "canonicalization-failed");
+			await runtime.refreshCapture(captureId);
+			snapshots.render();
+			runtime.showToast("Conversion failed; the legacy capture is still available");
+		}
+		if (token === canonicalizationToken) {
+			canonicalizationStarting = false;
+			publishCanonicalization({ job, loading: false, starting: false, error: job.error });
+		}
+	}
+
+	async function startCanonicalization(): Promise<void> {
+		const current = getCanonicalizationDialogSnapshot();
+		if (!current.captureId || canonicalizationStarting) return;
+		const captureId = current.captureId;
+		if (transport.isRecording()) {
+			publishCanonicalization({
+				preflight: current.preflight
+					? {
+							...current.preflight,
+							recordingActive: true,
+							isRecording: true,
+							eligible: false,
+							estimatedEligibility: "recording-active",
+							error: "Stop recording before converting this capture"
+						}
+					: current.preflight,
+				error: "Stop recording before converting this capture"
+			});
+			return;
+		}
+		const token = canonicalizationToken;
+		canonicalizationStarting = true;
+		publishCanonicalization({ starting: true, error: null });
+		runtime.setCaptureStorageStatus(captureId, "converting");
+		snapshots.render();
+		try {
+			const job = await runtime.startCanonicalization(captureId);
+			if (token === canonicalizationToken) publishCanonicalization({ job, loading: false });
+			await monitorCanonicalization(captureId, job, token);
+		} catch (error) {
+			canonicalizationStarting = false;
+			try {
+				const preflight = await runtime.getCanonicalizationPreflight(captureId);
+				runtime.setCaptureStorageStatus(
+					captureId,
+					preflight.status === "failed"
+						? "canonicalization-failed"
+						: preflight.status === "canonical"
+							? "canonical"
+							: preflight.status === "converting"
+								? "converting"
+								: "legacy-not-canonicalized"
+				);
+				if (token === canonicalizationToken) publishCanonicalization({ preflight, starting: false, loading: false, error: error instanceof Error ? error.message : String(error) });
+			} catch {
+				if (token === canonicalizationToken) publishCanonicalization({ starting: false, loading: false, error: error instanceof Error ? error.message : String(error) });
+			}
+			snapshots.render();
+		}
+	}
+
+	async function retryCanonicalization(): Promise<void> {
+		const current = getCanonicalizationDialogSnapshot();
+		if (!current.captureId || canonicalizationStarting) return;
+		const token = ++canonicalizationToken;
+		publishCanonicalization({ job: null, preflight: null, loading: true, starting: false, error: null });
+		try {
+			const serverPreflight = await runtime.getCanonicalizationPreflight(current.captureId);
+			const preflight = transport.isRecording()
+				? {
+						...serverPreflight,
+						recordingActive: true,
+						isRecording: true,
+						eligible: false,
+						estimatedEligibility: "recording-active" as const,
+						error: "Stop recording before converting this capture"
+					}
+				: serverPreflight;
+			if (token !== canonicalizationToken) return;
+			publishCanonicalization({ preflight, loading: false });
+			if (preflight.eligible) await startCanonicalization();
+		} catch (error) {
+			if (token === canonicalizationToken) publishCanonicalization({ loading: false, error: error instanceof Error ? error.message : String(error) });
+		}
+	}
 
 	const dataTransferController = createDataTransferController({
 		state: runtime.state,
@@ -107,13 +332,23 @@ export function initializeController(): ControllerLifecycle {
 		openContext: captureController.publishContextDialog,
 		duplicate: captureController.duplicateActiveCapture,
 		clearMessages: captureController.clearActiveCaptureMessages,
-		deleteCapture: captureController.deleteActiveCapture
+		deleteCapture: captureController.deleteActiveCapture,
+		upgradeStorage: captureController.upgradeActiveCapture
+	});
+
+	registerCaptureStorageActions({ upgrade: captureController.upgradeActiveCapture });
+	registerCanonicalizationDialogActions({
+		close: closeCanonicalizationDialog,
+		download: () => { void downloadLegacyBackup(); },
+		start: () => { void startCanonicalization(); },
+		retry: () => { void retryCanonicalization(); }
 	});
 
 	registerArchiveActions({
 		selectCapture: captureController.selectArchiveCapture,
 		toggleFolder: captureController.toggleArchiveFolder,
 		moveCapture: captureController.moveArchiveCapture,
+		upgradeCapture: captureController.upgradeCapture,
 		deleteCapture: captureController.deleteArchiveCapture,
 		openNewCapture: () => captureController.publishContextDialog(true),
 		openExport: () => publishDialogCommand({ type: "export" }),
@@ -163,8 +398,29 @@ export function initializeController(): ControllerLifecycle {
 			const capture = runtime.capture();
 			const message = capture?.messages?.find(item => item.id === messageId);
 			if (!message) return;
+			if (capture?.id && runtime.isCaptureConversionLocked(String(capture.id))) {
+				runtime.showToast("Capture conversion is in progress; editing is temporarily disabled");
+				return;
+			}
+			const previousHidden = Boolean(message.hidden);
 			message.hidden = true;
-			runtime.saveState({ immediate: true });
+			if (capture?.id && runtime.captureWriter && runtime.isCanonicalCapture(String(capture.id))) {
+				void runtime.captureWriter.setFrameVisibility({
+					captureId: String(capture.id),
+					frameId: messageId,
+					hidden: true
+				}).then(result => { capture.contentRevision = result.contentRevision; }).catch(error => {
+					message.hidden = previousHidden;
+					publishPersistenceError({
+						visible: true,
+						captureId: String(capture.id),
+						message: error instanceof Error ? error.message : String(error),
+						canRetry: false,
+						canExportRecovery: false
+					});
+					snapshots.render();
+				});
+			} else runtime.saveState({ immediate: true });
 			snapshots.render();
 			runtime.showToast("Message hidden; captured data was kept");
 		},
@@ -172,12 +428,35 @@ export function initializeController(): ControllerLifecycle {
 			const capture = runtime.capture();
 			const message = capture?.messages?.find(item => item.id === messageId);
 			if (!capture || !message || position < 0 || position >= message.bytes.length) return;
+			if (capture.id && runtime.isCaptureConversionLocked(String(capture.id))) {
+				runtime.showToast("Capture conversion is in progress; editing is temporarily disabled");
+				return;
+			}
 			message.hiddenBytes ||= [];
 			message.hiddenBytes[position] = true;
-			const rawIndex = message._rawPositions?.[position] ?? -1;
+			const rawOffset = message.rawOffsets?.[position] ?? message._rawPositions?.[position];
+			const rawIndex = capture.byteStream?.findIndex((record, index) => (record.rawOffset ?? index) === rawOffset) ?? -1;
+			const previousHidden = rawIndex >= 0 ? Boolean(capture.byteStream?.[rawIndex]?.hidden) : false;
 			if (rawIndex >= 0 && capture.byteStream?.[rawIndex]) capture.byteStream[rawIndex].hidden = true;
 			rebuildPreview(capture);
-			runtime.saveState({ immediate: true });
+			if (capture.id && rawOffset !== undefined && runtime.captureWriter && runtime.isCanonicalCapture(String(capture.id))) {
+				void runtime.captureWriter.setByteVisibility({
+					captureId: String(capture.id),
+					rawOffset,
+					hidden: true
+				}).then(result => { capture.contentRevision = result.contentRevision; }).catch(error => {
+					if (rawIndex >= 0 && capture.byteStream?.[rawIndex]) capture.byteStream[rawIndex].hidden = previousHidden;
+					rebuildPreview(capture);
+					publishPersistenceError({
+						visible: true,
+						captureId: String(capture.id),
+						message: error instanceof Error ? error.message : String(error),
+						canRetry: false,
+						canExportRecovery: false
+					});
+					snapshots.render();
+				});
+			} else runtime.saveState({ immediate: true });
 			snapshots.render();
 			runtime.showToast("Byte hidden; captured data was kept");
 		},
@@ -200,6 +479,7 @@ export function initializeController(): ControllerLifecycle {
 		beforeUnload: createBeforeUnloadHandler({
 			beginUnload: runtime.beginUnload,
 			flushLiveBytes: transport.flushLiveBytes,
+			hasUnacknowledgedBytes: transport.hasUnacknowledgedBytes,
 			getPort: transport.getPort,
 			disconnect: transport.disconnect
 		})

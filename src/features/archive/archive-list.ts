@@ -10,6 +10,7 @@ export type ArchiveCapture = {
 	folderId: string | null;
 	params: ArchiveParameter[];
 	messageCount: number;
+	storageStatus?: "legacy-not-canonicalized" | "converting" | "canonical" | "canonicalization-failed";
 };
 
 export type ArchiveFolder = {
@@ -23,15 +24,25 @@ export type ArchiveGroup = ArchiveFolder & {
 	system?: boolean;
 };
 
+export type ArchiveStorageFilter = "all" | "legacy" | "canonical" | "failed";
+
+function matchesStorageFilter(capture: ArchiveCapture, filter: ArchiveStorageFilter): boolean {
+	if (filter === "all") return true;
+	if (filter === "canonical") return capture.storageStatus === "canonical";
+	if (filter === "failed") return capture.storageStatus === "canonicalization-failed";
+	return capture.storageStatus === "legacy-not-canonicalized" || capture.storageStatus === "converting" || capture.storageStatus === undefined;
+}
+
 export function buildArchiveGroups(
 	captures: ArchiveCapture[],
 	folders: ArchiveFolder[],
 	query: string,
-	unfiledCollapsed = false
+	unfiledCollapsed = false,
+	storageFilter: ArchiveStorageFilter = "all"
 ) {
 	const normalizedQuery = query.trim().toLowerCase();
 	const folderNameById = new Map(folders.map(folder => [folder.id, folder.name]));
-	const visibleCaptures = captures.filter(capture =>
+	const visibleCaptures = captures.filter(capture => matchesStorageFilter(capture, storageFilter) &&
 		`${capture.name} ${capture.view} ${folderNameById.get(capture.folderId || "") || "unfiled"} ${capture.params
 			.map(parameter => `${parameter.key} ${parameter.value}`)
 			.join(" ")}`

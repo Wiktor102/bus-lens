@@ -9,7 +9,8 @@ import {
 	type MouseEvent as ReactMouseEvent
 } from "react";
 import { getArchiveActions, getArchiveSnapshot, subscribeToArchive } from "./archive-bridge";
-import { buildArchiveGroups, type ArchiveCapture, type ArchiveGroup } from "./archive-list";
+import { buildArchiveGroups, type ArchiveCapture, type ArchiveGroup, type ArchiveStorageFilter } from "./archive-list";
+import { captureStorageLabel, captureStorageUiStatus } from "../capture/capture-storage";
 
 const FOLDER_ICON = (
 	<svg viewBox="0 0 24 24" aria-hidden="true">
@@ -113,13 +114,22 @@ function CaptureItem({
 	onSelect: (captureId: string) => void;
 	onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void;
 }) {
+	const storageStatus = captureStorageUiStatus(capture.storageStatus);
+
 	return (
 		<div
 			className={`capture-item ${active ? "active" : ""} ${contextMenuOpen ? "context-menu-open" : ""}`.trim()}
 			onContextMenu={onContextMenu}
 		>
 			<button className="capture-open" type="button" data-capture-id={capture.id} onClick={() => onSelect(capture.id)}>
-				<strong>{capture.name}</strong>
+				<strong className="capture-name-row">
+					{capture.name}
+					{storageStatus === "legacy" || storageStatus === "failed" ? (
+						<span className={`storage-badge storage-${storageStatus}`} data-storage-status={capture.storageStatus || "legacy-not-canonicalized"}>
+							{captureStorageLabel(storageStatus)}
+						</span>
+					) : null}
+				</strong>
 				<small>
 					<span>{capture.view || "Unassigned view"}</span>
 					<span>{capture.messageCount} msg</span>
@@ -141,6 +151,7 @@ export function ArchiveSidebar() {
 	const actions = getArchiveActions();
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const [query, setQuery] = useState("");
+	const [storageFilter, setStorageFilter] = useState<ArchiveStorageFilter>("all");
 	const [folderDialogId, setFolderDialogId] = useState<string | null | undefined>(undefined);
 	const [folderMoveCaptureId, setFolderMoveCaptureId] = useState<string | null>(null);
 	const [captureMenuState, setCaptureMenuState] = useState<CaptureContextMenuState | null>(null);
@@ -166,8 +177,8 @@ export function ArchiveSidebar() {
 		});
 	}, []);
 	const archive = useMemo(
-		() => buildArchiveGroups(snapshot.captures, snapshot.folders, query, snapshot.unfiledCollapsed),
-		[snapshot, query]
+		() => buildArchiveGroups(snapshot.captures, snapshot.folders, query, snapshot.unfiledCollapsed, storageFilter),
+		[snapshot, query, storageFilter]
 	);
 
 	return (
@@ -211,6 +222,22 @@ export function ArchiveSidebar() {
 					value={query}
 					onChange={event => setQuery(event.currentTarget.value)}
 				/>
+			</label>
+			<label className="archive-storage-filter">
+				<span>Storage</span>
+				<select
+					id="captureStorageFilter"
+					value={storageFilter}
+					onChange={event => {
+						const nextFilter = event.currentTarget.value as ArchiveStorageFilter;
+						setStorageFilter(nextFilter);
+					}}
+				>
+					<option value="all">All captures</option>
+					<option value="legacy">Legacy</option>
+					<option value="canonical">Canonical</option>
+					<option value="failed">Failed conversion</option>
+				</select>
 			</label>
 			<div id="captureList" className="capture-list">
 				{archive.visibleCaptures.length ? (
@@ -425,6 +452,8 @@ function CaptureContextMenu({
 	positionRef.current = position;
 
 	const capture = state ? snapshot.captures.find(item => item.id === state.captureId) : undefined;
+	const storageStatus = capture ? captureStorageUiStatus(capture.storageStatus) : null;
+	const canUpgrade = storageStatus === "legacy" || storageStatus === "failed";
 	const currentFolderId = capture?.folderId || null;
 	const orderedFolders = [
 		...snapshot.folders.filter(folder => folder.id === currentFolderId),
@@ -537,6 +566,24 @@ function CaptureContextMenu({
 						<span>New folder…</span>
 					</button>
 				</div>
+			) : null}
+			{canUpgrade ? (
+				<button
+					type="button"
+					role="menuitem"
+					id="upgradeCaptureBtn"
+					data-context-action="upgrade"
+					onClick={() => {
+						if (!state) return;
+						onClose();
+						actions.upgradeCapture(state.captureId);
+					}}
+				>
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M12 19V5M7.5 9.5 12 5l4.5 4.5" />
+					</svg>
+					<span>Upgrade</span>
+				</button>
 			) : null}
 			<button
 				type="button"

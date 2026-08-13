@@ -78,3 +78,104 @@ test("retaining a rolling capture preserves the framing active at the rollover b
 	assert.deepEqual(capture.messages?.[0]?.rawOffsets, [2, 3]);
 	assert.deepEqual(capture.messages?.[1]?.rawOffsets, [4, 5]);
 });
+
+test("canonical stop drains acknowledged appends before finalizing exactly once", async () => {
+	const capture: Capture = { id: "canonical", byteStream: [], frameSections: [{ id: "section", start: 0, framingMode: "length", frameSize: 2 }], messages: [], notes: [], annotations: {} };
+	const events: string[] = [];
+	let finalizeCount = 0;
+	const controller = createSerialController({
+		capture: () => capture,
+		state: { captures: [capture] } as AppState,
+		saveState: () => { throw new Error("canonical recording must not use saveState"); },
+		showToast: message => events.push(`toast:${message}`),
+		publishCaptureHeaderState: () => {},
+		publishFramingToolbarState: () => {},
+		publishAnalysisState: () => {},
+		publishNotesState: () => {},
+		renderMessages: () => {},
+		stopSendQueue: () => {},
+		recordingWriter: {
+			startSession: async (_captureId, sessionId) => {
+				events.push("start");
+				return { sessionId, nextChunkSequence: 0, nextRawOffset: 0, dataRevision: 0 };
+			},
+			appendChunk: async request => {
+				events.push(`append:${request.sequence}:${request.expectedStartOffset}`);
+				const count = request.segments.reduce((total, segment) => total + segment.bytes.length, 0);
+				return { acceptedStartOffset: request.expectedStartOffset, acceptedEndOffset: request.expectedStartOffset + count, nextRawOffset: request.expectedStartOffset + count, nextSequence: request.sequence + 1, dataRevision: 1 };
+			},
+			finalizeSession: async (_captureId, _sessionId, expectedDataRevision) => {
+				finalizeCount++;
+				events.push(`finalize:${expectedDataRevision}`);
+			},
+			refreshCapture: async () => {
+				events.push("refresh");
+				return { ...capture, lifecycle: "finalized" } as Capture;
+			}
+		}
+	});
+
+	await controller.toggleRecording();
+	controller.queueLiveBytes([0x10, 0x11], "rx");
+	controller.flushLiveBytes();
+	const firstStop = controller.stopRecording({ notify: true });
+	const repeatedStop = controller.stopRecording({ notify: true });
+	await Promise.all([firstStop, repeatedStop]);
+
+	assert.equal(finalizeCount, 1);
+	assert.deepEqual(events.filter(event => /^(start|append|finalize|refresh)/.test(event)), ["start", "append:0:0", "finalize:1", "refresh"]);
+	assert.equal(events.at(-1), "toast:Capture finalized and stored");
+	assert.equal(controller.hasUnacknowledgedBytes(), false);
+	assert.equal((capture as Capture & { lifecycle?: string }).lifecycle, "finalized");
+});
+
+test("append failure keeps recovery bytes and retry resumes from the acknowledged boundary", async () => {
+	const capture: Capture = { id: "recoverable", byteStream: [], frameSections: [{ id: "section", start: 0, framingMode: "length", frameSize: 2 }], messages: [], notes: [], annotations: {} };
+	const requests: Array<{ requestId: string; sequence: number; expectedStartOffset: number }> = [];
+	const persistentErrors: Array<string | null> = [];
+	let fail = true;
+	let finalized = false;
+	const controller = createSerialController({
+		capture: () => capture,
+		state: { captures: [capture] } as AppState,
+		saveState: () => {},
+		showToast: () => {},
+		publishCaptureHeaderState: () => {},
+		publishFramingToolbarState: () => {},
+		publishAnalysisState: () => {},
+		publishNotesState: () => {},
+		renderMessages: () => {},
+		stopSendQueue: () => {},
+		publishPersistenceError: error => persistentErrors.push(error?.message ?? null),
+		recordingWriter: {
+			startSession: async (_captureId, sessionId) => ({ sessionId, nextChunkSequence: 3, nextRawOffset: 9, dataRevision: 4 }),
+			appendChunk: async request => {
+				requests.push({ requestId: request.requestId, sequence: request.sequence, expectedStartOffset: request.expectedStartOffset });
+				if (fail) throw new Error("network unavailable");
+				return { acceptedStartOffset: 9, acceptedEndOffset: 11, nextRawOffset: 11, nextSequence: 4, dataRevision: 5 };
+			},
+			finalizeSession: async (_captureId, _sessionId, revision) => {
+				assert.equal(revision, 5);
+				finalized = true;
+			}
+		}
+	});
+
+	await controller.toggleRecording();
+	controller.queueLiveBytes([0xaa, 0xbb], "tx");
+	controller.flushLiveBytes();
+	await assert.rejects(controller.stopRecording(), /network unavailable/);
+	assert.equal(finalized, false);
+	assert.equal(controller.hasUnacknowledgedBytes(), true);
+	assert.deepEqual(controller.recoveryDocument()?.byteStream?.map(record => record.value), [0xaa, 0xbb]);
+	assert.equal(requests[0].sequence, 3);
+	assert.equal(requests[0].expectedStartOffset, 9);
+
+	fail = false;
+	await controller.retryPersistence();
+	assert.equal(finalized, true);
+	assert.equal(controller.hasUnacknowledgedBytes(), false);
+	assert.equal(requests.length, 2);
+	assert.deepEqual(requests[1], requests[0]);
+	assert.ok(persistentErrors.includes("network unavailable"));
+});

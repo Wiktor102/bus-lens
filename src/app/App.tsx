@@ -17,6 +17,11 @@ import {
 	getCaptureHeaderSnapshot,
 	subscribeToCaptureHeader
 } from "../features/capture/capture-header-bridge";
+import {
+	getCaptureStorageActions,
+	getCaptureStorageSnapshot,
+	subscribeToCaptureStorage
+} from "../features/capture/capture-storage-bridge";
 import { normalizeCaptureDescription, normalizeCaptureTitle } from "../features/capture/capture-header";
 import {
 	getFramingToolbarSnapshot,
@@ -28,7 +33,13 @@ import { getTransportActions, getTransportSnapshot, subscribeToTransport } from 
 import { getNotesActions, getNotesSnapshot, subscribeToNotes } from "../features/notes/notes-bridge";
 import { getToastSnapshot, subscribeToToast } from "../shared/toast-bridge";
 import {
+	getPersistenceErrorActions,
+	getPersistenceErrorSnapshot,
+	subscribeToPersistenceError
+} from "../shared/persistence-error-bridge";
+import {
 	AnnotationDialog,
+	CanonicalizationDialog,
 	ContextDialog,
 	ExportDialog,
 	PatternRemarkDialog
@@ -93,6 +104,12 @@ function CaptureHeader() {
 		getCaptureHeaderSnapshot
 	);
 	const actions = getCaptureHeaderActions();
+	const storage = useSyncExternalStore(
+		subscribeToCaptureStorage,
+		getCaptureStorageSnapshot,
+		getCaptureStorageSnapshot
+	);
+	const storageActions = getCaptureStorageActions();
 	const [titleDraft, setTitleDraft] = useState(snapshot.title);
 	const [descriptionDraft, setDescriptionDraft] = useState(snapshot.description);
 	const titleRef = useRef<HTMLInputElement>(null);
@@ -126,6 +143,15 @@ function CaptureHeader() {
 				<div className="capture-identity">
 					<div className="eyebrow-row">
 						<span className="eyebrow">Active capture</span>
+						{storage.label ? (
+							<span
+								id="captureStorageBadge"
+								className={`storage-badge storage-${storage.status}`}
+								data-storage-status={storage.status}
+							>
+								{storage.label}
+							</span>
+						) : null}
 						<span id="captureState" className={`capture-state ${snapshot.live ? "live" : ""}`.trim()}>
 							{snapshot.stateText}
 						</span>
@@ -136,7 +162,7 @@ function CaptureHeader() {
 							className="title-input"
 							ref={titleRef}
 							value={titleDraft}
-							disabled={!snapshot.hasCapture}
+							disabled={!snapshot.hasCapture || storage.locked}
 							aria-label="Capture title"
 							onChange={event => {
 								setTitleDraft(event.currentTarget.value);
@@ -153,7 +179,7 @@ function CaptureHeader() {
 							className="capture-description"
 							ref={descriptionRef}
 							value={descriptionDraft}
-							disabled={!snapshot.hasCapture}
+							disabled={!snapshot.hasCapture || storage.locked}
 							rows={1}
 							placeholder="Add a description…"
 							aria-label="Capture description"
@@ -189,20 +215,35 @@ function CaptureHeader() {
 					<span title="Received raw bytes only; transmitted bytes are excluded" aria-label="Captured: received raw bytes only; transmitted bytes are excluded">Captured <strong id="statCapturedBytes">{snapshot.summary.capturedBytes}</strong></span>
 				</div>
 				<div ref={actionsRef} className="header-actions">
-					<button id="editContextBtn" className="btn btn-secondary" type="button" disabled={!snapshot.hasCapture} onClick={() => actions.openContext()}>
+					<button id="editContextBtn" className="btn btn-secondary" type="button" disabled={!snapshot.hasCapture || storage.locked} onClick={() => actions.openContext()}>
 						Edit context
 					</button>
 					<button
 						id="moreBtn"
 						className="icon-btn"
 						type="button"
-						disabled={!snapshot.hasCapture}
+						disabled={!snapshot.hasCapture || storage.locked}
 						aria-label="Capture menu"
 						onClick={() => setMenuOpen(open => !open)}
 					>
 						•••
 					</button>
 				<div id="moreMenu" className={`popover capture-menu ${menuOpen ? "" : "hidden"}`.trim()}>
+					{storage.canUpgrade ? (
+						<button
+							id="upgradeCaptureStorageBtn"
+							type="button"
+							onClick={() => {
+								storageActions.upgrade();
+								setMenuOpen(false);
+							}}
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M12 19V5M7.5 9.5 12 5l4.5 4.5" />
+							</svg>
+							<span>Upgrade</span>
+						</button>
+					) : null}
 					<button
 						id="duplicateCaptureBtn"
 						type="button"
@@ -210,6 +251,7 @@ function CaptureHeader() {
 							actions.duplicate();
 							setMenuOpen(false);
 						}}
+						disabled={storage.locked}
 					>
 						<svg viewBox="0 0 24 24" aria-hidden="true">
 							<rect x="8" y="8" width="11.5" height="11.5" rx="1" />
@@ -224,6 +266,7 @@ function CaptureHeader() {
 							actions.clearMessages();
 							setMenuOpen(false);
 						}}
+						disabled={storage.locked}
 					>
 						<svg viewBox="0 0 24 24" aria-hidden="true">
 							<path d="M4.5 7.5h15M9 7.5V5h6v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5M14 11v5" />
@@ -238,6 +281,7 @@ function CaptureHeader() {
 							actions.deleteCapture();
 							setMenuOpen(false);
 						}}
+						disabled={storage.locked}
 					>
 						<svg viewBox="0 0 24 24" aria-hidden="true">
 							<path d="M5 7.5h14M9 7.5V5h6v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5M14 11v5" />
@@ -359,6 +403,12 @@ function StreamPanel({ viewState, dispatchViewState, messageFilterRef, messageFi
 			id="streamPanel"
 			className={`tab-panel ${viewState.activePanel === "stream" ? "active" : ""}`.trim()}
 		>
+			{messageStream.retainedTail ? (
+				<div className="retained-tail-notice" role="status">
+					Displaying newest 50,000 bytes. Earlier acknowledged bytes remain durably stored
+					{messageStream.durableByteCount > 50_000 ? ` (${messageStream.durableByteCount.toLocaleString()} total).` : "."}
+				</div>
+			) : null}
 			<div id="streamFilter" className={`stream-filter ${viewState.filterOpen ? "" : "collapsed"}`.trim()}>
 				<label>
 					<span>⌕</span>
@@ -940,6 +990,28 @@ function Toast({ sendPopupOpen }: { sendPopupOpen: boolean }) {
 	);
 }
 
+function PersistenceErrorBanner() {
+	const snapshot = useSyncExternalStore(
+		subscribeToPersistenceError,
+		getPersistenceErrorSnapshot,
+		getPersistenceErrorSnapshot
+	);
+	if (!snapshot.visible) return null;
+	return (
+		<div className="persistence-error" role="alert">
+			<div>
+				<strong>Capture is not fully stored.</strong>
+				<span>{snapshot.message}</span>
+			</div>
+			<div className="persistence-error-actions">
+				{snapshot.canRetry ? <button className="btn" type="button" onClick={() => getPersistenceErrorActions().retry()}>Retry</button> : null}
+				{snapshot.canExportRecovery ? <button className="btn" type="button" onClick={() => getPersistenceErrorActions().exportRecovery()}>Export recovery JSON</button> : null}
+				<button className="btn" type="button" onClick={() => getPersistenceErrorActions().dismiss()}>Dismiss</button>
+			</div>
+		</div>
+	);
+}
+
 const SIDEBAR_WIDTH_STORAGE_KEY = "bus-lens.sidebar-width";
 const DEFAULT_SIDEBAR_WIDTH = 260;
 const NARROW_SIDEBAR_WIDTH = 210;
@@ -1050,7 +1122,7 @@ function App() {
 			.then(({ initializeController }) => {
 				if (disposed) return;
 				const lifecycle = initializeController();
-				const handleBeforeUnload = () => lifecycle.beforeUnload();
+				const handleBeforeUnload = (event: BeforeUnloadEvent) => lifecycle.beforeUnload(event);
 				window.addEventListener("beforeunload", handleBeforeUnload);
 				removeBeforeUnload = () => window.removeEventListener("beforeunload", handleBeforeUnload);
 			})
@@ -1068,6 +1140,7 @@ function App() {
 		<>
 			<div className="app-shell">
 				<TopBar />
+				<PersistenceErrorBanner />
 				<main
 					className={`workspace ${sidebarResizing ? "sidebar-resizing" : ""}`.trim()}
 					style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
@@ -1099,6 +1172,7 @@ function App() {
 			</div>
 			<SendPanel open={sendPopupOpen} onOpenChange={handleSendPopupChange} />
 			<ContextDialog />
+			<CanonicalizationDialog />
 			<AnnotationDialog />
 			<PatternRemarkDialog />
 			<ExportDialog />
