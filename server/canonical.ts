@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { SqliteDatabase } from "./database.ts";
+import {
+	deriveTransitionPositionAggregates,
+	persistTransitionPositionAggregates,
+	type TransitionPositionAggregate
+} from "./transition-positions.ts";
 
 // Server-side canonical conversion uses the same domain engines the UI uses.
 // We import the DOM-independent modules directly so verification can compare
@@ -604,6 +609,7 @@ type PersistedConversion = {
 	frames: MaterializedFrame[];
 	signatures: ReturnType<typeof countSignatures>;
 	stats: ReturnType<typeof deriveAnalysisStatistics>;
+	transitionPositions: TransitionPositionAggregate[];
 	patterns: ReturnType<typeof recognizeRepeatedPatterns>;
 };
 
@@ -686,6 +692,20 @@ function readPersistedConversion(database: SqliteDatabase, captureId: string, pr
 	const transitionRows = database
 		.prepare("SELECT from_signature, to_signature, count, diffs FROM frame_transitions WHERE profile_id = @profileId ORDER BY rowid")
 		.all({ profileId }) as Array<{ from_signature: string; to_signature: string; count: number; diffs: number }>;
+	const transitionPositionRows = database
+		.prepare(
+			`SELECT section_id, from_signature, to_signature, position, changed_count, transition_count
+			 FROM frame_transition_positions WHERE profile_id = @profileId
+			 ORDER BY section_id, from_signature, to_signature, position`
+		)
+		.all({ profileId }) as Array<{
+		section_id: string;
+		from_signature: string;
+		to_signature: string;
+		position: number;
+		changed_count: number;
+		transition_count: number;
+	}>;
 
 	const vocabularyRows = database
 		.prepare("SELECT position, value, count FROM byte_statistics WHERE profile_id = @profileId ORDER BY position, rowid")
@@ -776,9 +796,17 @@ function readPersistedConversion(database: SqliteDatabase, captureId: string, pr
 			signatures: signatureRows.map(row => ({ signature: row.signature, count: row.count })),
 			vocabulary,
 			bitVariance,
-			transitions: transitionRows.map(row => ({ from: row.from_signature, to: row.to_signature, count: row.count, diffs: row.diffs }))
-		},
-		patterns,
+				transitions: transitionRows.map(row => ({ from: row.from_signature, to: row.to_signature, count: row.count, diffs: row.diffs }))
+			},
+			transitionPositions: transitionPositionRows.map(row => ({
+				sectionId: row.section_id,
+				fromSignature: row.from_signature,
+				toSignature: row.to_signature,
+				position: row.position,
+				changedCount: row.changed_count,
+				transitionCount: row.transition_count
+			})),
+			patterns,
 	};
 }
 
@@ -790,6 +818,7 @@ export type VerificationReport = {
 	byteStatisticsOk: boolean;
 	bitStatisticsOk: boolean;
 	transitionsOk: boolean;
+	transitionPositionsOk: boolean;
 	sequenceGroupsOk: boolean;
 	messageVisibilityOk: boolean;
 	sessionIdentityOk: boolean;
@@ -937,6 +966,7 @@ function verifyConversion(
 		JSON.stringify(expectedSortedStats.signatures) === JSON.stringify(actualSortedStats.signatures);
 
 	const transitionsOk = JSON.stringify(expectedSortedStats.transitions) === JSON.stringify(actualSortedStats.transitions);
+	const transitionPositionsOk = JSON.stringify(deriveTransitionPositionAggregates(persisted.frames)) === JSON.stringify(persisted.transitionPositions);
 	const byteStatsOk = JSON.stringify(expectedSortedStats.vocabulary) === JSON.stringify(actualSortedStats.vocabulary);
 	const bitStatsOk = JSON.stringify(expectedSortedStats.bitVariance) === JSON.stringify(actualSortedStats.bitVariance);
 
@@ -966,7 +996,7 @@ function verifyConversion(
 		expectedRawBytes === actualRawBytes &&
 		rawBytesOk &&
 		sectionsOk &&
-		signaturesOk && transitionsOk && byteStatsOk && bitStatsOk && seqOk && messageVisibilityOk && sessionIdentityOk;
+		signaturesOk && transitionsOk && transitionPositionsOk && byteStatsOk && bitStatsOk && seqOk && messageVisibilityOk && sessionIdentityOk;
 
 	return {
 		messageCount: { expected: expectedMessages, actual: actualMessages, ok: expectedMessages === actualMessages },
@@ -976,13 +1006,14 @@ function verifyConversion(
 		byteStatisticsOk: byteStatsOk,
 		bitStatisticsOk: bitStatsOk,
 		transitionsOk,
+		transitionPositionsOk,
 		sequenceGroupsOk: seqOk,
 		messageVisibilityOk,
 		sessionIdentityOk,
 		overallOk,
 		details: overallOk
 			? undefined
-			: `mismatch: messages ${expectedMessages} vs ${actualMessages}, bytes ${expectedRawBytes} vs ${actualRawBytes}, statsOk=${statsOk}, messageVisibilityOk=${messageVisibilityOk}, sessionIdentityOk=${sessionIdentityOk}`
+			: `mismatch: messages ${expectedMessages} vs ${actualMessages}, bytes ${expectedRawBytes} vs ${actualRawBytes}, statsOk=${statsOk}, transitionPositionsOk=${transitionPositionsOk}, messageVisibilityOk=${messageVisibilityOk}, sessionIdentityOk=${sessionIdentityOk}`
 	};
 }
 
@@ -1226,10 +1257,11 @@ export function convertCaptureDocumentToCanonical(
 				byteStream: stream,
 				captureSessions: (normalized.captureSessions || []) as CaptureSessionRecord[],
 				sections: sections.map(section => ({ id: section.id, start: section.start, mode: section.framingMode })),
-				frames,
-				signatures,
-				stats,
-				patterns
+					frames,
+					signatures,
+					stats,
+					transitionPositions: deriveTransitionPositionAggregates(frames),
+					patterns
 			}, {
 				sourceMessages: activeStream.length === stream.length ? undefined : sourceMessagesFromFrames(frames),
 				expectedSections: sections,
@@ -1242,9 +1274,10 @@ export function convertCaptureDocumentToCanonical(
 			sectionBoundaries: { expected: [], actual: [], ok: false },
 			signaturesOk: false,
 			byteStatisticsOk: false,
-			bitStatisticsOk: false,
-			transitionsOk: false,
-			sequenceGroupsOk: false,
+				bitStatisticsOk: false,
+				transitionsOk: false,
+				transitionPositionsOk: false,
+				sequenceGroupsOk: false,
 			messageVisibilityOk: false,
 			sessionIdentityOk: false,
 			overallOk: false,
@@ -1402,8 +1435,8 @@ export function convertCaptureDocumentToCanonical(
 			}
 
 			// materialized frames
-			for (const f of frames) {
-				database
+				for (const f of frames) {
+					database
 					.prepare(
 						`INSERT INTO materialized_frames (id, capture_id, profile_id, profile_version, ordinal, section_id, raw_offsets_json, bytes_json, timestamps_json, directions_json, hidden, signature)
 						 VALUES (@id, @captureId, @profileId, @profileVersion, @ordinal, @sectionId, @rawOffsetsJson, @bytesJson, @timestampsJson, @directionsJson, @hidden, @signature)`
@@ -1421,10 +1454,11 @@ export function convertCaptureDocumentToCanonical(
 						directionsJson: JSON.stringify(f.directions),
 						hidden: f.hidden ? 1 : 0,
 						signature: f.signature
-					});
-			}
+						});
+				}
+				persistTransitionPositionAggregates(database, profileId, frames);
 
-			// signatures
+				// signatures
 			for (const [sig, count] of signatures.entries()) {
 				database.prepare(`INSERT INTO frame_signatures (profile_id, signature, count) VALUES (@profileId, @signature, @count)`).run({
 					profileId,
@@ -2165,6 +2199,7 @@ export function persistCanonicalMaterializationRows(
 				signature: frame.signature
 			});
 	}
+	persistTransitionPositionAggregates(database, profileId, frames);
 
 	for (const [signature, count] of signatures.entries()) {
 		database
@@ -2286,6 +2321,32 @@ export function verifyCanonicalMaterializationRows(
 		) {
 			return { ok: false, details: `materialized frame ${index} mismatch` };
 		}
+	}
+	const actualTransitionPositions = database
+		.prepare(
+			`SELECT section_id, from_signature, to_signature, position, changed_count, transition_count
+			 FROM frame_transition_positions WHERE profile_id = @profileId
+			 ORDER BY section_id, from_signature, to_signature, position`
+		)
+		.all({ profileId }) as Array<{
+		section_id: string;
+		from_signature: string;
+		to_signature: string;
+		position: number;
+		changed_count: number;
+		transition_count: number;
+	}>;
+	const expectedTransitionPositions = deriveTransitionPositionAggregates(materialization.frames);
+	const actualTransitionPositionValues = actualTransitionPositions.map(row => ({
+		sectionId: row.section_id,
+		fromSignature: row.from_signature,
+		toSignature: row.to_signature,
+		position: row.position,
+		changedCount: row.changed_count,
+		transitionCount: row.transition_count
+	}));
+	if (JSON.stringify(actualTransitionPositionValues) !== JSON.stringify(expectedTransitionPositions)) {
+		return { ok: false, details: "transition position aggregate mismatch" };
 	}
 	return { ok: true };
 }
@@ -2433,8 +2494,9 @@ export function createFramingRevision(
 					directionsJson: JSON.stringify(f.directions),
 					hidden: f.hidden ? 1 : 0,
 					signature: f.signature
-				});
+					});
 		}
+		persistTransitionPositionAggregates(database, newProfileId, frames);
 		// signatures/transitions/byte/bit/sequences truncated then repopulated for new profile only (previous retained)
 		for (const [sig, count] of signatures.entries()) {
 			database.prepare(`INSERT INTO frame_signatures (profile_id, signature, count) VALUES (@profileId, @signature, @count)`).run({

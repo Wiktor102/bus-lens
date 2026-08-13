@@ -2808,7 +2808,7 @@ export class CanonicalCaptureCommandService {
 			collapse_runs: number;
 			collapsed: number;
 		};
-		type SourceFrame = {
+			type SourceFrame = {
 			id: string;
 			profile_id: string;
 			profile_version: number;
@@ -2819,8 +2819,17 @@ export class CanonicalCaptureCommandService {
 			timestamps_json: string;
 			directions_json: string;
 			hidden: number;
-			signature: string;
-		};
+				signature: string;
+			};
+			type SourceTransitionPosition = {
+				profile_id: string;
+				section_id: string;
+				from_signature: string;
+				to_signature: string;
+				position: number;
+				changed_count: number;
+				transition_count: number;
+			};
 		type SourceSession = {
 			ordinal: number;
 			id: string;
@@ -3063,6 +3072,13 @@ export class CanonicalCaptureCommandService {
 			const analysisTransitions = this.database
 				.prepare("SELECT profile_id, from_signature, to_signature, count, diffs FROM frame_transitions WHERE profile_id IN (SELECT id FROM framing_profiles WHERE capture_id = @captureId)")
 				.all({ captureId: sourceCaptureId }) as Array<{ profile_id: string; from_signature: string; to_signature: string; count: number; diffs: number }>;
+			const analysisTransitionPositions = this.database
+				.prepare(
+					`SELECT profile_id, section_id, from_signature, to_signature, position, changed_count, transition_count
+					 FROM frame_transition_positions
+					 WHERE profile_id IN (SELECT id FROM framing_profiles WHERE capture_id = @captureId)`
+				)
+				.all({ captureId: sourceCaptureId }) as SourceTransitionPosition[];
 			const analysisByteStatistics = this.database
 				.prepare("SELECT profile_id, position, value, count FROM byte_statistics WHERE profile_id IN (SELECT id FROM framing_profiles WHERE capture_id = @captureId)")
 				.all({ captureId: sourceCaptureId }) as Array<{ profile_id: string; position: number; value: number; count: number }>;
@@ -3365,7 +3381,7 @@ export class CanonicalCaptureCommandService {
 				 (id, capture_id, profile_id, profile_version, ordinal, section_id, raw_offsets_json, bytes_json, timestamps_json, directions_json, hidden, signature)
 				 VALUES (@id, @captureId, @profileId, @profileVersion, @ordinal, @sectionId, @rawOffsetsJson, @bytesJson, @timestampsJson, @directionsJson, @hidden, @signature)`
 			);
-			frames.forEach(frame =>
+				frames.forEach(frame =>
 				insertFrame.run({
 					id: frameIdsBySource.get(frame.id),
 					captureId: duplicateCaptureId,
@@ -3379,10 +3395,26 @@ export class CanonicalCaptureCommandService {
 					directionsJson: frame.directions_json,
 					hidden: frame.hidden,
 					signature: frame.signature
-				})
-			);
+					})
+				);
+				const insertTransitionPosition = this.database.prepare(
+					`INSERT INTO frame_transition_positions
+					 (profile_id, section_id, from_signature, to_signature, position, changed_count, transition_count)
+					 VALUES (@profileId, @sectionId, @fromSignature, @toSignature, @position, @changedCount, @transitionCount)`
+				);
+				analysisTransitionPositions.forEach(row =>
+					insertTransitionPosition.run({
+						profileId: profileIdsBySource.get(row.profile_id),
+						sectionId: sourceSectionId(row.section_id),
+						fromSignature: row.from_signature,
+						toSignature: row.to_signature,
+						position: row.position,
+						changedCount: row.changed_count,
+						transitionCount: row.transition_count
+					})
+				);
 
-			const insertFrameSignature = this.database.prepare("INSERT INTO frame_signatures (profile_id, signature, count) VALUES (@profileId, @signature, @count)");
+				const insertFrameSignature = this.database.prepare("INSERT INTO frame_signatures (profile_id, signature, count) VALUES (@profileId, @signature, @count)");
 			analysisFrameSignatures.forEach(row => insertFrameSignature.run({ profileId: profileIdsBySource.get(row.profile_id), signature: row.signature, count: row.count }));
 			const insertTransition = this.database.prepare("INSERT INTO frame_transitions (profile_id, from_signature, to_signature, count, diffs) VALUES (@profileId, @fromSignature, @toSignature, @count, @diffs)");
 			analysisTransitions.forEach(row => insertTransition.run({ profileId: profileIdsBySource.get(row.profile_id), fromSignature: row.from_signature, toSignature: row.to_signature, count: row.count, diffs: row.diffs }));
