@@ -29,6 +29,70 @@ function seedHighCardinalityByteStatistics(database: ReturnType<typeof openDatab
 	seed();
 }
 
+function seedSequenceGroup(database: ReturnType<typeof openDatabase>, snapshot: AgentComparisonSnapshot) {
+	database.prepare(
+		`INSERT INTO sequence_groups (id, capture_id, profile_id, key_text, signatures_json, score, length)
+		 VALUES ('identical-sequence-group', @captureId, @profileId, 'identical-sequence', '["0102","0304"]', 1, 2)`
+	).run({ captureId: snapshot.captureId, profileId: snapshot.profileId });
+	const insertOccurrence = database.prepare(
+		`INSERT INTO sequence_occurrences
+		 (group_id, occurrence_index, offset, start_frame_ordinal, start_raw_offset, end_raw_offset, length)
+		 VALUES ('identical-sequence-group', @occurrenceIndex, @offset, @startFrameOrdinal, @startRawOffset, @endRawOffset, 2)`
+	);
+	insertOccurrence.run({ occurrenceIndex: 0, offset: 0, startFrameOrdinal: 0, startRawOffset: 0, endRawOffset: 3 });
+	insertOccurrence.run({ occurrenceIndex: 1, offset: 1, startFrameOrdinal: 1, startRawOffset: 2, endRawOffset: 5 });
+}
+
+
+test("identical snapshots omit unchanged items from every pageable comparison category", () => {
+	const database = openDatabase(":memory:");
+	try {
+		const capture = record(database, "identical-comparison", [1, 2, 3, 4, 1, 2, 3, 4]);
+		seedSequenceGroup(database, capture.snapshot);
+		const query = new CanonicalQueryService(database);
+		const response = query.compareCaptures({
+			left: capture.snapshot,
+			right: capture.snapshot,
+			categories: ["signatures", "transitions", "byte-statistics", "sequence-groups"],
+			limits: { signatures: 1, transitions: 1, "byte-statistics": 100, "sequence-groups": 1 }
+		});
+
+		for (const category of ["signatures", "transitions", "byte-statistics", "sequence-groups"] as const) {
+			const page = response.data.categories[category] as { items: unknown[]; returned: number; nextCursor?: string; truncated: boolean };
+			assert.deepEqual(page.items, []);
+			assert.equal(page.returned, 0);
+			assert.equal(page.nextCursor, undefined);
+			assert.equal(page.truncated, false);
+		}
+	} finally {
+		database.close();
+	}
+});
+
+test("byte-statistics comparison pagination skips unchanged positions before changed data", () => {
+	const database = openDatabase(":memory:");
+	try {
+		const left = record(database, "left-byte-filter", [1, 2, 3, 4]);
+		const right = record(database, "right-byte-filter", [1, 2, 3, 4]);
+		database.prepare(
+			"UPDATE byte_statistics SET count = count + 1 WHERE profile_id = @profileId AND position = 1 AND value = 4"
+		).run({ profileId: right.snapshot.profileId });
+		const query = new CanonicalQueryService(database);
+		const page = query.compareCaptures({
+			left: left.snapshot,
+			right: right.snapshot,
+			categories: ["byte-statistics"],
+			limits: { "byte-statistics": 100 }
+		}).data.categories["byte-statistics"] as { items: Array<{ position: number }>; nextCursor?: string; truncated: boolean };
+
+		assert.deepEqual(page.items.map(item => item.position), [1]);
+		assert.equal(page.nextCursor, undefined);
+		assert.equal(page.truncated, false);
+	} finally {
+		database.close();
+	}
+});
+
 
 test("comparisons use explicit snapshots and page category deltas independently", () => {
 	const database = openDatabase(":memory:");
@@ -135,7 +199,7 @@ test("comparison template count stays constant for a 100-item signature page", (
 	const database = openDatabase(":memory:");
 	try {
 		const left = record(database, "left-100-signatures", Array.from({ length: 200 }, (_value, index) => index));
-		const right = record(database, "right-100-signatures", Array.from({ length: 200 }, (_value, index) => (index + 56) % 256));
+		const right = record(database, "right-100-signatures", Array.from({ length: 200 }, (_value, index) => (index + 1) % 256));
 		const query = new CanonicalQueryService(database);
 		const oneItem = query.compareCaptures({ left: left.snapshot, right: right.snapshot, categories: ["signatures"], limits: { signatures: 1 } });
 		const hundredItems = query.compareCaptures({ left: left.snapshot, right: right.snapshot, categories: ["signatures"], limits: { signatures: 100 } });

@@ -2394,7 +2394,9 @@ export class CanonicalQueryService {
 		const cursor = this.comparisonCursor(input, "signatures", ["magnitude", "signature"], filters);
 		const limit = this.comparisonPageLimit(input, "signatures");
 		const params: Record<string, unknown> = { leftProfileId: left.profileId, rightProfileId: right.profileId, limit: limit + 1 };
-		const cursorSql = cursor ? " WHERE magnitude < @cursorMagnitude OR (magnitude = @cursorMagnitude AND signature > @cursorSignature)" : "";
+		const cursorSql = cursor
+			? " WHERE delta <> 0 AND (magnitude < @cursorMagnitude OR (magnitude = @cursorMagnitude AND signature > @cursorSignature))"
+			: " WHERE delta <> 0";
 		if (cursor) { params.cursorMagnitude = cursor.key.magnitude; params.cursorSignature = cursor.key.signature; }
 		const rows = this.database.prepare(
 			`WITH delta AS (
@@ -2449,7 +2451,9 @@ export class CanonicalQueryService {
 		const cursor = this.comparisonCursor(input, "transitions", ["magnitude", "fromSignature", "toSignature"], filters);
 		const limit = this.comparisonPageLimit(input, "transitions");
 		const params: Record<string, unknown> = { leftProfileId: left.profileId, rightProfileId: right.profileId, limit: limit + 1 };
-		const cursorSql = cursor ? " WHERE magnitude < @cursorMagnitude OR (magnitude = @cursorMagnitude AND (from_signature > @cursorFromSignature OR (from_signature = @cursorFromSignature AND to_signature > @cursorToSignature)))" : "";
+		const cursorSql = cursor
+			? " WHERE (left_count <> right_count OR left_diffs <> right_diffs) AND (magnitude < @cursorMagnitude OR (magnitude = @cursorMagnitude AND (from_signature > @cursorFromSignature OR (from_signature = @cursorFromSignature AND to_signature > @cursorToSignature))))"
+			: " WHERE left_count <> right_count OR left_diffs <> right_diffs";
 		if (cursor) { params.cursorMagnitude = cursor.key.magnitude; params.cursorFromSignature = cursor.key.fromSignature; params.cursorToSignature = cursor.key.toSignature; }
 		const rows = this.database.prepare(
 			`WITH delta AS (
@@ -2511,33 +2515,16 @@ export class CanonicalQueryService {
 		// position item bounded so its page, cursor, and response envelope remain
 		// within the normal encoded-response budget.
 		const limit = Math.min(this.comparisonPageLimit(input, "byte-statistics"), MAX_BYTE_STATISTICS_COMPARISON_POSITIONS);
-		const params: Record<string, unknown> = { leftProfileId: left.profileId, rightProfileId: right.profileId, limit: limit + 1 };
-		const cursorSql = cursor ? " WHERE position > @cursorPosition" : "";
-		if (cursor) params.cursorPosition = cursor.key.position;
-		const positions = this.database.prepare(
-			`SELECT position FROM (
-				SELECT position FROM byte_statistics WHERE profile_id = @leftProfileId
-				UNION
-				SELECT position FROM byte_statistics WHERE profile_id = @rightProfileId
-				UNION
-				SELECT position FROM bit_statistics WHERE profile_id = @leftProfileId
-				UNION
-				SELECT position FROM bit_statistics WHERE profile_id = @rightProfileId
-			) positions${cursorSql}
-			ORDER BY position ASC LIMIT @limit`
-		).all(params) as Array<{ position: number }>;
-		const pagePositions = positions.slice(0, limit).map(row => row.position);
-		const read = (profileId: string) => {
+		const candidateLimit = Math.max(limit + 1, 100);
+		const read = (profileId: string, pagePositions: readonly number[]) => {
 			if (!pagePositions.length) return { vocabularyRows: [] as Array<{ position: number; value: number; count: number }>, bits: [] as Array<{ position: number; bit: number; percentage: number; variance: string }>, varianceRows: [] as Array<{ position: number; bit: number; percentage: number; variance: string }> };
 			const placeholders = pagePositions.map((_position, index) => `@position${index}`);
 			const queryParameters = { profileId, ...Object.fromEntries(pagePositions.map((position, index) => [`position${index}`, position])) };
-			const vocabularyRows = this.database.prepare(`SELECT position, value, count FROM byte_statistics WHERE profile_id = @profileId AND position IN (${placeholders.join(", ")})`).all(queryParameters) as Array<{ position: number; value: number; count: number }>;
+			const vocabularyRows = this.database.prepare(`SELECT position, value, count FROM byte_statistics WHERE profile_id = @profileId AND position IN (${placeholders.join(", ")}) ORDER BY position, value`).all(queryParameters) as Array<{ position: number; value: number; count: number }>;
 			const bitRows = this.database.prepare(`SELECT position, bit, percentage, variance FROM bit_statistics WHERE profile_id = @profileId AND position IN (${placeholders.join(", ")}) ORDER BY position, bit`).all(queryParameters) as Array<{ position: number; bit: number; percentage: number; variance: string }>;
 			return { vocabularyRows, bits: bitRows, varianceRows: bitRows };
 		};
-		const leftRows = read(left.profileId);
-		const rightRows = read(right.profileId);
-		const items = pagePositions.map(position => {
+		const buildItem = (position: number, leftRows: ReturnType<typeof read>, rightRows: ReturnType<typeof read>): AgentBytePositionDelta => {
 			const leftVocabulary = leftRows.vocabularyRows.filter(row => row.position === position).map(row => ({ value: row.value, count: row.count }));
 			const rightVocabulary = rightRows.vocabularyRows.filter(row => row.position === position).map(row => ({ value: row.value, count: row.count }));
 			const values = [...new Set([...leftVocabulary, ...rightVocabulary].map(row => row.value))].sort((a, b) => a - b);
@@ -2555,10 +2542,45 @@ export class CanonicalQueryService {
 				leftBitOnePercentages: leftBits,
 				rightBitOnePercentages: rightBits
 			};
-		});
-		const hasMore = positions.length > pagePositions.length;
-		const last = pagePositions.at(-1);
-		const nextCursor = hasMore && last !== undefined ? encodeAgentCursor({ contractVersion: 1, scope: "comparison:byte-statistics", filters, snapshot: left, key: { position: last } }) : undefined;
+		};
+		const hasDifference = (item: AgentBytePositionDelta): boolean =>
+			stableJson(item.leftVocabulary) !== stableJson(item.rightVocabulary)
+			|| item.leftVariance !== item.rightVariance
+			|| stableJson(item.leftBitOnePercentages) !== stableJson(item.rightBitOnePercentages);
+		const changedItems: AgentBytePositionDelta[] = [];
+		let scanPosition: string | number | null | undefined = cursor?.key.position;
+		let exhausted = false;
+		while (changedItems.length <= limit && !exhausted) {
+			const params: Record<string, unknown> = { leftProfileId: left.profileId, rightProfileId: right.profileId, limit: candidateLimit };
+			const cursorSql = scanPosition === undefined ? "" : " WHERE position > @cursorPosition";
+			if (scanPosition !== undefined) params.cursorPosition = scanPosition;
+			const positions = this.database.prepare(
+				`SELECT position FROM (
+					SELECT position FROM byte_statistics WHERE profile_id = @leftProfileId
+					UNION
+					SELECT position FROM byte_statistics WHERE profile_id = @rightProfileId
+					UNION
+					SELECT position FROM bit_statistics WHERE profile_id = @leftProfileId
+					UNION
+					SELECT position FROM bit_statistics WHERE profile_id = @rightProfileId
+				) positions${cursorSql}
+				ORDER BY position ASC LIMIT @limit`
+			).all(params) as Array<{ position: number }>;
+			if (!positions.length) {
+				exhausted = true;
+				break;
+			}
+			const pagePositions = positions.map(row => row.position);
+			const leftRows = read(left.profileId, pagePositions);
+			const rightRows = read(right.profileId, pagePositions);
+			changedItems.push(...pagePositions.map(position => buildItem(position, leftRows, rightRows)).filter(hasDifference));
+			scanPosition = pagePositions.at(-1);
+			exhausted = positions.length < candidateLimit;
+		}
+		const items = changedItems.slice(0, limit);
+		const hasMore = changedItems.length > items.length;
+		const last = items.at(-1);
+		const nextCursor = hasMore && last !== undefined ? encodeAgentCursor({ contractVersion: 1, scope: "comparison:byte-statistics", filters, snapshot: left, key: { position: last.position } }) : undefined;
 		return { items, returned: items.length, ...(nextCursor ? { nextCursor } : {}), truncated: hasMore, operationTemplates: [] };
 	}
 
@@ -2567,7 +2589,9 @@ export class CanonicalQueryService {
 		const cursor = this.comparisonCursor(input, "sequence-groups", ["magnitude", "key"], filters);
 		const limit = this.comparisonPageLimit(input, "sequence-groups");
 		const params: Record<string, unknown> = { leftProfileId: left.profileId, rightProfileId: right.profileId, limit: limit + 1 };
-		const cursorSql = cursor ? " WHERE magnitude < @cursorMagnitude OR (magnitude = @cursorMagnitude AND key_text > @cursorKey)" : "";
+		const cursorSql = cursor
+			? " WHERE (left_occurrence_count <> right_occurrence_count OR left_length IS NOT right_length) AND (magnitude < @cursorMagnitude OR (magnitude = @cursorMagnitude AND key_text > @cursorKey))"
+			: " WHERE left_occurrence_count <> right_occurrence_count OR left_length IS NOT right_length";
 		if (cursor) { params.cursorMagnitude = cursor.key.magnitude; params.cursorKey = cursor.key.key; }
 		const rows = this.database.prepare(
 			`WITH left_groups AS (
