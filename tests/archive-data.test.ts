@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	archiveQueryKeys,
+	archiveMutationCachePolicy,
 	createArchiveMutationOptions,
 	createArchiveQueryOptions,
+	invalidateArchiveMutationCache,
 	type ArchiveMutationSource,
+	type ArchiveQueryCache,
 	type ArchiveQuerySource
 } from "../src/data/archive-queries.ts";
 import { createTestQueryClient } from "../src/test-utils/query-client.ts";
 import type { AppState } from "../src/shared/app-state.ts";
+import type { CaptureState } from "../src/persistence/archive-client.ts";
 
 const archive: AppState = { captures: [], folders: [] };
 
@@ -49,7 +53,7 @@ test("archive query options expose stable typed keys and delegate reads", async 
 	assert.equal(loaded, 1);
 });
 
-test("archive mutation options delegate typed commands without exposing QueryClient writes", async () => {
+test("archive mutation options delegate typed commands and attach their cache policy", async () => {
 	let savedFolder = "";
 	const client: ArchiveMutationSource = {
 		migrate: async () => ({ fingerprint: "test", captures: 0, folders: 0, rawBytes: 0, notes: 0, queueEntries: 0, historyEntries: 0 }),
@@ -66,10 +70,38 @@ test("archive mutation options delegate typed commands without exposing QueryCli
 		startCanonicalization: async () => { throw new Error("not used"); },
 		delete: async () => {}
 	};
-	const options = createArchiveMutationOptions(client);
-	const queryClient = createTestQueryClient();
+	const invalidated: unknown[][] = [];
+	const queryClient = {
+		invalidateQueries: async ({ queryKey }: { queryKey: readonly unknown[] }) => {
+			invalidated.push([...queryKey]);
+		}
+	} as ArchiveQueryCache;
+	const options = createArchiveMutationOptions(client, queryClient);
 
-	await options.saveFolder().mutationFn!({ id: "folder-1", name: "Folder", collapsed: false });
+	const folder = { id: "folder-1", name: "Folder", collapsed: false };
+	const saveFolder = options.saveFolder();
+	await saveFolder.mutationFn!(folder);
+	await saveFolder.onSuccess?.(undefined, folder, undefined, {} as never);
 
 	assert.equal(savedFolder, "folder-1");
+	assert.deepEqual(invalidated, archiveMutationCachePolicy.saveFolder(folder, undefined));
+});
+
+test("archive mutation cache helper applies the centralized typed policy", async () => {
+	const invalidated: unknown[][] = [];
+	const queryClient = {
+		invalidateQueries: async ({ queryKey }: { queryKey: readonly unknown[] }) => {
+			invalidated.push([...queryKey]);
+		}
+	} as ArchiveQueryCache;
+	const command = { captureId: "capture-1", patch: { name: "Renamed" } };
+
+	await invalidateArchiveMutationCache(
+		queryClient,
+		"patchMetadata",
+		command,
+		{ captureId: "capture-1" } as CaptureState
+	);
+
+	assert.deepEqual(invalidated, archiveMutationCachePolicy.patchMetadata(command, {} as CaptureState));
 });

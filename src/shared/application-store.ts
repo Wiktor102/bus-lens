@@ -30,11 +30,16 @@ export type ApplicationStore = {
 	select: <Selected>(selector: ApplicationSelector<Selected>) => Selected;
 };
 
+function cloneViewStateSnapshot(snapshot: ViewStateSnapshot): ViewStateSnapshot {
+	return Object.freeze({ ...snapshot });
+}
+
+function createApplicationState(viewState: ViewStateSnapshot): ApplicationState {
+	return Object.freeze({ viewState: cloneViewStateSnapshot(viewState) });
+}
+
 function withViewState(state: ApplicationState, action: ViewStateAction): ApplicationState {
-	return {
-		...state,
-		viewState: reduceViewState(state.viewState, action)
-	};
+	return createApplicationState(reduceViewState(state.viewState, action));
 }
 
 export function viewStateActionToApplicationEvent(action: ViewStateAction): ApplicationEvent {
@@ -62,7 +67,7 @@ export function createApplicationStore(
 	initialViewState: ViewStateSnapshot = EMPTY_VIEW_STATE_SNAPSHOT
 ): ApplicationStore {
 	const store = createStore({
-		context: { viewState: initialViewState } satisfies ApplicationState,
+		context: createApplicationState(initialViewState),
 		on: {
 			"view/active-panel-changed": (state, event: { activePanel: ViewPanel }) =>
 				withViewState(state, { type: "set-active-panel", activePanel: event.activePanel }),
@@ -76,10 +81,8 @@ export function createApplicationStore(
 				withViewState(state, { type: "set-frame-changes", showFrameChanges: event.showFrameChanges }),
 			"view/collapse-runs-changed": (state, event: { collapseRuns: boolean }) =>
 				withViewState(state, { type: "set-collapse-runs", collapseRuns: event.collapseRuns }),
-			"view/replaced": (state, event: { viewState: ViewStateSnapshot }) => ({
-				...state,
-				viewState: event.viewState
-			})
+			"view/replaced": (_state, event: { viewState: ViewStateSnapshot }) =>
+				createApplicationState(event.viewState)
 		}
 	});
 

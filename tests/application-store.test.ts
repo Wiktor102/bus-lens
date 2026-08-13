@@ -8,6 +8,7 @@ import {
 	viewStateActionToApplicationEvent
 } from "../src/shared/application-store.ts";
 import { createTestApplicationStore } from "../src/test-utils/application-store.ts";
+import { EMPTY_VIEW_STATE_SNAPSHOT } from "../src/shared/view-state.ts";
 
 test("application store changes ViewState only through typed events", () => {
 	const store = createTestApplicationStore();
@@ -35,4 +36,28 @@ test("application store instances and selectors stay isolated for tests", () => 
 
 	assert.equal(selectDisplayMode(first.getSnapshot()), "binary");
 	assert.equal(selectDisplayMode(second.getSnapshot()), "hex");
+});
+
+test("application store isolates and freezes snapshot boundaries", () => {
+	const initial = { ...EMPTY_VIEW_STATE_SNAPSHOT };
+	const store = createApplicationStore(initial);
+
+	initial.filterQuery = "mutated by caller";
+	assert.equal(store.getSnapshot().viewState.filterQuery, "");
+	assert.equal(Object.isFrozen(EMPTY_VIEW_STATE_SNAPSHOT), true);
+	assert.equal(Object.isFrozen(store.getSnapshot()), true);
+	assert.equal(Object.isFrozen(store.getSnapshot().viewState), true);
+
+	const exposedState = store.getSnapshot();
+	assert.throws(() => {
+		(exposedState.viewState as unknown as { filterQuery: string }).filterQuery = "mutated through snapshot";
+	}, TypeError);
+	assert.equal(store.getSnapshot().viewState.filterQuery, "");
+
+	const replacement = { ...EMPTY_VIEW_STATE_SNAPSHOT, filterQuery: "replacement" };
+	store.send({ type: "view/replaced", viewState: replacement });
+	replacement.filterQuery = "mutated after send";
+
+	assert.equal(store.getSnapshot().viewState.filterQuery, "replacement");
+	assert.notEqual(store.getSnapshot().viewState, replacement);
 });

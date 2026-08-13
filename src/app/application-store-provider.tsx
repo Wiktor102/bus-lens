@@ -15,12 +15,11 @@ import {
 
 const ApplicationStoreContext = createContext<ApplicationStore>(applicationStore);
 
-export type ApplicationStoreProviderProps = PropsWithChildren<{
-	store?: ApplicationStore;
-}>;
+export type ApplicationStoreProviderProps = PropsWithChildren<Record<never, never>>;
 
-export function ApplicationStoreProvider({ store = applicationStore, children }: ApplicationStoreProviderProps) {
-	return <ApplicationStoreContext.Provider value={store}>{children}</ApplicationStoreContext.Provider>;
+/** The compatibility bridge and controller share this singleton, so there is no alternate store seam here. */
+export function ApplicationStoreProvider({ children }: ApplicationStoreProviderProps) {
+	return <ApplicationStoreContext.Provider value={applicationStore}>{children}</ApplicationStoreContext.Provider>;
 }
 
 export function useApplicationStore(): ApplicationStore {
