@@ -1827,7 +1827,23 @@ export class CanonicalQueryService {
 		const changedPositions = filters.changedPositions?.map((position, index) => optionalNonNegativeInteger(position, `changedPositions[${index}]`) as number) ?? [];
 		if (changedPositions.length > 32) throw new AgentQueryError("invalid-input", "At most 32 changed positions may be requested", { maximum: 32 });
 		if (!sourceSignature && !destinationSignature && (filters.sectionId || changedPositions.length)) {
-			throw new AgentQueryError("invalid-input", "Section or changed-position transition filters require at least one signature bound", { reason: "bounded-transition-scan" });
+			throw new AgentQueryError(
+				"invalid-input",
+				"Section or changed-position transition filters require at least one signature bound; retry with sourceSignature or destinationSignature",
+				{
+					reason: "bounded-transition-scan",
+					missingSignatureAlternatives: ["sourceSignature", "destinationSignature"],
+					suggestedRequest: {
+						captureId: filters.captureId,
+						...(filters.profileId ? { profileId: filters.profileId } : {}),
+						...(filters.profileVersion === undefined ? {} : { profileVersion: filters.profileVersion }),
+						...(filters.sourceDataRevision === undefined ? {} : { sourceDataRevision: filters.sourceDataRevision }),
+						sourceSignature: "<signature from get_capture_overview>",
+						...(filters.sectionId ? { sectionId: filters.sectionId } : {}),
+						...(changedPositions.length ? { changedPositions } : {})
+					}
+				}
+			);
 		}
 		const clauses = ["source.profile_id = @profileId", "destination.profile_id = @profileId", "destination.ordinal = source.ordinal + 1"];
 		const params: Record<string, unknown> = { profileId, limit: 1001 };

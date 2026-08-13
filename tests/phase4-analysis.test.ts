@@ -214,6 +214,19 @@ test("analysis groups, occurrences, statistics, transitions, and raw reads remai
 		assert.ok(statistics.data.positions[0]?.vocabulary.length);
 		const transitions = query.getTransitions({ captureId: "analysis-capture", profileId, minimumCount: 1 });
 		assert.ok(transitions.data.transitions.length);
+		const sectionId = (database.prepare("SELECT section_id FROM materialized_frames WHERE profile_id = @profileId ORDER BY ordinal LIMIT 1").get({ profileId }) as { section_id: string }).section_id;
+		assert.throws(
+			() => query.getTransitions({ captureId: "analysis-capture", profileId, sectionId }),
+			error => {
+				const typed = error as { code?: string; details?: Record<string, unknown> };
+				assert.equal(typed.code, "invalid-input");
+				assert.deepEqual(typed.details?.missingSignatureAlternatives, ["sourceSignature", "destinationSignature"]);
+				assert.equal((typed.details?.suggestedRequest as { sourceSignature?: string } | undefined)?.sourceSignature, "<signature from get_capture_overview>");
+				return true;
+			}
+		);
+		const aliasRefined = query.getTransitions({ captureId: "analysis-capture", profileId, sectionId, fromSignature: transitions.data.transitions[0]!.fromSignature });
+		assert.ok(aliasRefined.data.transitions.length);
 		const raw = query.readRawBytes({ captureId: "analysis-capture", rawOffset: 0, length: 4 });
 		assert.equal(raw.data.returnedByteCount, 4);
 		assert.equal(raw.data.hex, "01 ?? 01 02");

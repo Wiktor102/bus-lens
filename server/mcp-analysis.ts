@@ -22,6 +22,67 @@ import type { McpQueryExecutor } from "./mcp-query-executor.ts";
 
 type RecordClient = (context: unknown, server: McpServer) => void;
 
+const transitionCommonInputShape = {
+	captureId: z.string().min(1),
+	profileId: z.string().optional(),
+	profileVersion: z.number().int().nonnegative().optional(),
+	sourceDataRevision: z.number().int().nonnegative().optional(),
+	minimumCount: z.number().int().positive().optional(),
+	limit: z.number().int().positive().max(100).optional()
+};
+const transitionSignature = z.string().min(1);
+const transitionChangedPositions = z.array(z.number().int().nonnegative()).min(1).max(32);
+const refinedTransitionCursor = z.never({ error: "Refined transition scans do not support a cursor; omit cursor" }).optional();
+const transitionInputSchema = z.union([
+	// Aggregate queries can use signature bounds and pagination, but never the
+	// row-level refinement fields that require a bounded computed scan.
+	z.object({
+		...transitionCommonInputShape,
+		sourceSignature: transitionSignature.optional(),
+		destinationSignature: transitionSignature.optional(),
+		sectionId: z.never({ error: "Aggregate transition queries do not support sectionId; add a signature for a refined scan" }).optional(),
+		changedPositions: z.never({ error: "Aggregate transition queries do not support changedPositions; add a signature for a refined scan" }).optional(),
+		cursor: z.string().optional()
+	}),
+	// A refined scan is valid when either signature side is present. These two
+	// branches make that conditional requirement visible in the published JSON
+	// schema instead of hiding it in a runtime refinement.
+	z.object({
+		...transitionCommonInputShape,
+		sourceSignature: transitionSignature,
+		destinationSignature: transitionSignature.optional(),
+		sectionId: z.string().min(1),
+		changedPositions: transitionChangedPositions.optional(),
+		cursor: refinedTransitionCursor
+	}),
+	z.object({
+		...transitionCommonInputShape,
+		sourceSignature: transitionSignature.optional(),
+		destinationSignature: transitionSignature,
+		sectionId: z.string().min(1),
+		changedPositions: transitionChangedPositions.optional(),
+		cursor: refinedTransitionCursor
+	}),
+	z.object({
+		...transitionCommonInputShape,
+		sourceSignature: transitionSignature,
+		destinationSignature: transitionSignature.optional(),
+		sectionId: z.string().min(1).optional(),
+		changedPositions: transitionChangedPositions,
+		cursor: refinedTransitionCursor
+	}),
+	z.object({
+		...transitionCommonInputShape,
+		sourceSignature: transitionSignature.optional(),
+		destinationSignature: transitionSignature,
+		sectionId: z.string().min(1).optional(),
+		changedPositions: transitionChangedPositions,
+		cursor: refinedTransitionCursor
+	})
+], {
+	error: "Invalid get_transitions request: aggregate queries omit sectionId and changedPositions; refined scans require sourceSignature or destinationSignature and do not support cursor"
+});
+
 function errorResult(error: unknown): { isError: true; structuredContent: AgentResponse<unknown>; content: [{ type: "text"; text: string }] } {
 	const normalized = error instanceof AgentQueryError
 		? error
@@ -175,20 +236,8 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 	registerAnalysisTool(
 		server,
 		"get_transitions",
-		"Return bounded signature-transition aggregates, optionally refined by section or changed byte positions.",
-		z.object({
-			captureId: z.string().min(1),
-			profileId: z.string().optional(),
-			profileVersion: z.number().int().nonnegative().optional(),
-			sourceDataRevision: z.number().int().nonnegative().optional(),
-			sourceSignature: z.string().optional(),
-			destinationSignature: z.string().optional(),
-			sectionId: z.string().optional(),
-			changedPositions: z.array(z.number().int().nonnegative()).max(32).optional(),
-			minimumCount: z.number().int().positive().optional(),
-			cursor: z.string().optional(),
-			limit: z.number().int().positive().max(100).optional()
-		}),
+		"Return bounded signature-transition aggregates or refined scans. A refined scan is bounded to 1,000 transitions, requires a source or destination signature, and does not support cursors.",
+		transitionInputSchema,
 		input => queries.getTransitions(input as AgentTransitionsInput),
 		response => `Returned ${(response.data as AgentTransitionsResult).transitions.length} bounded transition result${(response.data as AgentTransitionsResult).transitions.length === 1 ? "" : "s"}.`,
 		recordClient

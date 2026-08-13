@@ -10,6 +10,36 @@ import {
 } from "@modelcontextprotocol/server";
 import { createArchiveHttpService } from "../server/http-service.ts";
 
+function modernMeta() {
+	return {
+		[PROTOCOL_VERSION_META_KEY]: "2026-07-28",
+		[CLIENT_INFO_META_KEY]: { name: "analysis-test", version: "1.0" },
+		[CLIENT_CAPABILITIES_META_KEY]: {}
+	};
+}
+
+async function modernCall(baseUrl: string, method: string, params: Record<string, unknown>, id = 1): Promise<Response> {
+	return fetch(`${baseUrl}/mcp`, {
+		method: "POST",
+		headers: {
+			"content-type": "application/json",
+			accept: "application/json, text/event-stream",
+			"MCP-Protocol-Version": "2026-07-28",
+			"Mcp-Method": method,
+			...(method === "tools/call" ? { "Mcp-Name": String(params.name ?? "") } : {})
+		},
+		body: JSON.stringify({ jsonrpc: "2.0", id, method, params: { ...params, _meta: modernMeta() } })
+	});
+}
+
+type ToolCallBody = {
+	result?: {
+		content?: Array<{ text?: string }>;
+		isError?: boolean;
+		structuredContent?: { data?: { transitions?: unknown[] } };
+	};
+};
+
 test("the MCP analysis tools use the same bounded query contracts", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "bus-lens-mcp-analysis-test-"));
 	const service = createArchiveHttpService({ databasePath: join(directory, "archive.sqlite"), mcpEndpoint: "http://127.0.0.1:4174/mcp" });
@@ -43,6 +73,70 @@ test("the MCP analysis tools use the same bounded query contracts", async () => 
 		assert.equal(body.result.structuredContent.meta.snapshot.captureId, "mcp-analysis-capture");
 		assert.equal(body.result.structuredContent.meta.page.returned, 1);
 		assert.ok(body.result.structuredContent.data.messages[0]?.frameId);
+	} finally {
+		await service.close();
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
+test("get_transitions publishes and enforces aggregate/refined query constraints", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "bus-lens-mcp-transition-schema-test-"));
+	const service = createArchiveHttpService({ databasePath: join(directory, "archive.sqlite"), mcpEndpoint: "http://127.0.0.1:4174/mcp" });
+	try {
+		service.commandService.createCapture({ captureId: "mcp-transition-capture", framing: [{ start: 0, framingMode: "length", frameSize: 2 }], inputFormat: "binary" });
+		service.commandService.startSession({ captureId: "mcp-transition-capture", sessionId: "mcp-transition-session" });
+		const append = service.commandService.appendChunk({ captureId: "mcp-transition-capture", sessionId: "mcp-transition-session", requestId: "mcp-transition-request", sequence: 0, expectedStartOffset: 0, bytes: [1, 2, 3, 4] });
+		service.commandService.finalizeSession({ captureId: "mcp-transition-capture", sessionId: "mcp-transition-session", expectedDataRevision: append.dataRevision });
+		const frames = service.database.prepare("SELECT signature, section_id FROM materialized_frames WHERE capture_id = @captureId ORDER BY ordinal").all({ captureId: "mcp-transition-capture" }) as Array<{ signature: string; section_id: string }>;
+		const sourceSignature = frames[0]?.signature;
+		const destinationSignature = frames[1]?.signature;
+		const sectionId = frames[0]?.section_id;
+		if (!sourceSignature || !destinationSignature || !sectionId) throw new Error("transition fixture did not materialize two frames");
+
+		await new Promise<void>(resolve => service.server.listen(0, "127.0.0.1", resolve));
+		const address = service.server.address();
+		if (!address || typeof address === "string") throw new Error("test server did not bind to a port");
+		const baseUrl = `http://127.0.0.1:${address.port}`;
+
+		const listResponse = await modernCall(baseUrl, "tools/list", {});
+		assert.equal(listResponse.status, 200);
+		const listBody = await listResponse.json() as { result: { tools: Array<{ name: string; description?: string; inputSchema: { anyOf?: Array<{ properties?: Record<string, { not?: unknown }>; required?: string[] }> } }> } };
+		const transitionsTool = listBody.result.tools.find(tool => tool.name === "get_transitions");
+		assert.ok(transitionsTool);
+		assert.match(transitionsTool.description ?? "", /1,000 transitions/);
+		const branches = transitionsTool.inputSchema.anyOf ?? [];
+		assert.ok(branches.length >= 5);
+		assert.ok(branches.some(branch => branch.required?.includes("sectionId") && branch.required?.includes("sourceSignature")));
+		assert.ok(branches.some(branch => branch.required?.includes("sectionId") && branch.required?.includes("destinationSignature")));
+		assert.ok(branches.some(branch => branch.required?.includes("changedPositions") && branch.required?.includes("sourceSignature")));
+		assert.ok(branches.some(branch => branch.required?.includes("changedPositions") && branch.required?.includes("destinationSignature")));
+		const aggregateBranch = branches.find(branch => branch.properties?.sectionId?.not !== undefined);
+		assert.ok(aggregateBranch?.properties?.changedPositions?.not !== undefined);
+		assert.ok(branches.filter(branch => branch.required?.includes("sectionId") || branch.required?.includes("changedPositions")).every(branch => branch.properties?.cursor?.not !== undefined));
+
+		const callTool = async (argumentsValue: Record<string, unknown>, id: number): Promise<ToolCallBody> => {
+			const response = await modernCall(baseUrl, "tools/call", { name: "get_transitions", arguments: argumentsValue }, id);
+			assert.equal(response.status, 200);
+			return await response.json() as ToolCallBody;
+		};
+		const assertValidationFailure = async (argumentsValue: Record<string, unknown>, pattern: RegExp, id: number): Promise<void> => {
+			const body = await callTool(argumentsValue, id);
+			assert.equal(body.result?.isError, true);
+			assert.match(body.result?.content?.map(item => item.text ?? "").join(" ") ?? "", pattern);
+		};
+
+		await assertValidationFailure({ captureId: "mcp-transition-capture", changedPositions: [0] }, /sourceSignature|destinationSignature/, 2);
+		await assertValidationFailure({ captureId: "mcp-transition-capture", sectionId }, /sourceSignature|destinationSignature/, 3);
+		for (const [argumentsValue, id] of [
+			[{ captureId: "mcp-transition-capture", sectionId, sourceSignature }, 4],
+			[{ captureId: "mcp-transition-capture", sectionId, destinationSignature }, 5],
+			[{ captureId: "mcp-transition-capture", sectionId, sourceSignature, destinationSignature }, 6]
+		] as const) {
+			const body = await callTool(argumentsValue, id);
+			assert.notEqual(body.result?.isError, true);
+			assert.ok(body.result?.structuredContent?.data?.transitions);
+		}
+		await assertValidationFailure({ captureId: "mcp-transition-capture", sectionId, sourceSignature, cursor: "opaque-cursor" }, /cursor/i, 7);
 	} finally {
 		await service.close();
 		await rm(directory, { recursive: true, force: true });
