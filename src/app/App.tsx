@@ -55,6 +55,7 @@ import {
 	type ViewStateSnapshot
 } from "../shared/view-state";
 import { MCP_SETTINGS_PATH, McpSettingsPage, type AgentAccessStatus } from "./mcp-settings-page";
+import { StatusSplitControl } from "./status-split-control";
 import "./styles.css";
 
 function TopBar() {
@@ -93,30 +94,41 @@ function TopBar() {
 				</div>
 			</div>
 			<div className="transport">
-				<div className={`mcp-status-control ${mcpStatus === "running" ? "connected" : ""}`.trim()}>
-					<span id="mcpStatusBadge" className="mcp-status-value" role="status" aria-live="polite">
-						<i /> MCP {mcpStatus}
-					</span>
-					<a
-						id="mcpSettingsBtn"
-						className="mcp-settings-link"
-						href={MCP_SETTINGS_PATH}
-						aria-label="Open MCP settings"
-						title="MCP settings"
-					>
-						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-							<circle cx="12" cy="12" r="3" />
-						</svg>
-					</a>
-				</div>
+				<StatusSplitControl
+					statusId="mcpStatusBadge"
+					status={`MCP ${mcpStatus}`}
+					connected={mcpStatus === "running"}
+					action={
+						<a
+							id="mcpSettingsBtn"
+							className="status-split-action status-split-icon-action"
+							href={MCP_SETTINGS_PATH}
+							aria-label="Open MCP settings"
+							title="MCP settings"
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+								<circle cx="12" cy="12" r="3" />
+							</svg>
+						</a>
+					}
+				/>
 				<span className="transport-divider" aria-hidden="true" />
-				<span id="connectionBadge" className={`status-badge ${snapshot.connected ? "connected" : ""}`.trim()}>
-					<i /> {snapshot.connectionLabel}
-				</span>
-				<button id="connectBtn" className="btn btn-secondary" onClick={() => void actions.toggleConnection()}>
-					{snapshot.connectLabel}
-				</button>
+				<StatusSplitControl
+					statusId="connectionBadge"
+					status={snapshot.connectionLabel}
+					connected={snapshot.connected}
+					action={
+						<button
+							id="connectBtn"
+							className="status-split-action status-split-button"
+							type="button"
+							onClick={() => void actions.toggleConnection()}
+						>
+							{snapshot.connectLabel}
+						</button>
+					}
+				/>
 				<button
 					id="recordBtn"
 					className={`btn btn-record ${snapshot.recording ? "recording" : ""}`.trim()}

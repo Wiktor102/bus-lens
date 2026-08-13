@@ -119,20 +119,14 @@ button {
 	align-items: center;
 	gap: 10px;
 }
-.topbar .transport > .btn,
-.topbar .transport > .status-badge {
-	display: inline-flex;
-	align-items: center;
-	height: 38px;
-}
-.mcp-status-control {
+.status-split-control {
 	display: inline-flex;
 	align-items: stretch;
 	height: 38px;
 	border: 1px solid var(--line);
 	background: transparent;
 }
-.mcp-status-value {
+.status-split-value {
 	display: inline-flex;
 	align-items: center;
 	gap: 6px;
@@ -141,43 +135,55 @@ button {
 	font: 600 12px var(--sans);
 	white-space: nowrap;
 }
-.mcp-status-value i {
+.status-split-value i {
 	display: inline-block;
 	width: 7px;
 	height: 7px;
 	background: var(--faint);
 	border-radius: 50%;
 }
-.mcp-status-control.connected {
+.status-split-control.connected {
 	border-color: var(--acid-dim);
 	color: var(--acid);
 }
-.mcp-status-control.connected .mcp-status-value {
+.status-split-control.connected .status-split-value {
 	color: var(--acid);
 }
-.mcp-status-control.connected .mcp-status-value i {
+.status-split-control.connected .status-split-value i {
 	background: var(--acid);
 	box-shadow: 0 0 10px var(--acid);
 }
-.mcp-settings-link {
+.status-split-action {
 	display: grid;
 	place-items: center;
-	width: 38px;
+	border: 0;
 	border-left: 1px solid var(--line);
+	background: transparent;
 	color: inherit;
+	font: inherit;
 	text-decoration: none;
 	transition: 0.18s ease;
 }
-.mcp-status-control.connected .mcp-settings-link {
+.status-split-control.connected .status-split-action {
 	border-left-color: var(--acid-dim);
 }
-.mcp-settings-link:hover,
-.mcp-settings-link:focus-visible {
+.status-split-action:hover,
+.status-split-action:focus-visible {
 	background: color-mix(in srgb, var(--acid) 10%, transparent);
 	color: var(--acid);
 	outline: 0;
 }
-.mcp-settings-link svg {
+.status-split-icon-action {
+	width: 38px;
+}
+.status-split-button {
+	padding: 0 14px;
+	cursor: pointer;
+	font-size: 12px;
+	font-weight: 650;
+	white-space: nowrap;
+}
+.status-split-icon-action svg {
 	width: 17px;
 	height: 17px;
 	fill: none;
@@ -191,28 +197,6 @@ button {
 	height: 24px;
 	margin: 0 2px;
 	background: var(--line);
-}
-.status-badge {
-	font: 11px var(--mono);
-	color: var(--muted);
-	border: 1px solid var(--line);
-	padding: 8px 11px;
-}
-.status-badge i {
-	display: inline-block;
-	width: 6px;
-	height: 6px;
-	background: var(--faint);
-	border-radius: 50%;
-	margin-right: 6px;
-}
-.status-badge.connected {
-	color: var(--acid);
-	border-color: var(--acid-dim);
-}
-.status-badge.connected i {
-	background: var(--acid);
-	box-shadow: 0 0 10px var(--acid);
 }
 .btn {
 	border: 1px solid var(--line);
@@ -2681,16 +2665,13 @@ tr:hover .row-action,
 	.main-panel {
 		min-height: calc(100vh - 68px);
 	}
-	.status-badge {
+	.status-split-value {
 		display: none;
 	}
-	.mcp-status-value {
-		display: none;
-	}
-	.mcp-status-control {
+	.status-split-control {
 		border: 0;
 	}
-	.mcp-settings-link {
+	.status-split-action {
 		border: 1px solid var(--line);
 	}
 	.capture-header {
@@ -2767,9 +2748,6 @@ tr:hover .row-action,
 }
 .brand span {
 	font: 12px var(--sans);
-}
-.status-badge {
-	font: 600 12px var(--sans);
 }
 .btn {
 	padding: 10px 15px;
