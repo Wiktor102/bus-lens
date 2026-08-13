@@ -129,6 +129,7 @@ function TopBar() {
 						>
 							<svg viewBox="0 0 24 24" aria-hidden="true">
 								<path d="M9 3v5M15 3v5M7 8h10v3a5 5 0 0 1-10 0V8ZM12 16v5" />
+								{snapshot.connected ? <path d="m5 5 14 14" /> : null}
 							</svg>
 						</button>
 					}
