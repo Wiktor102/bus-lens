@@ -1993,6 +1993,8 @@ export class CanonicalQueryService {
 			data,
 			appliedFilters: { captureId, positions, scope: normalizedScope.scope },
 			snapshot,
+			requestedLimit: positions.length,
+			effectiveLimit: positions.length,
 			returned: positions.length,
 			truncated: false,
 			suggestedOperations: [{ tool: "query_messages", reason: "Relate byte variation to the bounded frames that contain it", arguments: { captureId, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision } }]
@@ -2079,7 +2081,8 @@ export class CanonicalQueryService {
 			const sourceSignature = normalizedSignature(input.sourceSignature ?? input.fromSignature, "sourceSignature");
 			const destinationSignature = normalizedSignature(input.destinationSignature ?? input.toSignature, "destinationSignature");
 			const clauses = ["profile_id = @profileId", "count >= @minimumCount"];
-			const params: Record<string, unknown> = { profileId: profile.id, minimumCount, limit: boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT) + 1 };
+			const requestedLimit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT);
+			const params: Record<string, unknown> = { profileId: profile.id, minimumCount, limit: requestedLimit + 1 };
 			if (sourceSignature) { clauses.push("from_signature = @sourceSignature"); params.sourceSignature = sourceSignature; }
 			if (destinationSignature) { clauses.push("to_signature = @destinationSignature"); params.destinationSignature = destinationSignature; }
 			const cursorSql = cursor ? " AND (count < @cursorCount OR (count = @cursorCount AND (from_signature > @cursorFromSignature OR (from_signature = @cursorFromSignature AND to_signature > @cursorToSignature))))" : "";
@@ -2094,20 +2097,19 @@ export class CanonicalQueryService {
 				 FROM frame_transitions WHERE ${clauses.join(" AND ")}${cursorSql}
 				 ORDER BY count DESC, from_signature ASC, to_signature ASC LIMIT @limit`
 			).all(params) as Array<{ from_signature: string; to_signature: string; count: number; diffs: number }>;
-			const limit = Number(params.limit) - 1;
-			const pageRows = rows.slice(0, limit);
+			const pageRows = rows.slice(0, requestedLimit);
 			const hasMore = rows.length > pageRows.length;
 			transitions = pageRows.map(row => ({ fromSignature: row.from_signature, toSignature: row.to_signature, count: row.count, changedPositions: [], changedPositionCount: row.diffs }));
 			const last = pageRows.at(-1);
 			const nextCursor = hasMore && last ? encodeAgentCursor({ contractVersion: 1, scope: "transitions", filters: { captureId, requested, sourceSignature, destinationSignature, minimumCount }, snapshot, key: { count: last.count, fromSignature: last.from_signature, toSignature: last.to_signature } }) : undefined;
-			const response = makeAgentResponse({ data: { transitions }, appliedFilters: { captureId, requested, sourceSignature, destinationSignature, minimumCount }, snapshot, returned: transitions.length, nextCursor, truncated: hasMore, suggestedOperations: transitions.length ? [{ tool: "query_messages", reason: "Inspect frames that participate in a selected transition", arguments: { captureId, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision, exactSignature: transitions[0].fromSignature } }] : [] });
+			const response = makeAgentResponse({ data: { transitions }, appliedFilters: { captureId, requested, sourceSignature, destinationSignature, minimumCount }, snapshot, requestedLimit, effectiveLimit: transitions.length, returned: transitions.length, nextCursor, truncationReason: hasMore ? "page-limit" : undefined, truncated: hasMore, suggestedOperations: transitions.length ? [{ tool: "query_messages", reason: "Inspect frames that participate in a selected transition", arguments: { captureId, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision, exactSignature: transitions[0].fromSignature } }] : [] });
 			assertEncodedResponseSize(response);
 			return response;
 		}
 		const refinedLimit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT);
 		transitions = this.readComputedTransitions(profile.id, input);
 		if (transitions.length > refinedLimit) throw new AgentQueryError("response-too-large", "The refined transition result is larger than one bounded page; narrow the signature or changed-position request", { returned: transitions.length, limit: refinedLimit });
-		const response = makeAgentResponse({ data: { transitions }, appliedFilters: { captureId, requested, minimumCount, sectionId: input.sectionId, changedPositions: input.changedPositions ?? [] }, snapshot, returned: transitions.length, truncated: false, suggestedOperations: transitions.length ? [{ tool: "query_messages", reason: "Inspect one side of a selected transition", arguments: { captureId, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision, exactSignature: transitions[0].fromSignature } }] : [] });
+		const response = makeAgentResponse({ data: { transitions }, appliedFilters: { captureId, requested, minimumCount, sectionId: input.sectionId, changedPositions: input.changedPositions ?? [] }, snapshot, requestedLimit: refinedLimit, effectiveLimit: transitions.length, returned: transitions.length, truncated: false, suggestedOperations: transitions.length ? [{ tool: "query_messages", reason: "Inspect one side of a selected transition", arguments: { captureId, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision, exactSignature: transitions[0].fromSignature } }] : [] });
 		assertEncodedResponseSize(response);
 		return response;
 	}
