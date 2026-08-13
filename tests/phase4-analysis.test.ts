@@ -339,6 +339,24 @@ test("analysis groups, occurrences, statistics, transitions, and raw reads remai
 	}
 });
 
+test("sequence occurrence suggestions use a stable starting frame without context", () => {
+	const { database, profileId, groupId, firstFrameId } = seedAnalysisCapture();
+	try {
+		const query = new CanonicalQueryService(database);
+		const response = query.getSequenceOccurrences({ captureId: "analysis-capture", groupId, profileId, includeContext: false });
+
+		assert.equal(response.data.occurrences[0]?.context, undefined);
+		assert.equal(response.data.occurrences[0]?.startingOrdinal, 0);
+		assert.deepEqual(response.meta.suggestedOperations[0], {
+			tool: "get_message_context",
+			reason: "Inspect a frame near this occurrence",
+			arguments: { frameId: firstFrameId }
+		});
+	} finally {
+		database.close();
+	}
+});
+
 test("byte statistics scope frame families with SQL-derived denominators and remains snapshot-pinned", () => {
 	const { database, commands, profileId, dataRevision, sections } = seedMixedFrameAnalysisCapture();
 	try {

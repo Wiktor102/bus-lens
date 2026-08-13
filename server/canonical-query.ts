@@ -1846,8 +1846,10 @@ export class CanonicalQueryService {
 			 LIMIT @limit`
 		).all(params) as SequenceOccurrenceRow[];
 		return selectSizeBoundedPage(rows, limit, (pageRows, page) => {
+			let firstStartingFrameId: string | undefined;
 			const occurrences = pageRows.map(row => {
-				const frame = this.database.prepare("SELECT timestamps_json FROM materialized_frames WHERE profile_id = @profileId AND ordinal = @ordinal").get({ profileId: profile.id, ordinal: row.starting_ordinal }) as { timestamps_json: string } | undefined;
+				const frame = this.database.prepare("SELECT id, timestamps_json FROM materialized_frames WHERE profile_id = @profileId AND ordinal = @ordinal").get({ profileId: profile.id, ordinal: row.starting_ordinal }) as { id: string; timestamps_json: string } | undefined;
+				if (firstStartingFrameId === undefined && frame) firstStartingFrameId = frame.id;
 				let context: readonly AgentMessage[] | undefined;
 				if (input.includeContext) {
 					const contextRows = this.database.prepare(
@@ -1882,7 +1884,7 @@ export class CanonicalQueryService {
 				nextCursor,
 				truncationReason: page.truncationReason,
 				truncated: hasMore,
-				suggestedOperations: occurrences.length ? [{ tool: "get_message_context", reason: "Inspect a frame near this occurrence", arguments: { frameId: occurrences[0].context?.[0]?.frameId } }] : []
+				suggestedOperations: firstStartingFrameId ? [{ tool: "get_message_context", reason: "Inspect a frame near this occurrence", arguments: { frameId: firstStartingFrameId } }] : []
 			});
 		});
 	}
