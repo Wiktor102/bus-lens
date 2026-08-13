@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { createClaudeMcpConfig, createCodexMcpConfig, resolveMcpEndpoint } from "./agent-config";
 
 export const MCP_SETTINGS_PATH = "/settings/mcp";
+type ConfigName = "codex" | "claude";
 
 type AgentAccessStatus = {
 	endpoint: string;
@@ -22,6 +23,7 @@ type AgentAccessStatus = {
 function AgentAccessPanel() {
 	const [status, setStatus] = useState<AgentAccessStatus | null>(null);
 	const [copied, setCopied] = useState<string | null>(null);
+	const [configExpanded, setConfigExpanded] = useState<Record<ConfigName, boolean>>({ codex: true, claude: true });
 
 	useEffect(() => {
 		let disposed = false;
@@ -48,6 +50,9 @@ function AgentAccessPanel() {
 			setCopied(null);
 		}
 	};
+	const toggleConfig = (name: ConfigName) => {
+		setConfigExpanded(current => ({ ...current, [name]: !current[name] }));
+	};
 
 	return (
 		<section id="agentAccessPanel" className="agent-access-panel" aria-labelledby="agentAccessTitle">
@@ -71,12 +76,34 @@ function AgentAccessPanel() {
 			<p className="muted">MCP is stateless; “recent clients” are self-reported observations, not authenticated connections.</p>
 			<div className="agent-access-configs">
 				<div>
-					<header><span>Codex</span><button className="btn btn-secondary" type="button" onClick={() => void copyConfig("codex", codexConfig)}>{copied === "codex" ? "Copied" : "Copy config"}</button></header>
-					<pre>{codexConfig}</pre>
+					<header>
+						<button
+							className="agent-config-toggle"
+							type="button"
+							aria-expanded={configExpanded.codex}
+							aria-controls="codexConfig"
+							onClick={() => toggleConfig("codex")}
+						>
+							<span>Codex</span><span className="agent-config-chevron" aria-hidden="true">{configExpanded.codex ? "▾" : "▸"}</span>
+						</button>
+						<button className="btn btn-secondary" type="button" onClick={() => void copyConfig("codex", codexConfig)}>{copied === "codex" ? "Copied" : "Copy config"}</button>
+					</header>
+					{configExpanded.codex ? <pre id="codexConfig">{codexConfig}</pre> : null}
 				</div>
 				<div>
-					<header><span>Claude</span><button className="btn btn-secondary" type="button" onClick={() => void copyConfig("claude", claudeConfig)}>{copied === "claude" ? "Copied" : "Copy config"}</button></header>
-					<pre>{claudeConfig}</pre>
+					<header>
+						<button
+							className="agent-config-toggle"
+							type="button"
+							aria-expanded={configExpanded.claude}
+							aria-controls="claudeConfig"
+							onClick={() => toggleConfig("claude")}
+						>
+							<span>Claude</span><span className="agent-config-chevron" aria-hidden="true">{configExpanded.claude ? "▾" : "▸"}</span>
+						</button>
+						<button className="btn btn-secondary" type="button" onClick={() => void copyConfig("claude", claudeConfig)}>{copied === "claude" ? "Copied" : "Copy config"}</button>
+					</header>
+					{configExpanded.claude ? <pre id="claudeConfig">{claudeConfig}</pre> : null}
 				</div>
 			</div>
 		</section>
