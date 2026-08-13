@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { AGENT_NORMAL_RESPONSE_BYTES } from "../server/agent-contracts.ts";
 import { CanonicalCaptureCommandService } from "../server/canonical-capture-command-service.ts";
-import { CanonicalQueryService, type AgentComparisonSnapshot } from "../server/canonical-query.ts";
+import { CanonicalQueryService, type AgentComparisonSnapshot, type AgentOperationTemplate } from "../server/canonical-query.ts";
 import { openDatabase } from "../server/database.ts";
 
 const framing = [{ start: 0, framingMode: "length", frameSize: 2 }] as const;
@@ -48,6 +49,107 @@ test("comparisons use explicit snapshots and page category deltas independently"
 		assert.notEqual(secondSignaturePage.items[0]?.signature, signaturePage.items[0]?.signature);
 		const rawText = JSON.stringify(first);
 		assert.doesNotMatch(rawText, /bytes_json|raw_offsets_json/);
+	} finally {
+		database.close();
+	}
+});
+
+test("comparison drill-down templates are category-level and bind selected item fields", () => {
+	const database = openDatabase(":memory:");
+	try {
+		const left = record(database, "left-templates", [1, 2, 3, 4, 5, 6]);
+		const right = record(database, "right-templates", [1, 2, 9, 4, 10, 11]);
+		const query = new CanonicalQueryService(database);
+		const response = query.compareCaptures({
+			left: left.snapshot,
+			right: right.snapshot,
+			categories: ["signatures", "transitions", "sequence-groups"],
+			limits: { signatures: 100, transitions: 100, "sequence-groups": 100 }
+		});
+
+		const signatures = response.data.categories.signatures as {
+			items: Array<Record<string, unknown>>;
+			operationTemplates: AgentOperationTemplate[];
+		};
+		const transitions = response.data.categories.transitions as {
+			items: Array<Record<string, unknown>>;
+			operationTemplates: AgentOperationTemplate[];
+		};
+		const sequenceGroups = response.data.categories["sequence-groups"] as {
+			items: Array<Record<string, unknown>>;
+			operationTemplates: AgentOperationTemplate[];
+		};
+
+		assert.equal(signatures.operationTemplates.length, 2);
+		assert.equal(transitions.operationTemplates.length, 2);
+		assert.equal(sequenceGroups.operationTemplates.length, 2);
+		assert.deepEqual(signatures.operationTemplates.map(template => template.argumentBindings), [
+			{ exactSignature: "signature" },
+			{ exactSignature: "signature" }
+		]);
+		assert.deepEqual(transitions.operationTemplates.map(template => template.argumentBindings), [
+			{ exactSignature: "fromSignature" },
+			{ exactSignature: "fromSignature" }
+		]);
+		assert.deepEqual(sequenceGroups.operationTemplates.map(template => template.argumentBindings), [
+			{ groupId: "leftGroupId" },
+			{ groupId: "rightGroupId" }
+		]);
+
+		const snapshotArguments = (snapshot: AgentComparisonSnapshot) => ({
+			captureId: snapshot.captureId,
+			profileId: snapshot.profileId,
+			profileVersion: snapshot.profileVersion,
+			sourceDataRevision: snapshot.sourceDataRevision
+		});
+		assert.deepEqual(signatures.operationTemplates.map(template => template.fixedArguments), [snapshotArguments(left.snapshot), snapshotArguments(right.snapshot)]);
+		assert.deepEqual(transitions.operationTemplates.map(template => template.fixedArguments), [snapshotArguments(left.snapshot), snapshotArguments(right.snapshot)]);
+
+		for (const page of [signatures, transitions, sequenceGroups]) {
+			for (const item of page.items) {
+				assert.equal("suggestedOperations" in item, false);
+				assert.equal("leftCaptureId" in item, false);
+				assert.equal("rightCaptureId" in item, false);
+			}
+		}
+		const signatureItem = signatures.items[0];
+		assert.ok(signatureItem);
+		for (const template of signatures.operationTemplates) {
+			const binding = template.argumentBindings.exactSignature;
+			assert.equal(signatureItem[binding], signatureItem.signature);
+		}
+		const transitionItem = transitions.items[0];
+		assert.ok(transitionItem);
+		for (const template of transitions.operationTemplates) {
+			const binding = template.argumentBindings.exactSignature;
+			assert.equal(transitionItem[binding], transitionItem.fromSignature);
+		}
+		assert.match(sequenceGroups.operationTemplates[0]?.reason ?? "", /inapplicable.*null/);
+		assert.deepEqual(response.meta.suggestedOperations, []);
+	} finally {
+		database.close();
+	}
+});
+
+test("comparison template count stays constant for a 100-item signature page", () => {
+	const database = openDatabase(":memory:");
+	try {
+		const left = record(database, "left-100-signatures", Array.from({ length: 200 }, (_value, index) => index));
+		const right = record(database, "right-100-signatures", Array.from({ length: 200 }, (_value, index) => (index + 56) % 256));
+		const query = new CanonicalQueryService(database);
+		const oneItem = query.compareCaptures({ left: left.snapshot, right: right.snapshot, categories: ["signatures"], limits: { signatures: 1 } });
+		const hundredItems = query.compareCaptures({ left: left.snapshot, right: right.snapshot, categories: ["signatures"], limits: { signatures: 100 } });
+		const oneItemPage = oneItem.data.categories.signatures as { items: unknown[]; operationTemplates: AgentOperationTemplate[] };
+		const hundredItemPage = hundredItems.data.categories.signatures as { items: unknown[]; operationTemplates: AgentOperationTemplate[] };
+
+		assert.equal(oneItemPage.items.length, 1);
+		assert.equal(hundredItemPage.items.length, 100);
+		assert.equal(oneItemPage.operationTemplates.length, 2);
+		assert.equal(hundredItemPage.operationTemplates.length, 2);
+		assert.equal((JSON.stringify(oneItemPage).match(/operationTemplates/g) ?? []).length, 1);
+		assert.equal((JSON.stringify(hundredItemPage).match(/operationTemplates/g) ?? []).length, 1);
+		assert.equal((JSON.stringify(hundredItemPage).match(/suggestedOperations/g) ?? []).length, 0);
+		assert.ok(Buffer.byteLength(JSON.stringify(hundredItems), "utf8") <= AGENT_NORMAL_RESPONSE_BYTES);
 	} finally {
 		database.close();
 	}

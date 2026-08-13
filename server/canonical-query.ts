@@ -370,6 +370,13 @@ export type AgentComparisonCategory = typeof AGENT_COMPARISON_CATEGORIES[number]
 
 export type AgentComparisonSnapshot = AgentSnapshotReference;
 
+export type AgentOperationTemplate = Readonly<{
+	tool: string;
+	reason: string;
+	fixedArguments: Record<string, unknown>;
+	argumentBindings: Record<string, string>;
+}>;
+
 export type AgentCompareCapturesInput = Readonly<{
 	left: AgentComparisonSnapshot;
 	right: AgentComparisonSnapshot;
@@ -383,6 +390,7 @@ export type AgentComparisonPage<T> = Readonly<{
 	returned: number;
 	nextCursor?: string;
 	truncated: boolean;
+	operationTemplates: readonly AgentOperationTemplate[];
 }>;
 
 export type AgentComparisonDifference = Readonly<{
@@ -396,9 +404,6 @@ export type AgentSignatureDelta = Readonly<{
 	leftCount: number;
 	rightCount: number;
 	delta: number;
-	leftCaptureId: string;
-	rightCaptureId: string;
-	suggestedOperations: readonly Readonly<{ tool: string; arguments: Record<string, unknown> }>[];
 }>;
 
 export type AgentTransitionDelta = Readonly<{
@@ -409,7 +414,6 @@ export type AgentTransitionDelta = Readonly<{
 	delta: number;
 	leftChangedPositions: number;
 	rightChangedPositions: number;
-	suggestedOperations: readonly Readonly<{ tool: string; arguments: Record<string, unknown> }>[];
 }>;
 
 export type AgentBytePositionDelta = Readonly<{
@@ -432,7 +436,6 @@ export type AgentSequenceGroupDelta = Readonly<{
 	leftLength: number | null;
 	rightLength: number | null;
 	delta: number;
-	suggestedOperations: readonly Readonly<{ tool: string; arguments: Record<string, unknown> }>[];
 }>;
 
 export type AgentComparisonResult = Readonly<{
@@ -2304,6 +2307,15 @@ export class CanonicalQueryService {
 		return decoded;
 	}
 
+	private comparisonSnapshotArguments(snapshot: AgentComparisonSnapshot): Record<string, unknown> {
+		return {
+			captureId: snapshot.captureId,
+			profileId: snapshot.profileId,
+			profileVersion: snapshot.profileVersion,
+			sourceDataRevision: snapshot.sourceDataRevision
+		};
+	}
+
 	private comparisonMetadata(left: AgentComparisonSnapshot, right: AgentComparisonSnapshot): Readonly<{ differences: readonly AgentComparisonDifference[] }> {
 		const read = (profileId: string): Record<string, unknown> => {
 			const snapshot = this.database.prepare(
@@ -2410,18 +2422,26 @@ export class CanonicalQueryService {
 			signature: row.signature,
 			leftCount: row.left_count,
 			rightCount: row.right_count,
-			delta: row.delta,
-			leftCaptureId: left.captureId,
-			rightCaptureId: right.captureId,
-			suggestedOperations: [
-				{ tool: "query_messages", arguments: { captureId: left.captureId, profileId: left.profileId, profileVersion: left.profileVersion, sourceDataRevision: left.sourceDataRevision, exactSignature: row.signature } },
-				{ tool: "query_messages", arguments: { captureId: right.captureId, profileId: right.profileId, profileVersion: right.profileVersion, sourceDataRevision: right.sourceDataRevision, exactSignature: row.signature } }
-			]
+			delta: row.delta
 		}));
+		const operationTemplates: AgentOperationTemplate[] = [
+			{
+				tool: "query_messages",
+				reason: "Inspect matching frames in the left snapshot",
+				fixedArguments: this.comparisonSnapshotArguments(left),
+				argumentBindings: { exactSignature: "signature" }
+			},
+			{
+				tool: "query_messages",
+				reason: "Inspect matching frames in the right snapshot",
+				fixedArguments: this.comparisonSnapshotArguments(right),
+				argumentBindings: { exactSignature: "signature" }
+			}
+		];
 		const hasMore = rows.length > pageRows.length;
 		const last = pageRows.at(-1);
 		const nextCursor = hasMore && last ? encodeAgentCursor({ contractVersion: 1, scope: "comparison:signatures", filters, snapshot: left, key: { magnitude: Math.abs(last.delta), signature: last.signature } }) : undefined;
-		return { items, returned: items.length, ...(nextCursor ? { nextCursor } : {}), truncated: hasMore };
+		return { items, returned: items.length, ...(nextCursor ? { nextCursor } : {}), truncated: hasMore, operationTemplates };
 	}
 
 	private comparisonTransitions(left: AgentComparisonSnapshot, right: AgentComparisonSnapshot, input: AgentCompareCapturesInput): AgentComparisonPage<AgentTransitionDelta> {
@@ -2461,16 +2481,26 @@ export class CanonicalQueryService {
 			rightCount: row.right_count,
 			delta: row.delta,
 			leftChangedPositions: row.left_diffs,
-			rightChangedPositions: row.right_diffs,
-			suggestedOperations: [
-				{ tool: "query_messages", arguments: { captureId: left.captureId, profileId: left.profileId, profileVersion: left.profileVersion, sourceDataRevision: left.sourceDataRevision, exactSignature: row.from_signature } },
-				{ tool: "query_messages", arguments: { captureId: right.captureId, profileId: right.profileId, profileVersion: right.profileVersion, sourceDataRevision: right.sourceDataRevision, exactSignature: row.from_signature } }
-			]
+			rightChangedPositions: row.right_diffs
 		}));
+		const operationTemplates: AgentOperationTemplate[] = [
+			{
+				tool: "query_messages",
+				reason: "Inspect frames that participate in the selected transition in the left snapshot",
+				fixedArguments: this.comparisonSnapshotArguments(left),
+				argumentBindings: { exactSignature: "fromSignature" }
+			},
+			{
+				tool: "query_messages",
+				reason: "Inspect frames that participate in the selected transition in the right snapshot",
+				fixedArguments: this.comparisonSnapshotArguments(right),
+				argumentBindings: { exactSignature: "fromSignature" }
+			}
+		];
 		const hasMore = rows.length > pageRows.length;
 		const last = pageRows.at(-1);
 		const nextCursor = hasMore && last ? encodeAgentCursor({ contractVersion: 1, scope: "comparison:transitions", filters, snapshot: left, key: { magnitude: Math.abs(last.delta), fromSignature: last.from_signature, toSignature: last.to_signature } }) : undefined;
-		return { items, returned: items.length, ...(nextCursor ? { nextCursor } : {}), truncated: hasMore };
+		return { items, returned: items.length, ...(nextCursor ? { nextCursor } : {}), truncated: hasMore, operationTemplates };
 	}
 
 	private comparisonBytePositions(left: AgentComparisonSnapshot, right: AgentComparisonSnapshot, input: AgentCompareCapturesInput): AgentComparisonPage<AgentBytePositionDelta> {
@@ -2529,7 +2559,7 @@ export class CanonicalQueryService {
 		const hasMore = positions.length > pagePositions.length;
 		const last = pagePositions.at(-1);
 		const nextCursor = hasMore && last !== undefined ? encodeAgentCursor({ contractVersion: 1, scope: "comparison:byte-statistics", filters, snapshot: left, key: { position: last } }) : undefined;
-		return { items, returned: items.length, ...(nextCursor ? { nextCursor } : {}), truncated: hasMore };
+		return { items, returned: items.length, ...(nextCursor ? { nextCursor } : {}), truncated: hasMore, operationTemplates: [] };
 	}
 
 	private comparisonSequenceGroups(left: AgentComparisonSnapshot, right: AgentComparisonSnapshot, input: AgentCompareCapturesInput): AgentComparisonPage<AgentSequenceGroupDelta> {
@@ -2578,16 +2608,26 @@ export class CanonicalQueryService {
 			rightOccurrenceCount: row.right_occurrence_count,
 			leftLength: row.left_length,
 			rightLength: row.right_length,
-			delta: row.delta,
-			suggestedOperations: [
-				...(row.left_group_id ? [{ tool: "get_sequence_occurrences", arguments: { captureId: left.captureId, groupId: row.left_group_id, profileId: left.profileId, profileVersion: left.profileVersion, sourceDataRevision: left.sourceDataRevision } }] : []),
-				...(row.right_group_id ? [{ tool: "get_sequence_occurrences", arguments: { captureId: right.captureId, groupId: row.right_group_id, profileId: right.profileId, profileVersion: right.profileVersion, sourceDataRevision: right.sourceDataRevision } }] : [])
-			]
+			delta: row.delta
 		}));
+		const operationTemplates: AgentOperationTemplate[] = [
+			{
+				tool: "get_sequence_occurrences",
+				reason: "Inspect occurrences for the selected left-snapshot sequence group; this template is inapplicable when the bound leftGroupId is null",
+				fixedArguments: this.comparisonSnapshotArguments(left),
+				argumentBindings: { groupId: "leftGroupId" }
+			},
+			{
+				tool: "get_sequence_occurrences",
+				reason: "Inspect occurrences for the selected right-snapshot sequence group; this template is inapplicable when the bound rightGroupId is null",
+				fixedArguments: this.comparisonSnapshotArguments(right),
+				argumentBindings: { groupId: "rightGroupId" }
+			}
+		];
 		const hasMore = rows.length > pageRows.length;
 		const last = pageRows.at(-1);
 		const nextCursor = hasMore && last ? encodeAgentCursor({ contractVersion: 1, scope: "comparison:sequence-groups", filters, snapshot: left, key: { magnitude: Math.abs(last.delta), key: last.key_text } }) : undefined;
-		return { items, returned: items.length, ...(nextCursor ? { nextCursor } : {}), truncated: hasMore };
+		return { items, returned: items.length, ...(nextCursor ? { nextCursor } : {}), truncated: hasMore, operationTemplates };
 	}
 
 	compareCaptures(input: AgentCompareCapturesInput): AgentResponse<AgentComparisonResult> {
@@ -2636,9 +2676,7 @@ export class CanonicalQueryService {
 		const response = makeAgentResponse({
 			data: { left, right, categories: categoryData } as AgentComparisonResult,
 			appliedFilters: { left, right, categories, limits: input.limits ?? {}, cursors: input.cursors ?? {} },
-			returned: categories.length,
-			truncated,
-			suggestedOperations: [{ tool: "query_messages", reason: "Inspect a signature, transition, or sequence difference with the explicit snapshot" }]
+			truncated
 		});
 		// A complete high-cardinality byte position is intentionally atomic. The
 		// one-position page keeps the category bounded, while the hard limit still
