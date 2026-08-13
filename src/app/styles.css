@@ -160,6 +160,7 @@ button {
 	border-left: 1px solid var(--line);
 	background: transparent;
 	color: inherit;
+	cursor: pointer;
 	font: inherit;
 	text-decoration: none;
 	transition: 0.18s ease;
@@ -175,13 +176,6 @@ button {
 }
 .status-split-icon-action {
 	width: 38px;
-}
-.status-split-button {
-	padding: 0 14px;
-	cursor: pointer;
-	font-size: 12px;
-	font-weight: 650;
-	white-space: nowrap;
 }
 .status-split-icon-action svg {
 	width: 17px;

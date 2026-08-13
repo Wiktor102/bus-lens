@@ -118,14 +118,18 @@ function TopBar() {
 					statusId="connectionBadge"
 					status={snapshot.connectionLabel}
 					connected={snapshot.connected}
-					action={
+						action={
 						<button
 							id="connectBtn"
-							className="status-split-action status-split-button"
+							className="status-split-action status-split-icon-action"
 							type="button"
+							aria-label={snapshot.connectLabel}
+							title={snapshot.connectLabel}
 							onClick={() => void actions.toggleConnection()}
 						>
-							{snapshot.connectLabel}
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M9 3v5M15 3v5M7 8h10v3a5 5 0 0 1-10 0V8ZM12 16v5" />
+							</svg>
 						</button>
 					}
 				/>
