@@ -118,6 +118,67 @@ test("analysis messages apply bounded filters, stable evidence references, and k
 	}
 });
 
+test("analysis messages resolve inclusive raw-byte overlap ranges", () => {
+	const { database } = seedAnalysisCapture();
+	try {
+		const query = new CanonicalQueryService(database);
+		const insideFrame = query.queryMessages({ captureId: "analysis-capture", rawOffsetFrom: 1 });
+		assert.deepEqual(insideFrame.data.messages.map(message => message.ordinal), [0]);
+		assert.deepEqual(insideFrame.data.messages[0]?.rawSpan, { startOffset: 0, endOffset: 1 });
+		assert.equal(insideFrame.meta.appliedFilters.rawOffsetFrom, 1);
+		assert.equal(insideFrame.meta.appliedFilters.rawOffsetTo, 1);
+
+		assert.deepEqual(query.queryMessages({ captureId: "analysis-capture", rawOffsetFrom: 0, rawOffsetTo: 1 }).data.messages.map(message => message.ordinal), [0]);
+		assert.deepEqual(query.queryMessages({ captureId: "analysis-capture", rawOffsetFrom: 2, rawOffsetTo: 3 }).data.messages.map(message => message.ordinal), [1]);
+		assert.deepEqual(query.queryMessages({ captureId: "analysis-capture", rawOffsetFrom: 1, rawOffsetTo: 4 }).data.messages.map(message => message.ordinal), [0, 1, 2]);
+		assert.deepEqual(query.queryMessages({ captureId: "analysis-capture", rawOffsetTo: 5 }).data.messages.map(message => message.ordinal), [2]);
+		assert.deepEqual(query.queryMessages({ captureId: "analysis-capture", rawOffsetFrom: 8, rawOffsetTo: 8 }).data.messages, []);
+		assert.ok(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'materialized_frames_agent_raw_span'").get());
+	} finally {
+		database.close();
+	}
+});
+
+test("raw-range message cursors retain the broad range and historical profile", () => {
+	const { database, commands, profileId, dataRevision } = seedAnalysisCapture();
+	try {
+		const query = new CanonicalQueryService(database);
+		const first = query.queryMessages({ captureId: "analysis-capture", rawOffsetFrom: 0, rawOffsetTo: 7, limit: 2 });
+		assert.deepEqual(first.data.messages.map(message => message.ordinal), [0, 1]);
+		assert.ok(first.meta.page?.nextCursor);
+		const continued = query.queryMessages({ captureId: "analysis-capture", rawOffsetFrom: 0, rawOffsetTo: 7, limit: 2, cursor: first.meta.page?.nextCursor });
+		assert.deepEqual(continued.data.messages.map(message => message.ordinal), [2, 3]);
+		assert.equal(continued.meta.page?.nextCursor, undefined);
+		assert.throws(
+			() => query.queryMessages({ captureId: "analysis-capture", rawOffsetFrom: 0, rawOffsetTo: 6, limit: 2, cursor: first.meta.page?.nextCursor }),
+			error => (error as { code?: string }).code === "invalid-cursor"
+		);
+
+		const historicalFrame = query.queryMessages({ captureId: "analysis-capture", profileId, rawOffsetFrom: 2, rawOffsetTo: 3 }).data.messages[0];
+		assert.ok(historicalFrame);
+		commands.reframe({ captureId: "analysis-capture", expectedActiveProfileId: profileId, expectedDataRevision: dataRevision, sections: [{ start: 0, framingMode: "length", frameSize: 1 }] });
+		const historical = query.queryMessages({ captureId: "analysis-capture", profileId, rawOffsetFrom: 2, rawOffsetTo: 3 });
+		assert.equal(historical.meta.snapshot?.profileId, profileId);
+		assert.equal(historical.data.messages[0]?.frameId, historicalFrame.frameId);
+		assert.deepEqual(historical.data.messages[0]?.rawSpan, { startOffset: 2, endOffset: 3 });
+	} finally {
+		database.close();
+	}
+});
+
+test("raw-range message queries reject reversed bounds", () => {
+	const { database } = seedAnalysisCapture();
+	try {
+		const query = new CanonicalQueryService(database);
+		assert.throws(
+			() => query.queryMessages({ captureId: "analysis-capture", rawOffsetFrom: 3, rawOffsetTo: 2 }),
+			error => (error as { code?: string }).code === "invalid-input"
+		);
+	} finally {
+		database.close();
+	}
+});
+
 test("size-bounded message pages binary-search bulky rows and preserve cursor traversal", () => {
 	const { database, profileId } = seedManyFrameAnalysisCapture(200);
 	try {
@@ -254,10 +315,24 @@ test("analysis groups, occurrences, statistics, transitions, and raw reads remai
 		);
 		const aliasRefined = query.getTransitions({ captureId: "analysis-capture", profileId, sectionId, fromSignature: transitions.data.transitions[0]!.fromSignature });
 		assert.ok(aliasRefined.data.transitions.length);
+		const snapshot = query.queryCaptureOverview("analysis-capture").meta.snapshot;
+		assert.ok(snapshot);
 		const raw = query.readRawBytes({ captureId: "analysis-capture", rawOffset: 0, length: 4 });
 		assert.equal(raw.data.returnedByteCount, 4);
 		assert.equal(raw.data.hex, "01 ?? 01 02");
 		assert.equal(raw.data.timestamps.deltas.length, 3);
+		assert.deepEqual(raw.meta.suggestedOperations[0], {
+			tool: "query_messages",
+			reason: "Find interpreted frames overlapping this range with reverse raw-range lookup",
+			arguments: {
+				captureId: "analysis-capture",
+				rawOffsetFrom: 0,
+				rawOffsetTo: 3,
+				profileId,
+				profileVersion: snapshot.profileVersion,
+				sourceDataRevision: snapshot.sourceDataRevision
+			}
+		});
 		assert.throws(() => query.readRawBytes({ captureId: "analysis-capture", rawOffset: 0, length: 4097 }), /length/);
 	} finally {
 		database.close();

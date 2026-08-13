@@ -153,7 +153,7 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 	registerAnalysisTool(
 		server,
 		"query_messages",
-		"Query bounded interpreted frames by snapshot, ordinal, time, section, direction, signature, wildcard, hidden, note, or sequence filters.",
+		"Query bounded interpreted frames by snapshot, ordinal, inclusive raw byte range, time, section, direction, signature, wildcard, hidden, note, or sequence filters. A raw byte range performs reverse raw-range lookup and returns every frame whose raw span overlaps it; supplying one raw offset matches that offset.",
 		z.object({
 			captureId: z.string().min(1),
 			profileId: z.string().optional(),
@@ -161,6 +161,8 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 			sourceDataRevision: z.number().int().nonnegative().optional(),
 			ordinalFrom: z.number().int().nonnegative().optional(),
 			ordinalTo: z.number().int().nonnegative().optional(),
+			rawOffsetFrom: z.number().int().safe().nonnegative().describe("Inclusive raw-byte overlap lower bound; when supplied alone, matches one raw offset.").optional(),
+			rawOffsetTo: z.number().int().safe().nonnegative().describe("Inclusive raw-byte overlap upper bound; when supplied alone, matches one raw offset.").optional(),
 			timestampFrom: z.number().finite().optional(),
 			timestampTo: z.number().finite().optional(),
 			sectionId: z.string().optional(),
@@ -264,7 +266,7 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 	registerAnalysisTool(
 		server,
 		"read_raw_bytes",
-		"Read an explicit absolute raw-byte range with a 1,024-byte default and a hard 4,096-byte maximum; never requests a complete capture.",
+		"Read an explicit absolute raw-byte range with a 1,024-byte default and a hard 4,096-byte maximum; use the suggested query_messages operation for reverse raw-range lookup of interpreted frames, and never request a complete capture.",
 		z.object({
 			captureId: z.string().min(1),
 			rawOffset: z.number().int().nonnegative().optional(),

@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 
 export type SqliteDatabase = InstanceType<typeof Database>;
-export const CURRENT_SCHEMA_VERSION = 8;
+export const CURRENT_SCHEMA_VERSION = 9;
 
 type Migration = {
 	version: number;
@@ -700,6 +700,21 @@ const migrations: Migration[] = [
 			database.exec(`
 				CREATE INDEX IF NOT EXISTS materialized_frames_agent_scope
 					ON materialized_frames (profile_id, section_id, signature);
+			`);
+		}
+	},
+	{
+		version: 9,
+		up: database => {
+			// Raw-range message lookup constrains a profile by the first and last
+			// raw offsets stored in each frame's immutable offset array.
+			database.exec(`
+				CREATE INDEX IF NOT EXISTS materialized_frames_agent_raw_span
+					ON materialized_frames (
+						profile_id,
+						CAST(json_extract(raw_offsets_json, '$[0]') AS INTEGER),
+						CAST(json_extract(raw_offsets_json, '$[#-1]') AS INTEGER)
+					);
 			`);
 		}
 	}

@@ -193,6 +193,8 @@ export type AgentMessageQueryInput = Readonly<{
 	ordinalTo?: number;
 	frameOrdinalFrom?: number;
 	frameOrdinalTo?: number;
+	rawOffsetFrom?: number;
+	rawOffsetTo?: number;
 	timestampFrom?: number;
 	timestampTo?: number;
 	sectionId?: string;
@@ -445,6 +447,8 @@ type WildcardToken = number | null;
 type NormalizedMessageFilters = Readonly<{
 	ordinalFrom?: number;
 	ordinalTo?: number;
+	rawOffsetFrom?: number;
+	rawOffsetTo?: number;
 	timestampFrom?: number;
 	timestampTo?: number;
 	sectionId?: string;
@@ -712,10 +716,17 @@ function assertWildcardPatternIsBounded(
 function normalizeMessageFilters(input: AgentMessageQueryInput): NormalizedMessageFilters {
 	const ordinalFrom = optionalNonNegativeInteger(input.ordinalFrom ?? input.frameOrdinalFrom, "ordinalFrom");
 	const ordinalTo = optionalNonNegativeInteger(input.ordinalTo ?? input.frameOrdinalTo, "ordinalTo");
+	const requestedRawOffsetFrom = optionalNonNegativeInteger(input.rawOffsetFrom, "rawOffsetFrom");
+	const requestedRawOffsetTo = optionalNonNegativeInteger(input.rawOffsetTo, "rawOffsetTo");
+	const rawOffsetFrom = requestedRawOffsetFrom ?? requestedRawOffsetTo;
+	const rawOffsetTo = requestedRawOffsetTo ?? requestedRawOffsetFrom;
 	const timestampFrom = optionalFiniteNumber(input.timestampFrom, "timestampFrom");
 	const timestampTo = optionalFiniteNumber(input.timestampTo, "timestampTo");
 	if (ordinalFrom !== undefined && ordinalTo !== undefined && ordinalFrom > ordinalTo) {
 		throw new AgentQueryError("invalid-input", "ordinalFrom must not exceed ordinalTo", { ordinalFrom, ordinalTo });
+	}
+	if (rawOffsetFrom !== undefined && rawOffsetTo !== undefined && rawOffsetFrom > rawOffsetTo) {
+		throw new AgentQueryError("invalid-input", "rawOffsetFrom must not exceed rawOffsetTo", { rawOffsetFrom, rawOffsetTo });
 	}
 	if (timestampFrom !== undefined && timestampTo !== undefined && timestampFrom > timestampTo) {
 		throw new AgentQueryError("invalid-input", "timestampFrom must not exceed timestampTo", { timestampFrom, timestampTo });
@@ -727,6 +738,8 @@ function normalizeMessageFilters(input: AgentMessageQueryInput): NormalizedMessa
 	return {
 		...(ordinalFrom === undefined ? {} : { ordinalFrom }),
 		...(ordinalTo === undefined ? {} : { ordinalTo }),
+		...(rawOffsetFrom === undefined ? {} : { rawOffsetFrom }),
+		...(rawOffsetTo === undefined ? {} : { rawOffsetTo }),
 		...(timestampFrom === undefined ? {} : { timestampFrom }),
 		...(timestampTo === undefined ? {} : { timestampTo }),
 		...(input.sectionId ? { sectionId: requiredText(input.sectionId, "sectionId") } : {}),
@@ -1168,6 +1181,29 @@ export class CanonicalQueryService {
 		};
 	}
 
+	private activeAnalysisSnapshot(captureId: string): AgentSnapshotReference | undefined {
+		const row = this.database.prepare(
+			`SELECT profiles.id AS profile_id, profiles.version AS profile_version,
+			        COALESCE(profiles.source_data_revision, captures.data_revision) AS source_data_revision,
+			        profiles.verified
+			 FROM captures
+			 JOIN framing_profiles profiles ON profiles.id = captures.active_framing_profile_id
+			 WHERE captures.id = @captureId`
+		).get({ captureId }) as {
+			profile_id: string;
+			profile_version: number;
+			source_data_revision: number;
+			verified: number;
+		} | undefined;
+		if (!row || !row.verified) return undefined;
+		return {
+			captureId,
+			profileId: row.profile_id,
+			profileVersion: row.profile_version,
+			sourceDataRevision: row.source_data_revision
+		};
+	}
+
 	private readAgentOverview(captureId: string, requested?: Partial<AgentSnapshotReference>): AgentCaptureOverview {
 		const summary = this.getCaptureSummary(captureId);
 		if (!summary) throw new AgentQueryError("not-found", "Capture was not found", { captureId });
@@ -1521,6 +1557,12 @@ export class CanonicalQueryService {
 		const params: Record<string, unknown> = { profileId: profile.id, limit: limit + 1 };
 		if (filters.ordinalFrom !== undefined) { clauses.push("ordinal >= @ordinalFrom"); params.ordinalFrom = filters.ordinalFrom; }
 		if (filters.ordinalTo !== undefined) { clauses.push("ordinal <= @ordinalTo"); params.ordinalTo = filters.ordinalTo; }
+		if (filters.rawOffsetFrom !== undefined && filters.rawOffsetTo !== undefined) {
+			clauses.push("CAST(json_extract(raw_offsets_json, '$[#-1]') AS INTEGER) >= @rawOffsetFrom");
+			clauses.push("CAST(json_extract(raw_offsets_json, '$[0]') AS INTEGER) <= @rawOffsetTo");
+			params.rawOffsetFrom = filters.rawOffsetFrom;
+			params.rawOffsetTo = filters.rawOffsetTo;
+		}
 		if (filters.sectionId) { clauses.push("section_id = @sectionId"); params.sectionId = filters.sectionId; }
 		if (filters.exactSignature) { clauses.push("signature = @exactSignature"); params.exactSignature = filters.exactSignature; }
 		if (filters.hidden === "visible-only") clauses.push("hidden = 0");
@@ -2125,6 +2167,17 @@ export class CanonicalQueryService {
 		const timestampValues = exposedValues.map(value => value.timestamp);
 		const base = timestampValues[0] ?? null;
 		const deltas = timestampValues.slice(1).map((timestamp, index) => timestamp !== null && timestampValues[index] !== null ? timestamp - (timestampValues[index] as number) : null);
+		const snapshot = this.activeAnalysisSnapshot(captureId);
+		const messageQueryArguments = {
+			captureId,
+			rawOffsetFrom: startOffset,
+			rawOffsetTo: requestedEndOffset,
+			...(snapshot ? {
+				profileId: snapshot.profileId,
+				profileVersion: snapshot.profileVersion,
+				sourceDataRevision: snapshot.sourceDataRevision
+			} : {})
+		};
 		const response = makeAgentResponse({
 			data: {
 				requestedBounds: { startOffset, endOffset: requestedEndOffset },
@@ -2139,7 +2192,7 @@ export class CanonicalQueryService {
 			},
 			appliedFilters: { captureId, rawOffset: startOffset, length, hiddenPolicy },
 			truncated: startOffset < available.start_offset || requestedEndOffset > available.end_offset || values.length < length,
-			suggestedOperations: [{ tool: "get_message_context", reason: "Relate a bounded raw range to a stable interpreted frame when available" }]
+			suggestedOperations: [{ tool: "query_messages", reason: "Find interpreted frames overlapping this range with reverse raw-range lookup", arguments: messageQueryArguments }]
 		});
 		assertEncodedResponseSize(response);
 		return response;
