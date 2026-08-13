@@ -17,13 +17,18 @@ export type AgentSuggestedOperation = Readonly<{
 	arguments?: Record<string, unknown>;
 }>;
 
+export type AgentPageTruncationReason = "page-limit" | "response-size";
+
 export type AgentResponseMeta = Readonly<{
 	contractVersion: typeof AGENT_CONTRACT_VERSION;
 	snapshot?: AgentSnapshotReference;
 	appliedFilters: Record<string, unknown>;
 	page?: Readonly<{
+		requestedLimit: number;
+		effectiveLimit: number;
 		returned: number;
 		nextCursor?: string;
+		truncationReason?: AgentPageTruncationReason;
 	}>;
 	truncated: boolean;
 	suggestedOperations: AgentSuggestedOperation[];
@@ -124,15 +129,40 @@ export function boundedLimit(value: unknown, defaultLimit: number, maximum: numb
 	return Math.min(Number(value), maximum);
 }
 
-export function makeAgentResponse<T>(args: {
+type AgentResponseArgsBase<T> = {
 	data: T;
 	appliedFilters: Record<string, unknown>;
 	snapshot?: AgentSnapshotReference;
-	returned?: number;
-	nextCursor?: string;
 	truncated?: boolean;
 	suggestedOperations?: AgentSuggestedOperation[];
-}): AgentResponse<T> {
+};
+
+type PageableAgentResponseArgs = {
+	requestedLimit: number;
+	effectiveLimit: number;
+	returned: number;
+	nextCursor?: string;
+	truncationReason?: AgentPageTruncationReason;
+};
+
+type NonPageableAgentResponseArgs = {
+	requestedLimit?: never;
+	effectiveLimit?: never;
+	returned?: never;
+	nextCursor?: never;
+	truncationReason?: never;
+};
+
+export function makeAgentResponse<T>(args: AgentResponseArgsBase<T> & PageableAgentResponseArgs): AgentResponse<T>;
+export function makeAgentResponse<T>(args: AgentResponseArgsBase<T> & NonPageableAgentResponseArgs): AgentResponse<T>;
+export function makeAgentResponse<T>(args: AgentResponseArgsBase<T> & Partial<PageableAgentResponseArgs>): AgentResponse<T> {
+	if (args.returned !== undefined && (args.requestedLimit === undefined || args.effectiveLimit === undefined)) {
+		throw new TypeError("Pageable agent responses require requestedLimit and effectiveLimit");
+	}
+	if (args.returned === undefined && (args.requestedLimit !== undefined || args.effectiveLimit !== undefined
+		|| args.nextCursor !== undefined || args.truncationReason !== undefined)) {
+		throw new TypeError("Pagination fields require returned");
+	}
 	return {
 		data: args.data,
 		meta: {
@@ -141,8 +171,11 @@ export function makeAgentResponse<T>(args: {
 			appliedFilters: args.appliedFilters,
 			...(args.returned === undefined ? {} : {
 				page: {
+					requestedLimit: args.requestedLimit!,
+					effectiveLimit: args.effectiveLimit!,
 					returned: args.returned,
-					...(args.nextCursor ? { nextCursor: args.nextCursor } : {})
+					...(args.nextCursor ? { nextCursor: args.nextCursor } : {}),
+					...(args.truncationReason ? { truncationReason: args.truncationReason } : {})
 				}
 			}),
 			truncated: Boolean(args.truncated),

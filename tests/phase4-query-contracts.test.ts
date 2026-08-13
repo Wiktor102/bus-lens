@@ -4,7 +4,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { ArchiveRepository } from "../server/archive-repository.ts";
-import { AgentQueryError } from "../server/agent-contracts.ts";
+import {
+	AGENT_CONTRACT_VERSION,
+	AgentQueryError,
+	assertCursorFilters,
+	decodeAgentCursor,
+	encodeAgentCursor
+} from "../server/agent-contracts.ts";
 import { CanonicalQueryService, MAX_CONTEXT_PARAMETER_FILTERS, normalizeCaptureDiscoveryFilters } from "../server/canonical-query.ts";
 import { openDatabase } from "../server/database.ts";
 
@@ -17,10 +23,11 @@ async function withTemporaryArchive(run: (directory: string) => Promise<void>): 
 	}
 }
 
-function legacyDocument(id: string, name: string) {
+function legacyDocument(id: string, name: string, description = "") {
 	return {
 		id,
 		name,
+		description,
 		view: "monitor",
 		params: [{ key: "mode", value: "capture" }],
 		byteCount: 2,
@@ -61,20 +68,50 @@ test("agent discovery is filtered, stable at equal timestamps, and keyset pagina
 
 		const first = queries.queryCaptureDiscovery({ limit: 2, controllerView: "monitor", contextParameters: { mode: "capture" } });
 		assert.deepEqual(first.data.captures.map(capture => capture.id), ["legacy-a", "legacy-b"]);
+		assert.equal(first.meta.page?.requestedLimit, 2);
+		assert.equal(first.meta.page?.effectiveLimit, 2);
 		assert.equal(first.meta.page?.returned, 2);
+		assert.equal(first.meta.page?.truncationReason, "page-limit");
 		assert.ok(first.meta.page?.nextCursor);
 		assert.equal(first.data.captures[0]?.status, "legacy-not-canonicalized");
 		assert.match(first.data.captures[0]?.conversionGuidance ?? "", /Convert/);
 
-		const second = queries.queryCaptureDiscovery({ limit: 2, controllerView: "monitor", contextParameters: { mode: "capture" }, cursor: first.meta.page?.nextCursor });
+		const second = queries.queryCaptureDiscovery({ limit: 5, controllerView: "monitor", contextParameters: { mode: "capture" }, cursor: first.meta.page?.nextCursor });
 		assert.deepEqual(second.data.captures.map(capture => capture.id), ["legacy-c"]);
+		assert.equal(second.meta.page?.requestedLimit, 5);
+		assert.equal(second.meta.page?.effectiveLimit, 5);
+		assert.equal(second.meta.page?.returned, 1);
+		assert.equal(second.meta.page?.truncationReason, undefined);
 		assert.equal(second.meta.page?.nextCursor, undefined);
 		assert.throws(
-			() => queries.queryCaptureDiscovery({ limit: 2, controllerView: "other", cursor: first.meta.page?.nextCursor }),
+			() => queries.queryCaptureDiscovery({ limit: 1, controllerView: "other", cursor: first.meta.page?.nextCursor }),
 			(error: unknown) => error instanceof AgentQueryError && error.code === "invalid-cursor"
 		);
 		database.close();
 	});
+});
+
+test("agent cursors remain filter- and snapshot-bound while page size stays outside the cursor", () => {
+	const filters = { controllerView: "monitor" };
+	const snapshot = { captureId: "capture", profileId: "profile", profileVersion: 1, sourceDataRevision: 2 };
+	const cursor = encodeAgentCursor({
+		contractVersion: AGENT_CONTRACT_VERSION,
+		scope: "capture-discovery",
+		filters,
+		snapshot,
+		key: { updatedAt: "2026-08-10T00:00:00.000Z", id: "capture" }
+	});
+	const decoded = decodeAgentCursor(cursor, "capture-discovery");
+	assert.equal("limit" in (decoded.filters as Record<string, unknown>), false);
+	assert.doesNotThrow(() => assertCursorFilters(decoded, filters, snapshot));
+	assert.throws(
+		() => assertCursorFilters(decoded, { controllerView: "other" }, snapshot),
+		(error: unknown) => error instanceof AgentQueryError && error.code === "invalid-cursor"
+	);
+	assert.throws(
+		() => assertCursorFilters(decoded, filters, { ...snapshot, sourceDataRevision: 3 }),
+		(error: unknown) => error instanceof AgentQueryError && error.code === "invalid-cursor"
+	);
 });
 
 test("agent overview pins an explicit profile revision and remains bounded", async () => {
@@ -209,6 +246,28 @@ test("large discovery fixtures return bounded pages and use agent ordering index
 		assert.ok(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'captures_agent_discovery'").get());
 		const plan = database.prepare("EXPLAIN QUERY PLAN SELECT id FROM captures ORDER BY updated_at DESC, id ASC LIMIT 20").all() as Array<{ detail: string }>;
 		assert.ok(plan.some(row => row.detail.includes("captures_agent_discovery") || row.detail.includes("captures")));
+		repository.close();
+	});
+});
+
+test("agent discovery reports response-size when the response budget lowers the effective limit", async () => {
+	await withTemporaryArchive(async directory => {
+		const database = openDatabase(join(directory, "archive.sqlite"));
+		const repository = new ArchiveRepository(database);
+		for (let index = 0; index < 100; index++) {
+			repository.putCapture(
+				`large-${String(index).padStart(3, "0")}`,
+				legacyDocument(`large-${index}`, `Large ${index}`, "x".repeat(600))
+			);
+		}
+		const queries = new CanonicalQueryService(database);
+		const response = queries.queryCaptureDiscovery({ limit: 100 });
+		assert.equal(response.meta.page?.requestedLimit, 100);
+		assert.ok((response.meta.page?.effectiveLimit ?? 100) < 100);
+		assert.equal(response.meta.page?.returned, response.meta.page?.effectiveLimit);
+		assert.equal(response.meta.page?.truncationReason, "response-size");
+		assert.equal(response.meta.truncated, true);
+		assert.ok(response.meta.page?.nextCursor);
 		repository.close();
 	});
 });

@@ -633,9 +633,10 @@ export class CanonicalQueryService {
 
 	queryCaptureDiscovery(input: CaptureDiscoveryFiltersInput = {}): AgentResponse<AgentCaptureDiscovery> {
 		const filters = normalizeCaptureDiscoveryFilters(input);
-		const limit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT);
-		const rows = this.readDiscoveryRows(filters, limit, input.cursor);
-		let pageRows = rows.slice(0, limit);
+		const requestedLimit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT);
+		const rows = this.readDiscoveryRows(filters, requestedLimit, input.cursor);
+		let pageRows = rows.slice(0, requestedLimit);
+		let effectiveLimit = requestedLimit;
 		let hasMore = rows.length > pageRows.length;
 		const mappedRows = () => pageRows.map(row => this.mapAgentCaptureSummary(row));
 		// A caller may request the maximum page size, but the encoded response
@@ -645,6 +646,7 @@ export class CanonicalQueryService {
 			const estimated = JSON.stringify({ captures: mappedRows() }).length;
 			if (estimated <= AGENT_NORMAL_RESPONSE_BYTES) break;
 			pageRows = pageRows.slice(0, Math.max(1, Math.floor(pageRows.length / 2)));
+			effectiveLimit = pageRows.length;
 			hasMore = true;
 		}
 		const last = pageRows.at(-1);
@@ -659,8 +661,11 @@ export class CanonicalQueryService {
 		const response = makeAgentResponse({
 			data: { captures: mappedRows() },
 			appliedFilters: paramsObject(filters),
+			requestedLimit,
+			effectiveLimit,
 			returned: pageRows.length,
 			nextCursor,
+			truncationReason: effectiveLimit < requestedLimit ? "response-size" : hasMore ? "page-limit" : undefined,
 			truncated: hasMore,
 			suggestedOperations: hasMore ? [{ tool: "list_captures", reason: "More captures match these filters", arguments: { cursor: nextCursor } }] : []
 		});
