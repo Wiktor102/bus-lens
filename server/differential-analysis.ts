@@ -638,6 +638,10 @@ function bitMask(bit: number): string {
 	return `0x${(1 << bit).toString(16).padStart(2, "0").toUpperCase()}`;
 }
 
+function byteMask(mask: number): string {
+	return `0x${mask.toString(16).padStart(2, "0").toUpperCase()}`;
+}
+
 function sortedValueCounts(values: Map<number, number>): AgentValueCount[] {
 	return [...values.entries()]
 		.sort((left, right) => right[1] - left[1] || left[0] - right[0])
@@ -647,11 +651,14 @@ function sortedValueCounts(values: Map<number, number>): AgentValueCount[] {
 function sortedMaskCounts(values: Map<number, number>): AgentMaskCount[] {
 	return [...values.entries()]
 		.sort((left, right) => right[1] - left[1] || left[0] - right[0])
-		.map(([mask, count]) => ({ mask: bitMask(mask), count }));
+		.map(([mask, count]) => ({ mask: byteMask(mask), count }));
 }
 
 function familyText(pair: DifferentialAlignedPair): string {
-	return `${pair.baseline.signature} → ${pair.changed.signature}`;
+	// The baseline signature defines the comparable frame family. Changed-side
+	// noise may legitimately alter a signature; keeping it in the grouping key
+	// would prevent repeated controlled evidence from accumulating support.
+	return pair.baseline.signature;
 }
 
 type PositionStats = {
