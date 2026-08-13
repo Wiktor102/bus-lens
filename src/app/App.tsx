@@ -54,7 +54,7 @@ import {
 	type ViewStateAction,
 	type ViewStateSnapshot
 } from "../shared/view-state";
-import { MCP_SETTINGS_PATH, McpSettingsPage } from "./mcp-settings-page";
+import { MCP_SETTINGS_PATH, McpSettingsPage, type AgentAccessStatus } from "./mcp-settings-page";
 import "./styles.css";
 
 function TopBar() {
@@ -64,6 +64,20 @@ function TopBar() {
 		getTransportSnapshot
 	);
 	const actions = getTransportActions();
+	const [mcpStatus, setMcpStatus] = useState<AgentAccessStatus["status"] | "checking" | "unavailable">("checking");
+
+	useEffect(() => {
+		let disposed = false;
+		void fetch("/api/agent-access", { headers: { accept: "application/json" } })
+			.then(response => response.ok ? response.json() as Promise<Pick<AgentAccessStatus, "status">> : Promise.reject(new Error("MCP status unavailable")))
+			.then(value => {
+				if (!disposed) setMcpStatus(value.status);
+			})
+			.catch(() => {
+				if (!disposed) setMcpStatus("unavailable");
+			});
+		return () => { disposed = true; };
+	}, []);
 
 	return (
 		<header className="topbar">
@@ -80,6 +94,9 @@ function TopBar() {
 			</div>
 			<div className="transport">
 				<a id="mcpSettingsBtn" className="btn btn-secondary" href={MCP_SETTINGS_PATH}>MCP settings</a>
+				<span id="mcpStatusBadge" className={`status-badge mcp-status-badge ${mcpStatus === "running" ? "connected" : ""}`.trim()}>
+					<i /> MCP {mcpStatus}
+				</span>
 				<span className="transport-divider" aria-hidden="true" />
 				<span id="connectionBadge" className={`status-badge ${snapshot.connected ? "connected" : ""}`.trim()}>
 					<i /> {snapshot.connectionLabel}

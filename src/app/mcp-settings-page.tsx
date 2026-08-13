@@ -4,7 +4,7 @@ import { createClaudeMcpConfig, createCodexMcpConfig, resolveMcpEndpoint } from 
 export const MCP_SETTINGS_PATH = "/settings/mcp";
 type ConfigName = "codex" | "claude";
 
-type AgentAccessStatus = {
+export type AgentAccessStatus = {
 	endpoint: string;
 	serverName: string;
 	serverVersion: string;
@@ -102,9 +102,6 @@ function AgentAccessPanel() {
 						<span className="eyebrow">Local agent access</span>
 						<h2 id="agentAccessTitle">MCP orientation</h2>
 					</div>
-					<span className={`status-badge ${status?.status === "running" ? "connected" : ""}`.trim()}>
-						<i /> {status?.status ?? "checking"}
-					</span>
 				</div>
 				<div className="agent-access-grid">
 					<div><span>Endpoint</span><code>{endpoint}</code></div>
