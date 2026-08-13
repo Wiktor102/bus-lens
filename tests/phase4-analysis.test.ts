@@ -39,16 +39,42 @@ function seedAnalysisCapture() {
 	return { database, commands, profileId: finalized.profileId, dataRevision: finalized.dataRevision, groupId, firstFrameId: firstFrame.id };
 }
 
+function seedManyFrameAnalysisCapture(frameCount: number) {
+	const database = openDatabase(":memory:");
+	const commands = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-10T00:00:00.000Z" });
+	commands.createCapture({ captureId: "many-frame-analysis-capture", framing, name: "Many-frame analysis capture", inputFormat: "binary" });
+	commands.startSession({ captureId: "many-frame-analysis-capture", sessionId: "many-frame-analysis-session" });
+	const bytes = Array.from({ length: frameCount * 2 }, (_value, index) => index % 256);
+	const append = commands.appendChunk({
+		captureId: "many-frame-analysis-capture",
+		sessionId: "many-frame-analysis-session",
+		requestId: "many-frame-analysis-request",
+		sequence: 0,
+		expectedStartOffset: 0,
+		bytes,
+		timestamps: bytes.map((_byte, index) => 100 + index),
+		directions: bytes.map(() => "rx")
+	});
+	const finalized = commands.finalizeSession({ captureId: "many-frame-analysis-capture", sessionId: "many-frame-analysis-session", expectedDataRevision: append.dataRevision });
+	return { database, profileId: finalized.profileId };
+}
+
 test("analysis messages apply bounded filters, stable evidence references, and keyset cursors", () => {
 	const { database, profileId, groupId, firstFrameId } = seedAnalysisCapture();
 	try {
 		const query = new CanonicalQueryService(database);
 		const first = query.queryMessages({ captureId: "analysis-capture", limit: 2 });
 		assert.equal(first.data.messages.length, 2);
+		assert.equal(first.meta.page?.effectiveLimit, 2);
+		assert.equal(first.meta.page?.truncationReason, "page-limit");
+		assert.equal(first.meta.truncated, true);
 		assert.ok(first.meta.page?.nextCursor);
 		assert.equal(first.meta.snapshot?.profileId, profileId);
 		const second = query.queryMessages({ captureId: "analysis-capture", limit: 2, cursor: first.meta.page?.nextCursor });
 		assert.equal(second.data.messages.length, 2);
+		assert.equal(second.meta.page?.effectiveLimit, 2);
+		assert.equal(second.meta.page?.truncationReason, undefined);
+		assert.equal(second.meta.truncated, false);
 		assert.equal(new Set([...first.data.messages, ...second.data.messages].map(message => message.frameId)).size, 4);
 		assert.throws(() => query.queryMessages({ captureId: "analysis-capture", limit: 2, cursor: first.meta.page?.nextCursor, sectionId: "different" }), /filters/);
 		assert.throws(() => query.queryMessages({ captureId: "analysis-capture", wildcardHexPattern: "?? 02" }), error => (error as { code?: string }).code === "wildcard-too-broad");
@@ -60,6 +86,77 @@ test("analysis messages apply bounded filters, stable evidence references, and k
 		assert.equal(context.meta.snapshot?.profileId, profileId);
 		assert.equal(context.data.centerFrameId, firstFrameId);
 		assert.equal(context.data.messages.length, 2);
+	} finally {
+		database.close();
+	}
+});
+
+test("size-bounded message pages binary-search bulky rows and preserve cursor traversal", () => {
+	const { database, profileId } = seedManyFrameAnalysisCapture(200);
+	try {
+		const bulkyBytes = JSON.stringify(Array.from({ length: 256 }, () => 255));
+		database.prepare("UPDATE materialized_frames SET bytes_json = @bytes WHERE profile_id = @profileId").run({ profileId, bytes: bulkyBytes });
+		const query = new CanonicalQueryService(database);
+		let response = query.queryMessages({ captureId: "many-frame-analysis-capture", profileId, limit: 200 });
+		assert.ok(response.data.messages.length > 0);
+		assert.ok(response.data.messages.length < 200);
+		assert.equal(response.meta.page?.effectiveLimit, response.data.messages.length);
+		assert.equal(response.meta.page?.truncationReason, "response-size");
+		assert.equal(response.meta.truncated, true);
+
+		const ordinals: number[] = [];
+		for (let pageNumber = 0; pageNumber < 20; pageNumber += 1) {
+			ordinals.push(...response.data.messages.map(message => message.ordinal));
+			const cursor = response.meta.page?.nextCursor;
+			if (!cursor) {
+				assert.equal(response.meta.truncated, false);
+				assert.equal(response.meta.page?.truncationReason, undefined);
+				break;
+			}
+			response = query.queryMessages({ captureId: "many-frame-analysis-capture", profileId, limit: 200, cursor });
+			if (pageNumber === 19) throw new Error("bulky page traversal did not reach a final page");
+		}
+		assert.deepEqual(ordinals, Array.from({ length: 200 }, (_value, index) => index));
+	} finally {
+		database.close();
+	}
+});
+
+test("size-bounded analysis metadata distinguishes ordinary and final partial pages", () => {
+	const { database, profileId, groupId } = seedAnalysisCapture();
+	try {
+		const query = new CanonicalQueryService(database);
+		const first = query.queryMessages({ captureId: "analysis-capture", profileId, limit: 3 });
+		assert.equal(first.data.messages.length, 3);
+		assert.equal(first.meta.page?.effectiveLimit, 3);
+		assert.equal(first.meta.page?.truncationReason, "page-limit");
+		const final = query.queryMessages({ captureId: "analysis-capture", profileId, limit: 3, cursor: first.meta.page?.nextCursor });
+		assert.equal(final.data.messages.length, 1);
+		assert.equal(final.meta.page?.effectiveLimit, 1);
+		assert.equal(final.meta.page?.truncationReason, undefined);
+		assert.equal(final.meta.truncated, false);
+
+		const groups = query.getSequenceGroups({ captureId: "analysis-capture", profileId, limit: 10 });
+		assert.equal(groups.meta.page?.effectiveLimit, groups.data.groups.length);
+		assert.equal(groups.meta.page?.truncationReason, undefined);
+		const occurrences = query.getSequenceOccurrences({ captureId: "analysis-capture", groupId, profileId, limit: 10 });
+		assert.equal(occurrences.meta.page?.effectiveLimit, occurrences.data.occurrences.length);
+		assert.equal(occurrences.meta.page?.truncationReason, undefined);
+	} finally {
+		database.close();
+	}
+});
+
+test("size-bounded analysis pages reject a single record beyond the hard response limit", () => {
+	const { database, profileId } = seedAnalysisCapture();
+	try {
+		const frame = database.prepare("SELECT id FROM materialized_frames WHERE profile_id = @profileId LIMIT 1").get({ profileId }) as { id: string };
+		database.prepare("UPDATE materialized_frames SET bytes_json = @bytes WHERE id = @id").run({ id: frame.id, bytes: JSON.stringify(Array.from({ length: 50_000 }, () => 255)) });
+		const query = new CanonicalQueryService(database);
+		assert.throws(
+			() => query.queryMessages({ captureId: "analysis-capture", profileId, limit: 200 }),
+			error => (error as { code?: string }).code === "response-too-large"
+		);
 	} finally {
 		database.close();
 	}

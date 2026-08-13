@@ -139,7 +139,7 @@ type AgentResponseArgsBase<T> = {
 	snapshot?: AgentSnapshotReference;
 	truncated?: boolean;
 	suggestedOperations?: AgentSuggestedOperation[];
-};
+	};
 
 type PageableAgentResponseArgs = {
 	requestedLimit: number;

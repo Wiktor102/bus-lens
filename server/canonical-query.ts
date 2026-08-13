@@ -11,6 +11,7 @@ import {
 	makeAgentResponse,
 	stableJson,
 	type AgentCursorPayload,
+	type AgentPageTruncationReason,
 	type AgentResponse,
 	type AgentSnapshotReference
 } from "./agent-contracts.ts";
@@ -750,6 +751,68 @@ function runLength<T>(values: readonly T[], equals: (left: T, right: T) => boole
 	return runs;
 }
 
+type SizeBoundedPageInfo = Readonly<{
+	requestedLimit: number;
+	effectiveLimit: number;
+	truncationReason?: AgentPageTruncationReason;
+}>;
+
+function responseFitsNormalLimit(value: unknown): boolean {
+	try {
+		assertEncodedResponseSize(value);
+		return true;
+	} catch (error) {
+		if (error instanceof AgentQueryError && error.code === "response-too-large") return false;
+		throw error;
+	}
+}
+
+function selectSizeBoundedPage<Row, Response>(
+	rows: readonly Row[],
+	requestedLimit: number,
+	render: (pageRows: readonly Row[], page: SizeBoundedPageInfo) => Response
+): Response {
+	const requestedSize = Math.min(rows.length, requestedLimit);
+	const renderCandidate = (size: number): Response => {
+		const truncationReason: AgentPageTruncationReason | undefined = size < requestedSize
+			? "response-size"
+			: rows.length > size
+				? "page-limit"
+				: undefined;
+		return render(rows.slice(0, size), {
+			requestedLimit,
+			effectiveLimit: size,
+			...(truncationReason ? { truncationReason } : {})
+		});
+	};
+
+	const requestedResponse = renderCandidate(requestedSize);
+	if (responseFitsNormalLimit(requestedResponse)) return requestedResponse;
+	if (requestedSize <= 1) {
+		assertEncodedResponseSize(requestedResponse, true);
+		return requestedResponse;
+	}
+
+	let low = 1;
+	let high = requestedSize - 1;
+	let bestResponse: Response | undefined;
+	while (low <= high) {
+		const candidateSize = Math.floor((low + high + 1) / 2);
+		const candidateResponse = renderCandidate(candidateSize);
+		if (responseFitsNormalLimit(candidateResponse)) {
+			bestResponse = candidateResponse;
+			low = candidateSize + 1;
+		} else {
+			high = candidateSize - 1;
+		}
+	}
+	if (bestResponse !== undefined) return bestResponse;
+
+	const singleResponse = renderCandidate(1);
+	assertEncodedResponseSize(singleResponse, true);
+	return singleResponse;
+}
+
 export class CanonicalQueryService {
 	private readonly database: SqliteDatabase;
 
@@ -1443,9 +1506,7 @@ export class CanonicalQueryService {
 			 ORDER BY ordinal ASC, id ASC
 			 LIMIT @limit`
 		).all(params) as AnalysisFrameRow[];
-		let pageRows = rows.slice(0, limit);
-		let response: AgentResponse<AgentMessageQueryResult>;
-		while (true) {
+		return selectSizeBoundedPage(rows, limit, (pageRows, page) => {
 			const previousTimestamp = pageRows.length ? this.previousFrameTimestamp(profile.id, pageRows[0].ordinal) : null;
 			const messages = this.mapAnalysisMessages(pageRows, previousTimestamp);
 			const hasMore = rows.length > pageRows.length;
@@ -1453,24 +1514,19 @@ export class CanonicalQueryService {
 			const nextCursor = hasMore && last
 				? encodeAgentCursor({ contractVersion: 1, scope: "message-query", filters: filterScope, snapshot, key: { ordinal: last.ordinal, id: last.id } })
 				: undefined;
-			response = makeAgentResponse({
+			return makeAgentResponse({
 				data: { messages },
 				appliedFilters: filterScope,
 				snapshot,
+				requestedLimit: page.requestedLimit,
 				returned: messages.length,
+				effectiveLimit: page.effectiveLimit,
 				nextCursor,
+				truncationReason: page.truncationReason,
 				truncated: hasMore,
 				suggestedOperations: messages.length ? [{ tool: "get_message_context", reason: "Inspect neighboring frames around a selected stable frame", arguments: { frameId: messages[0].frameId } }] : []
 			});
-			try {
-				assertEncodedResponseSize(response);
-				break;
-			} catch (error) {
-				if (!(error instanceof AgentQueryError) || error.code !== "response-too-large" || pageRows.length <= 1) throw error;
-				pageRows = pageRows.slice(0, Math.max(1, Math.floor(pageRows.length / 2)));
-			}
-		}
-		return response;
+		});
 	}
 
 	getMessageContext(input: AgentMessageContextInput): AgentResponse<AgentMessageContext> {
@@ -1606,33 +1662,26 @@ export class CanonicalQueryService {
 			 ORDER BY occurrence_count DESC, id ASC
 			 LIMIT @limit`
 		).all(params) as SequenceGroupRow[];
-		let pageRows = rows.slice(0, limit);
-		let response: AgentResponse<AgentSequenceGroupsResult>;
-		while (true) {
+		return selectSizeBoundedPage(rows, limit, (pageRows, page) => {
 			const groups = pageRows.map(row => this.readSequenceGroupSummary(row, profile.id));
 			const hasMore = rows.length > pageRows.length;
 			const last = pageRows.at(-1);
 			const nextCursor = hasMore && last
 				? encodeAgentCursor({ contractVersion: 1, scope: "sequence-groups", filters: filterScope, snapshot, key: { occurrenceCount: last.occurrence_count, id: last.id } })
 				: undefined;
-			response = makeAgentResponse({
+			return makeAgentResponse({
 				data: { groups },
 				appliedFilters: filterScope,
 				snapshot,
+				requestedLimit: page.requestedLimit,
 				returned: groups.length,
+				effectiveLimit: page.effectiveLimit,
 				nextCursor,
+				truncationReason: page.truncationReason,
 				truncated: hasMore,
 				suggestedOperations: groups.length ? [{ tool: "get_sequence_occurrences", reason: "Inspect the bounded occurrences of a selected repeated sequence", arguments: { captureId, groupId: groups[0].id, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision } }] : []
 			});
-			try {
-				assertEncodedResponseSize(response);
-				break;
-			} catch (error) {
-				if (!(error instanceof AgentQueryError) || error.code !== "response-too-large" || pageRows.length <= 1) throw error;
-				pageRows = pageRows.slice(0, Math.max(1, Math.floor(pageRows.length / 2)));
-			}
-		}
-		return response;
+		});
 	}
 
 	getSequenceOccurrences(input: AgentSequenceOccurrencesInput): AgentResponse<AgentSequenceOccurrencesResult> {
@@ -1675,9 +1724,7 @@ export class CanonicalQueryService {
 			 ORDER BY occurrence_index ASC
 			 LIMIT @limit`
 		).all(params) as SequenceOccurrenceRow[];
-		let pageRows = rows.slice(0, limit);
-		let response: AgentResponse<AgentSequenceOccurrencesResult>;
-		while (true) {
+		return selectSizeBoundedPage(rows, limit, (pageRows, page) => {
 			const occurrences = pageRows.map(row => {
 				const frame = this.database.prepare("SELECT timestamps_json FROM materialized_frames WHERE profile_id = @profileId AND ordinal = @ordinal").get({ profileId: profile.id, ordinal: row.starting_ordinal }) as { timestamps_json: string } | undefined;
 				let context: readonly AgentMessage[] | undefined;
@@ -1704,24 +1751,19 @@ export class CanonicalQueryService {
 			const nextCursor = hasMore && last
 				? encodeAgentCursor({ contractVersion: 1, scope: "sequence-occurrences", filters: filterScope, snapshot, key: { occurrenceNumber: last.occurrence_number, id: groupId } })
 				: undefined;
-			response = makeAgentResponse({
+			return makeAgentResponse({
 				data: { groupId, occurrences },
 				appliedFilters: filterScope,
 				snapshot,
+				requestedLimit: page.requestedLimit,
 				returned: occurrences.length,
+				effectiveLimit: page.effectiveLimit,
 				nextCursor,
+				truncationReason: page.truncationReason,
 				truncated: hasMore,
 				suggestedOperations: occurrences.length ? [{ tool: "get_message_context", reason: "Inspect a frame near this occurrence", arguments: { frameId: occurrences[0].context?.[0]?.frameId } }] : []
 			});
-			try {
-				assertEncodedResponseSize(response);
-				break;
-			} catch (error) {
-				if (!(error instanceof AgentQueryError) || error.code !== "response-too-large" || pageRows.length <= 1) throw error;
-				pageRows = pageRows.slice(0, Math.max(1, Math.floor(pageRows.length / 2)));
-			}
-		}
-		return response;
+		});
 	}
 
 	getByteStatistics(input: AgentByteStatisticsInput): AgentResponse<AgentByteStatisticsResult> {
