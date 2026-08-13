@@ -22,6 +22,7 @@ export const DEFAULT_CAPTURE_DISCOVERY_LIMIT = 20;
 export const MAX_CAPTURE_DISCOVERY_LIMIT = 100;
 export const MAX_CONTEXT_PARAMETER_FILTERS = 64;
 const MAX_BYTE_STATISTICS_COMPARISON_POSITIONS = 1;
+const MAX_TRANSITION_CHANGED_POSITION_SET = 128;
 
 export type CanonicalCaptureStatus = "canonical" | "legacy-not-canonicalized" | "converting" | "canonicalization-failed";
 
@@ -330,17 +331,33 @@ export type AgentTransitionsInput = Readonly<{
 	toSignature?: string;
 	sectionId?: string;
 	changedPositions?: readonly number[];
+	changedPositionMatch?: "all" | "any";
 	minimumCount?: number;
 	cursor?: string;
 	limit?: number;
+}>;
+
+export type AgentTransitionPositionCount = Readonly<{
+	position: number;
+	changedCount: number;
+}>;
+
+export type AgentTransitionPercentage = Readonly<{
+	position: number;
+	percentage: number;
 }>;
 
 export type AgentTransition = Readonly<{
 	fromSignature: string;
 	toSignature: string;
 	count: number;
+	transitionCount: number;
+	requestedPositions: readonly number[];
+	changedPositionCounts: readonly AgentTransitionPositionCount[];
+	changedPercentages: readonly AgentTransitionPercentage[];
 	changedPositions: readonly number[];
 	changedPositionCount: number;
+	changedPositionSetTruncated?: boolean;
 	sectionId?: string;
 }>;
 
@@ -771,6 +788,18 @@ function normalizedSignature(value: unknown, label: string): string | undefined 
 	if (value === undefined) return undefined;
 	const text = requiredText(value, label).toUpperCase().replace(/\s+/g, " ");
 	return text;
+}
+
+function normalizedChangedPositions(value: readonly number[] | undefined): number[] {
+	const positions = value?.map((position, index) => optionalNonNegativeInteger(position, `changedPositions[${index}]`)) ?? [];
+	if (positions.length > 32) throw new AgentQueryError("invalid-input", "At most 32 changed positions may be requested", { maximum: 32 });
+	return [...new Set(positions.filter((position): position is number => position !== undefined))].sort((left, right) => left - right);
+}
+
+function normalizedChangedPositionMatch(value: unknown): "all" | "any" {
+	if (value === undefined || value === "all") return "all";
+	if (value === "any") return "any";
+	throw new AgentQueryError("invalid-input", "changedPositionMatch must be all or any", { value });
 }
 
 function parseWildcardPattern(value: unknown): { pattern: string; tokens: readonly WildcardToken[] } | undefined {
@@ -2092,63 +2121,140 @@ export class CanonicalQueryService {
 		return response;
 	}
 
-	private readComputedTransitions(profileId: string, filters: AgentTransitionsInput): AgentTransition[] {
+	private readIndexedTransitions(profileId: string, filters: AgentTransitionsInput, minimumCount: number): AgentTransition[] {
 		const sourceSignature = normalizedSignature(filters.sourceSignature ?? filters.fromSignature, "sourceSignature");
 		const destinationSignature = normalizedSignature(filters.destinationSignature ?? filters.toSignature, "destinationSignature");
-		const changedPositions = filters.changedPositions?.map((position, index) => optionalNonNegativeInteger(position, `changedPositions[${index}]`) as number) ?? [];
-		if (changedPositions.length > 32) throw new AgentQueryError("invalid-input", "At most 32 changed positions may be requested", { maximum: 32 });
-		if (!sourceSignature && !destinationSignature && (filters.sectionId || changedPositions.length)) {
-			throw new AgentQueryError(
-				"invalid-input",
-				"Section or changed-position transition filters require at least one signature bound; retry with sourceSignature or destinationSignature",
-				{
-					reason: "bounded-transition-scan",
-					missingSignatureAlternatives: ["sourceSignature", "destinationSignature"],
-					suggestedRequest: {
-						captureId: filters.captureId,
-						...(filters.profileId ? { profileId: filters.profileId } : {}),
-						...(filters.profileVersion === undefined ? {} : { profileVersion: filters.profileVersion }),
-						...(filters.sourceDataRevision === undefined ? {} : { sourceDataRevision: filters.sourceDataRevision }),
-						sourceSignature: "<signature from get_capture_overview>",
-						...(filters.sectionId ? { sectionId: filters.sectionId } : {}),
-						...(changedPositions.length ? { changedPositions } : {})
-					}
-				}
-			);
+		const sectionId = filters.sectionId === undefined ? undefined : requiredText(filters.sectionId, "sectionId");
+		const requestedPositions = normalizedChangedPositions(filters.changedPositions);
+		const changedPositionMatch = normalizedChangedPositionMatch(filters.changedPositionMatch);
+
+		const pairClauses = [
+			"source.profile_id = @profileId",
+			"destination.profile_id = @profileId",
+			"destination.ordinal = source.ordinal + 1"
+		];
+		const params: Record<string, unknown> = { profileId };
+		if (sourceSignature) {
+			pairClauses.push("source.signature = @sourceSignature");
+			params.sourceSignature = sourceSignature;
 		}
-		const clauses = ["source.profile_id = @profileId", "destination.profile_id = @profileId", "destination.ordinal = source.ordinal + 1"];
-		const params: Record<string, unknown> = { profileId, limit: 1001 };
-		if (sourceSignature) { clauses.push("source.signature = @sourceSignature"); params.sourceSignature = sourceSignature; }
-		if (destinationSignature) { clauses.push("destination.signature = @destinationSignature"); params.destinationSignature = destinationSignature; }
-		if (filters.sectionId) { clauses.push("source.section_id = @sectionId"); params.sectionId = requiredText(filters.sectionId, "sectionId"); }
+		if (destinationSignature) {
+			pairClauses.push("destination.signature = @destinationSignature");
+			params.destinationSignature = destinationSignature;
+		}
+		if (sectionId) {
+			pairClauses.push("source.section_id = @sectionId");
+			params.sectionId = sectionId;
+		}
+
+		const candidateJoin = requestedPositions.length
+			? `JOIN (
+				SELECT DISTINCT section_id, from_signature, to_signature
+				 FROM frame_transition_positions
+				 WHERE profile_id = @profileId
+				   AND position IN (SELECT CAST(value AS INTEGER) FROM json_each(@requestedPositionsJson))
+				   AND changed_count > 0
+				   ${sectionId ? "AND section_id = @sectionId" : ""}
+				   ${sourceSignature ? "AND from_signature = @sourceSignature" : ""}
+				   ${destinationSignature ? "AND to_signature = @destinationSignature" : ""}
+			 ) AS candidates
+			 ON candidates.section_id = source.section_id
+			AND candidates.from_signature = source.signature
+			AND candidates.to_signature = destination.signature`
+			: "";
+		if (requestedPositions.length) params.requestedPositionsJson = JSON.stringify(requestedPositions);
+
 		const rows = this.database.prepare(
 			`SELECT source.signature AS from_signature, destination.signature AS to_signature,
 			        source.section_id, source.bytes_json AS from_bytes_json, destination.bytes_json AS to_bytes_json
 			 FROM materialized_frames source
-			 JOIN materialized_frames destination ON destination.profile_id = source.profile_id AND destination.ordinal = source.ordinal + 1
-			 WHERE ${clauses.join(" AND ")}
-			 ORDER BY source.signature ASC, destination.signature ASC, source.ordinal ASC
-			 LIMIT @limit`
-		).all(params) as Array<{ from_signature: string; to_signature: string; section_id: string; from_bytes_json: string; to_bytes_json: string }>;
-		if (rows.length > 1000) throw new AgentQueryError("invalid-input", "The refined transition scan is too broad; narrow the signature or section filter", { maximumScannedTransitions: 1000 });
-		const groups = new Map<string, { fromSignature: string; toSignature: string; sectionId: string; count: number; positions: Set<number> }>();
+			 JOIN materialized_frames destination
+			   ON destination.profile_id = source.profile_id AND destination.ordinal = source.ordinal + 1
+			 ${candidateJoin}
+			 WHERE ${pairClauses.join(" AND ")}
+			 ORDER BY source.ordinal ASC`
+		).all(params) as Array<{
+			from_signature: string;
+			to_signature: string;
+			section_id: string;
+			from_bytes_json: string;
+			to_bytes_json: string;
+		}>;
+
+		type TransitionGroup = {
+			fromSignature: string;
+			toSignature: string;
+			sectionId: string;
+			count: number;
+			changedPositions: Set<number>;
+			changedCounts: Map<number, number>;
+		};
+		const groups = new Map<string, TransitionGroup>();
 		for (const row of rows) {
-			const key = `${row.from_signature}\u0000${row.to_signature}\u0000${row.section_id}`;
-			const group = groups.get(key) ?? { fromSignature: row.from_signature, toSignature: row.to_signature, sectionId: row.section_id, count: 0, positions: new Set<number>() };
 			const fromBytes = jsonArray<number>(row.from_bytes_json);
 			const toBytes = jsonArray<number>(row.to_bytes_json);
 			const changed = new Set<number>();
-			for (let index = 0; index < Math.max(fromBytes.length, toBytes.length); index += 1) if (fromBytes[index] !== toBytes[index]) changed.add(index);
-			if (changedPositions.length && !changedPositions.every(position => changed.has(position))) continue;
+			for (let position = 0; position < Math.max(fromBytes.length, toBytes.length); position += 1) {
+				if (fromBytes[position] !== toBytes[position]) changed.add(position);
+			}
+			const matches = requestedPositions.length === 0
+				|| (changedPositionMatch === "any"
+					? requestedPositions.some(position => changed.has(position))
+					: requestedPositions.every(position => changed.has(position)));
+			if (!matches) continue;
+			const key = `${row.section_id}\u0000${row.from_signature}\u0000${row.to_signature}`;
+			const group = groups.get(key) ?? {
+				fromSignature: row.from_signature,
+				toSignature: row.to_signature,
+				sectionId: row.section_id,
+				count: 0,
+				changedPositions: new Set<number>(),
+				changedCounts: new Map<number, number>()
+			};
 			group.count += 1;
-			for (const position of changed) group.positions.add(position);
+			for (const position of changed) {
+				group.changedPositions.add(position);
+				group.changedCounts.set(position, (group.changedCounts.get(position) ?? 0) + 1);
+			}
 			groups.set(key, group);
 		}
-		const minimumCount = filters.minimumCount === undefined ? 1 : boundedLimit(filters.minimumCount, 1, Number.MAX_SAFE_INTEGER, "minimumCount");
+
 		return [...groups.values()]
 			.filter(group => group.count >= minimumCount)
-			.sort((left, right) => right.count - left.count || left.fromSignature.localeCompare(right.fromSignature) || left.toSignature.localeCompare(right.toSignature))
-			.map(group => ({ fromSignature: group.fromSignature, toSignature: group.toSignature, count: group.count, changedPositions: [...group.positions].sort((left, right) => left - right), changedPositionCount: group.positions.size, sectionId: group.sectionId }));
+			.sort((left, right) =>
+				right.count - left.count
+				|| left.fromSignature.localeCompare(right.fromSignature)
+				|| left.toSignature.localeCompare(right.toSignature)
+				|| left.sectionId.localeCompare(right.sectionId)
+			)
+			.map(group => {
+				const allChangedPositions = [...group.changedPositions].sort((left, right) => left - right);
+				const boundedChangedPositions = allChangedPositions.slice(0, MAX_TRANSITION_CHANGED_POSITION_SET);
+				const positionsForCounts = requestedPositions.length
+					? requestedPositions
+					: allChangedPositions.slice(0, MAX_TRANSITION_CHANGED_POSITION_SET);
+				const changedPositionCounts = positionsForCounts.map(position => ({
+					position,
+					changedCount: group.changedCounts.get(position) ?? 0
+				}));
+				const changedPercentages = changedPositionCounts.map(item => ({
+					position: item.position,
+					percentage: group.count ? Math.round((item.changedCount / group.count) * 100) : 0
+				}));
+				return {
+					fromSignature: group.fromSignature,
+					toSignature: group.toSignature,
+					count: group.count,
+					transitionCount: group.count,
+					requestedPositions,
+					changedPositionCounts,
+					changedPercentages,
+					changedPositions: boundedChangedPositions,
+					changedPositionCount: allChangedPositions.length,
+					...(allChangedPositions.length > boundedChangedPositions.length ? { changedPositionSetTruncated: true } : {}),
+					sectionId: group.sectionId
+				};
+			});
 	}
 
 	getTransitions(input: AgentTransitionsInput): AgentResponse<AgentTransitionsResult> {
@@ -2158,47 +2264,126 @@ export class CanonicalQueryService {
 			...(input.profileVersion === undefined ? {} : { profileVersion: optionalNonNegativeInteger(input.profileVersion, "profileVersion") }),
 			...(input.sourceDataRevision === undefined ? {} : { sourceDataRevision: optionalNonNegativeInteger(input.sourceDataRevision, "sourceDataRevision") })
 		};
-		const cursor = input.cursor ? decodeAgentCursor(input.cursor, "transitions", ["count", "fromSignature", "toSignature"]) : undefined;
+		const sourceSignature = normalizedSignature(input.sourceSignature ?? input.fromSignature, "sourceSignature");
+		const destinationSignature = normalizedSignature(input.destinationSignature ?? input.toSignature, "destinationSignature");
+		const sectionId = input.sectionId === undefined ? undefined : requiredText(input.sectionId, "sectionId");
+		const changedPositions = normalizedChangedPositions(input.changedPositions);
+		const changedPositionMatch = normalizedChangedPositionMatch(input.changedPositionMatch);
 		const minimumCount = input.minimumCount === undefined ? 1 : boundedLimit(input.minimumCount, 1, Number.MAX_SAFE_INTEGER, "minimumCount");
-		const hasRefinedFilters = Boolean(input.sectionId || input.changedPositions?.length);
-		if (hasRefinedFilters && cursor) throw new AgentQueryError("invalid-cursor", "Refined transition scans do not support a cursor; narrow the signature or section request", { reason: "refined-transition-cursor" });
+		const hasIndexedFilters = Boolean(sectionId || changedPositions.length);
+		const cursor = input.cursor
+			? decodeAgentCursor(input.cursor, "transitions", hasIndexedFilters ? ["count", "fromSignature", "toSignature", "sectionId"] : ["count", "fromSignature", "toSignature"])
+			: undefined;
+		const cursorFilters = {
+			captureId,
+			requested,
+			sourceSignature,
+			destinationSignature,
+			sectionId,
+			changedPositions,
+			changedPositionMatch,
+			minimumCount
+		};
 		const resolvedRequest = cursor?.snapshot ? { ...cursor.snapshot, ...requested } : requested;
 		const { profile, snapshot } = this.resolveAnalysisProfile(captureId, resolvedRequest);
-		if (cursor && stableJson(cursor.snapshot) !== stableJson(snapshot)) throw new AgentQueryError("invalid-cursor", "The pagination cursor is bound to a different profile revision", { reason: "snapshot-mismatch" });
-		let transitions: AgentTransition[];
-		if (!hasRefinedFilters) {
-			const sourceSignature = normalizedSignature(input.sourceSignature ?? input.fromSignature, "sourceSignature");
-			const destinationSignature = normalizedSignature(input.destinationSignature ?? input.toSignature, "destinationSignature");
-			const clauses = ["profile_id = @profileId", "count >= @minimumCount"];
-			const requestedLimit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT);
-			const params: Record<string, unknown> = { profileId: profile.id, minimumCount, limit: requestedLimit + 1 };
-			if (sourceSignature) { clauses.push("from_signature = @sourceSignature"); params.sourceSignature = sourceSignature; }
-			if (destinationSignature) { clauses.push("to_signature = @destinationSignature"); params.destinationSignature = destinationSignature; }
-			const cursorSql = cursor ? " AND (count < @cursorCount OR (count = @cursorCount AND (from_signature > @cursorFromSignature OR (from_signature = @cursorFromSignature AND to_signature > @cursorToSignature))))" : "";
-			if (cursor) {
-				assertCursorFilters(cursor, { captureId, requested, sourceSignature, destinationSignature, minimumCount }, cursor.snapshot);
-				params.cursorCount = cursor.key.count;
-				params.cursorFromSignature = cursor.key.fromSignature;
-				params.cursorToSignature = cursor.key.toSignature;
-			}
-			const rows = this.database.prepare(
-				`SELECT from_signature, to_signature, count, diffs
-				 FROM frame_transitions WHERE ${clauses.join(" AND ")}${cursorSql}
-				 ORDER BY count DESC, from_signature ASC, to_signature ASC LIMIT @limit`
-			).all(params) as Array<{ from_signature: string; to_signature: string; count: number; diffs: number }>;
-			const pageRows = rows.slice(0, requestedLimit);
-			const hasMore = rows.length > pageRows.length;
-			transitions = pageRows.map(row => ({ fromSignature: row.from_signature, toSignature: row.to_signature, count: row.count, changedPositions: [], changedPositionCount: row.diffs }));
-			const last = pageRows.at(-1);
-			const nextCursor = hasMore && last ? encodeAgentCursor({ contractVersion: 1, scope: "transitions", filters: { captureId, requested, sourceSignature, destinationSignature, minimumCount }, snapshot, key: { count: last.count, fromSignature: last.from_signature, toSignature: last.to_signature } }) : undefined;
-			const response = makeAgentResponse({ data: { transitions }, appliedFilters: { captureId, requested, sourceSignature, destinationSignature, minimumCount }, snapshot, requestedLimit, effectiveLimit: transitions.length, returned: transitions.length, nextCursor, truncationReason: hasMore ? "page-limit" : undefined, truncated: hasMore, suggestedOperations: transitions.length ? [{ tool: "query_messages", reason: "Inspect frames that participate in a selected transition", arguments: { captureId, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision, exactSignature: transitions[0].fromSignature } }] : [] });
-			assertEncodedResponseSize(response);
+		if (cursor) assertCursorFilters(cursor, cursorFilters, cursor.snapshot);
+
+		const requestedLimit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT);
+		if (hasIndexedFilters) {
+			const allTransitions = this.readIndexedTransitions(profile.id, {
+				...input,
+				captureId,
+				...(sourceSignature ? { sourceSignature } : {}),
+				...(destinationSignature ? { destinationSignature } : {}),
+				...(sectionId ? { sectionId } : {}),
+				changedPositions,
+				changedPositionMatch
+			}, minimumCount);
+			const afterCursor = cursor
+				? allTransitions.filter(transition => {
+					const count = Number(cursor.key.count);
+					const from = String(cursor.key.fromSignature ?? "");
+					const to = String(cursor.key.toSignature ?? "");
+					const section = String(cursor.key.sectionId ?? "");
+					return transition.count < count
+						|| (transition.count === count && (
+							transition.fromSignature > from
+							|| (transition.fromSignature === from && (transition.toSignature > to || (transition.toSignature === to && (transition.sectionId ?? "") > section)))
+						));
+				})
+				: allTransitions;
+			const response = selectSizeBoundedPage(afterCursor, requestedLimit, (pageRows, page) => {
+				const last = pageRows.at(-1);
+				const hasMore = afterCursor.length > pageRows.length;
+				const nextCursor = hasMore && last
+					? encodeAgentCursor({
+						contractVersion: 1,
+						scope: "transitions",
+						filters: cursorFilters,
+						snapshot,
+						key: { count: last.count, fromSignature: last.fromSignature, toSignature: last.toSignature, sectionId: last.sectionId ?? null }
+					})
+					: undefined;
+				return makeAgentResponse({
+					data: { transitions: pageRows },
+					appliedFilters: { ...cursorFilters },
+					snapshot,
+					requestedLimit: page.requestedLimit,
+					effectiveLimit: page.effectiveLimit,
+					returned: pageRows.length,
+					nextCursor,
+					truncationReason: page.truncationReason,
+					truncated: Boolean(page.truncationReason),
+					suggestedOperations: pageRows.length ? [{ tool: "query_messages", reason: "Inspect frames that participate in a selected transition", arguments: { captureId, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision, exactSignature: pageRows[0].fromSignature } }] : []
+				});
+			});
 			return response;
 		}
-		const refinedLimit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT);
-		transitions = this.readComputedTransitions(profile.id, input);
-		if (transitions.length > refinedLimit) throw new AgentQueryError("response-too-large", "The refined transition result is larger than one bounded page; narrow the signature or changed-position request", { returned: transitions.length, limit: refinedLimit });
-		const response = makeAgentResponse({ data: { transitions }, appliedFilters: { captureId, requested, minimumCount, sectionId: input.sectionId, changedPositions: input.changedPositions ?? [] }, snapshot, requestedLimit: refinedLimit, effectiveLimit: transitions.length, returned: transitions.length, truncated: false, suggestedOperations: transitions.length ? [{ tool: "query_messages", reason: "Inspect one side of a selected transition", arguments: { captureId, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision, exactSignature: transitions[0].fromSignature } }] : [] });
+
+		const clauses = ["profile_id = @profileId", "count >= @minimumCount"];
+		const params: Record<string, unknown> = { profileId: profile.id, minimumCount, limit: requestedLimit + 1 };
+		if (sourceSignature) { clauses.push("from_signature = @sourceSignature"); params.sourceSignature = sourceSignature; }
+		if (destinationSignature) { clauses.push("to_signature = @destinationSignature"); params.destinationSignature = destinationSignature; }
+		const cursorSql = cursor ? " AND (count < @cursorCount OR (count = @cursorCount AND (from_signature > @cursorFromSignature OR (from_signature = @cursorFromSignature AND to_signature > @cursorToSignature))))" : "";
+		if (cursor) {
+			params.cursorCount = cursor.key.count;
+			params.cursorFromSignature = cursor.key.fromSignature;
+			params.cursorToSignature = cursor.key.toSignature;
+		}
+		const rows = this.database.prepare(
+			`SELECT from_signature, to_signature, count, diffs
+			 FROM frame_transitions WHERE ${clauses.join(" AND ")}${cursorSql}
+			 ORDER BY count DESC, from_signature ASC, to_signature ASC LIMIT @limit`
+		).all(params) as Array<{ from_signature: string; to_signature: string; count: number; diffs: number }>;
+		const pageRows = rows.slice(0, requestedLimit);
+		const hasMore = rows.length > pageRows.length;
+		const transitions = pageRows.map(row => ({
+			fromSignature: row.from_signature,
+			toSignature: row.to_signature,
+			count: row.count,
+			transitionCount: row.count,
+			requestedPositions: [],
+			changedPositionCounts: [],
+			changedPercentages: [],
+			changedPositions: [],
+			changedPositionCount: row.diffs
+		}));
+		const last = pageRows.at(-1);
+		const nextCursor = hasMore && last
+			? encodeAgentCursor({ contractVersion: 1, scope: "transitions", filters: cursorFilters, snapshot, key: { count: last.count, fromSignature: last.from_signature, toSignature: last.to_signature } })
+			: undefined;
+		const response = makeAgentResponse({
+			data: { transitions },
+			appliedFilters: { ...cursorFilters },
+			snapshot,
+			requestedLimit,
+			effectiveLimit: transitions.length,
+			returned: transitions.length,
+			nextCursor,
+			truncationReason: hasMore ? "page-limit" : undefined,
+			truncated: hasMore,
+			suggestedOperations: transitions.length ? [{ tool: "query_messages", reason: "Inspect frames that participate in a selected transition", arguments: { captureId, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision, exactSignature: transitions[0].fromSignature } }] : []
+		});
 		assertEncodedResponseSize(response);
 		return response;
 	}

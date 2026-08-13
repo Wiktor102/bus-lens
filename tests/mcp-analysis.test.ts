@@ -100,19 +100,12 @@ test("get_transitions publishes and enforces aggregate/refined query constraints
 
 		const listResponse = await modernCall(baseUrl, "tools/list", {});
 		assert.equal(listResponse.status, 200);
-		const listBody = await listResponse.json() as { result: { tools: Array<{ name: string; description?: string; inputSchema: { anyOf?: Array<{ properties?: Record<string, { not?: unknown }>; required?: string[] }> } }> } };
+		const listBody = await listResponse.json() as { result: { tools: Array<{ name: string; description?: string; inputSchema: { type?: string; properties?: Record<string, { enum?: unknown[] }> } }> } };
 		const transitionsTool = listBody.result.tools.find(tool => tool.name === "get_transitions");
 		assert.ok(transitionsTool);
-		assert.match(transitionsTool.description ?? "", /1,000 transitions/);
-		const branches = transitionsTool.inputSchema.anyOf ?? [];
-		assert.ok(branches.length >= 5);
-		assert.ok(branches.some(branch => branch.required?.includes("sectionId") && branch.required?.includes("sourceSignature")));
-		assert.ok(branches.some(branch => branch.required?.includes("sectionId") && branch.required?.includes("destinationSignature")));
-		assert.ok(branches.some(branch => branch.required?.includes("changedPositions") && branch.required?.includes("sourceSignature")));
-		assert.ok(branches.some(branch => branch.required?.includes("changedPositions") && branch.required?.includes("destinationSignature")));
-		const aggregateBranch = branches.find(branch => branch.properties?.sectionId?.not !== undefined);
-		assert.ok(aggregateBranch?.properties?.changedPositions?.not !== undefined);
-		assert.ok(branches.filter(branch => branch.required?.includes("sectionId") || branch.required?.includes("changedPositions")).every(branch => branch.properties?.cursor?.not !== undefined));
+		assert.equal(transitionsTool.inputSchema.type, "object");
+		assert.match(transitionsTool.description ?? "", /position-only and section-only/i);
+		assert.deepEqual(transitionsTool.inputSchema.properties?.changedPositionMatch?.enum, ["all", "any"]);
 
 		const callTool = async (argumentsValue: Record<string, unknown>, id: number): Promise<ToolCallBody> => {
 			const response = await modernCall(baseUrl, "tools/call", { name: "get_transitions", arguments: argumentsValue }, id);
@@ -125,9 +118,9 @@ test("get_transitions publishes and enforces aggregate/refined query constraints
 			assert.match(body.result?.content?.map(item => item.text ?? "").join(" ") ?? "", pattern);
 		};
 
-		await assertValidationFailure({ captureId: "mcp-transition-capture", changedPositions: [0] }, /sourceSignature|destinationSignature/, 2);
-		await assertValidationFailure({ captureId: "mcp-transition-capture", sectionId }, /sourceSignature|destinationSignature/, 3);
 		for (const [argumentsValue, id] of [
+			[{ captureId: "mcp-transition-capture", changedPositions: [0] }, 2],
+			[{ captureId: "mcp-transition-capture", sectionId }, 3],
 			[{ captureId: "mcp-transition-capture", sectionId, sourceSignature }, 4],
 			[{ captureId: "mcp-transition-capture", sectionId, destinationSignature }, 5],
 			[{ captureId: "mcp-transition-capture", sectionId, sourceSignature, destinationSignature }, 6]
@@ -136,7 +129,7 @@ test("get_transitions publishes and enforces aggregate/refined query constraints
 			assert.notEqual(body.result?.isError, true);
 			assert.ok(body.result?.structuredContent?.data?.transitions);
 		}
-		await assertValidationFailure({ captureId: "mcp-transition-capture", sectionId, sourceSignature, cursor: "opaque-cursor" }, /cursor/i, 7);
+		await assertValidationFailure({ captureId: "mcp-transition-capture", sectionId, changedPositions: [0], changedPositionMatch: "invalid" }, /invalid/i, 7);
 	} finally {
 		await service.close();
 		await rm(directory, { recursive: true, force: true });

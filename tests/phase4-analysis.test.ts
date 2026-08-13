@@ -303,16 +303,11 @@ test("analysis groups, occurrences, statistics, transitions, and raw reads remai
 		const transitions = query.getTransitions({ captureId: "analysis-capture", profileId, minimumCount: 1 });
 		assert.ok(transitions.data.transitions.length);
 		const sectionId = (database.prepare("SELECT section_id FROM materialized_frames WHERE profile_id = @profileId ORDER BY ordinal LIMIT 1").get({ profileId }) as { section_id: string }).section_id;
-		assert.throws(
-			() => query.getTransitions({ captureId: "analysis-capture", profileId, sectionId }),
-			error => {
-				const typed = error as { code?: string; details?: Record<string, unknown> };
-				assert.equal(typed.code, "invalid-input");
-				assert.deepEqual(typed.details?.missingSignatureAlternatives, ["sourceSignature", "destinationSignature"]);
-				assert.equal((typed.details?.suggestedRequest as { sourceSignature?: string } | undefined)?.sourceSignature, "<signature from get_capture_overview>");
-				return true;
-			}
-		);
+		const sectionOnly = query.getTransitions({ captureId: "analysis-capture", profileId, sectionId });
+		assert.ok(sectionOnly.data.transitions.length);
+		assert.ok(sectionOnly.data.transitions.every(transition => transition.sectionId === sectionId));
+		const positionOnly = query.getTransitions({ captureId: "analysis-capture", profileId, changedPositions: [0] });
+		assert.ok(positionOnly.data.transitions.length);
 		const aliasRefined = query.getTransitions({ captureId: "analysis-capture", profileId, sectionId, fromSignature: transitions.data.transitions[0]!.fromSignature });
 		assert.ok(aliasRefined.data.transitions.length);
 		const snapshot = query.queryCaptureOverview("analysis-capture").meta.snapshot;
