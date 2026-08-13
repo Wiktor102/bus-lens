@@ -43,6 +43,13 @@ export function deriveTransitionPositionAggregates(
 		const from = frames[index - 1];
 		const to = frames[index];
 		if (!from || !to) continue;
+		const width = Math.max(from.bytes.length, to.bytes.length);
+		const changedCounts = new Map<number, number>();
+		for (let position = 0; position < width; position += 1) {
+			if (from.bytes[position] === to.bytes[position]) continue;
+			changedCounts.set(position, 1);
+		}
+		if (!changedCounts.size) continue;
 		const key = familyKey(from.sectionId, from.signature, to.signature);
 		const family = families.get(key) ?? {
 			sectionId: from.sectionId,
@@ -52,9 +59,7 @@ export function deriveTransitionPositionAggregates(
 			changedCounts: new Map<number, number>()
 		};
 		family.transitionCount += 1;
-		const width = Math.max(from.bytes.length, to.bytes.length);
-		for (let position = 0; position < width; position += 1) {
-			if (from.bytes[position] === to.bytes[position]) continue;
+		for (const position of changedCounts.keys()) {
 			family.changedCounts.set(position, (family.changedCounts.get(position) ?? 0) + 1);
 		}
 		families.set(key, family);

@@ -66,19 +66,26 @@ export function deriveAnalysisStatistics(frames: readonly AnalysisFrame[]): Anal
 			};
 		});
 	});
-	const transitionCounts = new Map<string, number>();
-	signatures.slice(1).forEach((to, index) => {
-		const from = signatures[index];
-		if (from !== to) transitionCounts.set(`${from}|${to}`, (transitionCounts.get(`${from}|${to}`) || 0) + 1);
-	});
+	const transitionCounts = new Map<string, { from: string; to: string; count: number; diffs: number }>();
+	for (let index = 1; index < frames.length; index += 1) {
+		const from = frames[index - 1];
+		const to = frames[index];
+		if (!from || !to) continue;
+		const width = Math.max(from.bytes.length, to.bytes.length);
+		let diffs = 0;
+		for (let position = 0; position < width; position += 1) {
+			if (from.bytes[position] !== to.bytes[position]) diffs += 1;
+		}
+		if (diffs === 0) continue;
+		const key = `${from.signature}\u0000${to.signature}`;
+		const family = transitionCounts.get(key) ?? { from: from.signature, to: to.signature, count: 0, diffs };
+		family.count += 1;
+		transitionCounts.set(key, family);
+	}
 	const transitions = [...transitionCounts.entries()]
-		.sort((a, b) => b[1] - a[1])
+		.sort((a, b) => b[1].count - a[1].count)
 		.slice(0, 12)
-		.map(([key, count]) => {
-			const [from, to] = key.split("|");
-			const diffs = from.split(" ").filter((value, index) => value !== to.split(" ")[index]).length;
-			return { from, to, count, diffs };
-		});
+		.map(([, family]) => family);
 	return { signatures: signatureCounts, vocabulary, bitVariance, transitions };
 }
 

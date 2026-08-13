@@ -2121,64 +2121,132 @@ export class CanonicalQueryService {
 		return response;
 	}
 
-	private readIndexedTransitions(profileId: string, filters: AgentTransitionsInput, minimumCount: number): AgentTransition[] {
+	private readIndexedTransitions(
+		profileId: string,
+		filters: AgentTransitionsInput,
+		minimumCount: number,
+		requestedLimit: number,
+		cursor?: AgentCursorPayload
+	): AgentTransition[] {
 		const sourceSignature = normalizedSignature(filters.sourceSignature ?? filters.fromSignature, "sourceSignature");
 		const destinationSignature = normalizedSignature(filters.destinationSignature ?? filters.toSignature, "destinationSignature");
 		const sectionId = filters.sectionId === undefined ? undefined : requiredText(filters.sectionId, "sectionId");
 		const requestedPositions = normalizedChangedPositions(filters.changedPositions);
 		const changedPositionMatch = normalizedChangedPositionMatch(filters.changedPositionMatch);
-
-		const pairClauses = [
-			"source.profile_id = @profileId",
-			"destination.profile_id = @profileId",
-			"destination.ordinal = source.ordinal + 1"
-		];
-		const params: Record<string, unknown> = { profileId };
+		const positionClauses = ["profile_id = @profileId"];
+		const params: Record<string, unknown> = {
+			profileId,
+			minimumCount,
+			familyLimit: requestedLimit + 1,
+			maxChangedPositions: MAX_TRANSITION_CHANGED_POSITION_SET,
+			requestedPositionCount: requestedPositions.length
+		};
 		if (sourceSignature) {
-			pairClauses.push("source.signature = @sourceSignature");
+			positionClauses.push("from_signature = @sourceSignature");
 			params.sourceSignature = sourceSignature;
 		}
 		if (destinationSignature) {
-			pairClauses.push("destination.signature = @destinationSignature");
+			positionClauses.push("to_signature = @destinationSignature");
 			params.destinationSignature = destinationSignature;
 		}
 		if (sectionId) {
-			pairClauses.push("source.section_id = @sectionId");
+			positionClauses.push("section_id = @sectionId");
 			params.sectionId = sectionId;
 		}
-
-		const candidateJoin = requestedPositions.length
-			? `JOIN (
-				SELECT DISTINCT section_id, from_signature, to_signature
-				 FROM frame_transition_positions
-				 WHERE profile_id = @profileId
-				   AND position IN (SELECT CAST(value AS INTEGER) FROM json_each(@requestedPositionsJson))
-				   AND changed_count > 0
-				   ${sectionId ? "AND section_id = @sectionId" : ""}
-				   ${sourceSignature ? "AND from_signature = @sourceSignature" : ""}
-				   ${destinationSignature ? "AND to_signature = @destinationSignature" : ""}
-			 ) AS candidates
-			 ON candidates.section_id = source.section_id
-			AND candidates.from_signature = source.signature
-			AND candidates.to_signature = destination.signature`
-			: "";
 		if (requestedPositions.length) params.requestedPositionsJson = JSON.stringify(requestedPositions);
+		if (cursor) {
+			params.cursorCount = cursor.key.count;
+			params.cursorFromSignature = cursor.key.fromSignature;
+			params.cursorToSignature = cursor.key.toSignature;
+			params.cursorSectionId = cursor.key.sectionId;
+		}
 
+		const requestedPositionSet = requestedPositions.length
+			? "position IN (SELECT CAST(value AS INTEGER) FROM json_each(@requestedPositionsJson))"
+			: "0";
+		const matchingCte = requestedPositions.length
+			? `,
+		matching_families AS (
+			SELECT section_id, from_signature, to_signature
+			FROM position_rows
+			GROUP BY section_id, from_signature, to_signature
+			HAVING COUNT(DISTINCT CASE WHEN ${requestedPositionSet} THEN position END) ${changedPositionMatch === "all" ? "= @requestedPositionCount" : "> 0"}
+		)`
+			: "";
+		const matchingJoin = requestedPositions.length
+			? `JOIN matching_families matches
+				ON matches.section_id = stats.section_id
+			   AND matches.from_signature = stats.from_signature
+			   AND matches.to_signature = stats.to_signature`
+			: "";
+		const cursorSql = cursor
+			? `AND (
+				stats.transition_count < @cursorCount
+				OR (stats.transition_count = @cursorCount AND (
+					stats.from_signature > @cursorFromSignature
+					OR (stats.from_signature = @cursorFromSignature AND (
+						stats.to_signature > @cursorToSignature
+						OR (stats.to_signature = @cursorToSignature AND stats.section_id > @cursorSectionId)
+					))
+				))
+			)`
+			: "";
+		const positionSelection = requestedPositions.length
+			? `ranked.position_rank <= @maxChangedPositions OR ranked.position IN (SELECT CAST(value AS INTEGER) FROM json_each(@requestedPositionsJson))`
+			: "ranked.position_rank <= @maxChangedPositions";
 		const rows = this.database.prepare(
-			`SELECT source.signature AS from_signature, destination.signature AS to_signature,
-			        source.section_id, source.bytes_json AS from_bytes_json, destination.bytes_json AS to_bytes_json
-			 FROM materialized_frames source
-			 JOIN materialized_frames destination
-			   ON destination.profile_id = source.profile_id AND destination.ordinal = source.ordinal + 1
-			 ${candidateJoin}
-			 WHERE ${pairClauses.join(" AND ")}
-			 ORDER BY source.ordinal ASC`
+			`WITH position_rows AS (
+				SELECT section_id, from_signature, to_signature, position, changed_count, transition_count
+				FROM frame_transition_positions
+				WHERE ${positionClauses.join(" AND ")}
+			), family_stats AS (
+				SELECT section_id, from_signature, to_signature,
+				       MAX(transition_count) AS transition_count,
+				       COUNT(*) AS changed_position_count
+				FROM position_rows
+				GROUP BY section_id, from_signature, to_signature
+			)${matchingCte}, top_families AS (
+				SELECT stats.section_id, stats.from_signature, stats.to_signature,
+				       stats.transition_count, stats.changed_position_count
+				FROM family_stats stats
+				${matchingJoin}
+				WHERE stats.transition_count >= @minimumCount
+				${cursorSql}
+				ORDER BY stats.transition_count DESC, stats.from_signature ASC, stats.to_signature ASC, stats.section_id ASC
+				LIMIT @familyLimit
+			), ranked_positions AS (
+				SELECT positions.section_id, positions.from_signature, positions.to_signature,
+				       positions.position, positions.changed_count,
+				       ROW_NUMBER() OVER (
+					       PARTITION BY positions.section_id, positions.from_signature, positions.to_signature
+					       ORDER BY positions.position ASC
+				       ) AS position_rank
+				FROM position_rows positions
+				JOIN top_families families
+				  ON families.section_id = positions.section_id
+				 AND families.from_signature = positions.from_signature
+				 AND families.to_signature = positions.to_signature
+			)
+			SELECT families.section_id, families.from_signature, families.to_signature,
+			       families.transition_count, families.changed_position_count,
+			       ranked.position, ranked.changed_count, ranked.position_rank
+			FROM top_families families
+			LEFT JOIN ranked_positions ranked
+			  ON ranked.section_id = families.section_id
+			 AND ranked.from_signature = families.from_signature
+			 AND ranked.to_signature = families.to_signature
+			 AND (${positionSelection})
+			ORDER BY families.transition_count DESC, families.from_signature ASC, families.to_signature ASC,
+			         families.section_id ASC, ranked.position ASC`
 		).all(params) as Array<{
+			section_id: string;
 			from_signature: string;
 			to_signature: string;
-			section_id: string;
-			from_bytes_json: string;
-			to_bytes_json: string;
+			transition_count: number;
+			changed_position_count: number;
+			position: number | null;
+			changed_count: number | null;
+			position_rank: number | null;
 		}>;
 
 		type TransitionGroup = {
@@ -2186,75 +2254,58 @@ export class CanonicalQueryService {
 			toSignature: string;
 			sectionId: string;
 			count: number;
-			changedPositions: Set<number>;
+			changedPositionCount: number;
+			boundedChangedPositions: Set<number>;
 			changedCounts: Map<number, number>;
 		};
 		const groups = new Map<string, TransitionGroup>();
 		for (const row of rows) {
-			const fromBytes = jsonArray<number>(row.from_bytes_json);
-			const toBytes = jsonArray<number>(row.to_bytes_json);
-			const changed = new Set<number>();
-			for (let position = 0; position < Math.max(fromBytes.length, toBytes.length); position += 1) {
-				if (fromBytes[position] !== toBytes[position]) changed.add(position);
-			}
-			const matches = requestedPositions.length === 0
-				|| (changedPositionMatch === "any"
-					? requestedPositions.some(position => changed.has(position))
-					: requestedPositions.every(position => changed.has(position)));
-			if (!matches) continue;
 			const key = `${row.section_id}\u0000${row.from_signature}\u0000${row.to_signature}`;
 			const group = groups.get(key) ?? {
 				fromSignature: row.from_signature,
 				toSignature: row.to_signature,
 				sectionId: row.section_id,
-				count: 0,
-				changedPositions: new Set<number>(),
+				count: row.transition_count,
+				changedPositionCount: row.changed_position_count,
+				boundedChangedPositions: new Set<number>(),
 				changedCounts: new Map<number, number>()
 			};
-			group.count += 1;
-			for (const position of changed) {
-				group.changedPositions.add(position);
-				group.changedCounts.set(position, (group.changedCounts.get(position) ?? 0) + 1);
+			if (row.position !== null) {
+				group.changedCounts.set(row.position, row.changed_count ?? 0);
+				if ((row.position_rank ?? MAX_TRANSITION_CHANGED_POSITION_SET + 1) <= MAX_TRANSITION_CHANGED_POSITION_SET) {
+					group.boundedChangedPositions.add(row.position);
+				}
 			}
 			groups.set(key, group);
 		}
 
-		return [...groups.values()]
-			.filter(group => group.count >= minimumCount)
-			.sort((left, right) =>
-				right.count - left.count
-				|| left.fromSignature.localeCompare(right.fromSignature)
-				|| left.toSignature.localeCompare(right.toSignature)
-				|| left.sectionId.localeCompare(right.sectionId)
-			)
-			.map(group => {
-				const allChangedPositions = [...group.changedPositions].sort((left, right) => left - right);
-				const boundedChangedPositions = allChangedPositions.slice(0, MAX_TRANSITION_CHANGED_POSITION_SET);
-				const positionsForCounts = requestedPositions.length
-					? requestedPositions
-					: allChangedPositions.slice(0, MAX_TRANSITION_CHANGED_POSITION_SET);
-				const changedPositionCounts = positionsForCounts.map(position => ({
-					position,
-					changedCount: group.changedCounts.get(position) ?? 0
-				}));
-				const changedPercentages = changedPositionCounts.map(item => ({
-					position: item.position,
-					percentage: group.count ? Math.round((item.changedCount / group.count) * 100) : 0
-				}));
-				return {
-					fromSignature: group.fromSignature,
-					toSignature: group.toSignature,
-					count: group.count,
-					transitionCount: group.count,
-					requestedPositions,
-					changedPositionCounts,
-					changedPercentages,
-					changedPositions: boundedChangedPositions,
-					changedPositionCount: allChangedPositions.length,
-					...(allChangedPositions.length > boundedChangedPositions.length ? { changedPositionSetTruncated: true } : {}),
-					sectionId: group.sectionId
-				};
-			});
+		return [...groups.values()].map(group => {
+			const boundedChangedPositions = [...group.boundedChangedPositions].sort((left, right) => left - right);
+			const positionsForCounts = requestedPositions.length
+				? requestedPositions
+				: boundedChangedPositions;
+			const changedPositionCounts = positionsForCounts.map(position => ({
+				position,
+				changedCount: group.changedCounts.get(position) ?? 0
+			}));
+			const changedPercentages = changedPositionCounts.map(item => ({
+				position: item.position,
+				percentage: group.count ? Math.round((item.changedCount / group.count) * 100) : 0
+			}));
+			return {
+				fromSignature: group.fromSignature,
+				toSignature: group.toSignature,
+				count: group.count,
+				transitionCount: group.count,
+				requestedPositions,
+				changedPositionCounts,
+				changedPercentages,
+				changedPositions: boundedChangedPositions,
+				changedPositionCount: group.changedPositionCount,
+				...(group.changedPositionCount > boundedChangedPositions.length ? { changedPositionSetTruncated: true } : {}),
+				sectionId: group.sectionId
+			};
+		});
 	}
 
 	getTransitions(input: AgentTransitionsInput): AgentResponse<AgentTransitionsResult> {
@@ -2276,7 +2327,6 @@ export class CanonicalQueryService {
 			: undefined;
 		const cursorFilters = {
 			captureId,
-			requested,
 			sourceSignature,
 			destinationSignature,
 			sectionId,
@@ -2284,13 +2334,27 @@ export class CanonicalQueryService {
 			changedPositionMatch,
 			minimumCount
 		};
+		const appliedFilters = { ...cursorFilters, requested };
+		if (cursor?.snapshot) {
+			for (const field of ["profileId", "profileVersion", "sourceDataRevision"] as const) {
+				const requestedValue = requested[field];
+				if (requestedValue !== undefined && requestedValue !== cursor.snapshot[field]) {
+					throw new AgentQueryError("invalid-cursor", "The pagination cursor is bound to a different profile revision", { reason: "snapshot-mismatch", field });
+				}
+			}
+		}
 		const resolvedRequest = cursor?.snapshot ? { ...cursor.snapshot, ...requested } : requested;
 		const { profile, snapshot } = this.resolveAnalysisProfile(captureId, resolvedRequest);
-		if (cursor) assertCursorFilters(cursor, cursorFilters, cursor.snapshot);
+		if (cursor) {
+			assertCursorFilters(cursor, cursorFilters, cursor.snapshot);
+			if (stableJson(cursor.snapshot) !== stableJson(snapshot)) {
+				throw new AgentQueryError("invalid-cursor", "The pagination cursor is bound to a different profile revision", { reason: "snapshot-mismatch" });
+			}
+		}
 
 		const requestedLimit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT);
 		if (hasIndexedFilters) {
-			const allTransitions = this.readIndexedTransitions(profile.id, {
+			const pageTransitions = this.readIndexedTransitions(profile.id, {
 				...input,
 				captureId,
 				...(sourceSignature ? { sourceSignature } : {}),
@@ -2298,23 +2362,10 @@ export class CanonicalQueryService {
 				...(sectionId ? { sectionId } : {}),
 				changedPositions,
 				changedPositionMatch
-			}, minimumCount);
-			const afterCursor = cursor
-				? allTransitions.filter(transition => {
-					const count = Number(cursor.key.count);
-					const from = String(cursor.key.fromSignature ?? "");
-					const to = String(cursor.key.toSignature ?? "");
-					const section = String(cursor.key.sectionId ?? "");
-					return transition.count < count
-						|| (transition.count === count && (
-							transition.fromSignature > from
-							|| (transition.fromSignature === from && (transition.toSignature > to || (transition.toSignature === to && (transition.sectionId ?? "") > section)))
-						));
-				})
-				: allTransitions;
-			const response = selectSizeBoundedPage(afterCursor, requestedLimit, (pageRows, page) => {
+			}, minimumCount, requestedLimit, cursor);
+			const response = selectSizeBoundedPage(pageTransitions, requestedLimit, (pageRows, page) => {
 				const last = pageRows.at(-1);
-				const hasMore = afterCursor.length > pageRows.length;
+				const hasMore = pageTransitions.length > pageRows.length;
 				const nextCursor = hasMore && last
 					? encodeAgentCursor({
 						contractVersion: 1,
@@ -2326,7 +2377,7 @@ export class CanonicalQueryService {
 					: undefined;
 				return makeAgentResponse({
 					data: { transitions: pageRows },
-					appliedFilters: { ...cursorFilters },
+					appliedFilters,
 					snapshot,
 					requestedLimit: page.requestedLimit,
 					effectiveLimit: page.effectiveLimit,
@@ -2374,7 +2425,7 @@ export class CanonicalQueryService {
 			: undefined;
 		const response = makeAgentResponse({
 			data: { transitions },
-			appliedFilters: { ...cursorFilters },
+			appliedFilters,
 			snapshot,
 			requestedLimit,
 			effectiveLimit: transitions.length,

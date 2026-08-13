@@ -4,7 +4,7 @@ import Database from "better-sqlite3";
 import { deriveTransitionPositionAggregates } from "./transition-positions.ts";
 
 export type SqliteDatabase = InstanceType<typeof Database>;
-export const CURRENT_SCHEMA_VERSION = 12;
+export const CURRENT_SCHEMA_VERSION = 13;
 
 type Migration = {
 	version: number;
@@ -934,6 +934,60 @@ const migrations: Migration[] = [
 						bytes: JSON.parse(frame.bytes_json) as number[]
 					}));
 					for (const row of deriveTransitionPositionAggregates(frames)) insert.run({ profileId: profile.id, ...row });
+				}
+			}
+		},
+		{
+			version: 13,
+			up: database => {
+				// Rebuild transition position evidence after changing byte-diff semantics:
+				// identical pairs are not transitions, and a missing byte is a change.
+				// Updating frame_transitions from the rebuilt position rows repairs legacy
+				// aggregate diffs without inferring them from signature token counts.
+				database.exec("DELETE FROM frame_transition_positions");
+				const profiles = database
+					.prepare("SELECT id FROM framing_profiles ORDER BY id")
+					.all() as Array<{ id: string }>;
+				const readFrames = database.prepare(
+					`SELECT ordinal, section_id, signature, bytes_json
+					 FROM materialized_frames WHERE profile_id = @profileId ORDER BY ordinal`
+				);
+				const insertPosition = database.prepare(
+					`INSERT INTO frame_transition_positions
+					 (profile_id, section_id, from_signature, to_signature, position, changed_count, transition_count)
+					 VALUES (@profileId, @sectionId, @fromSignature, @toSignature, @position, @changedCount, @transitionCount)`
+				);
+				for (const profile of profiles) {
+					const frames = (readFrames.all({ profileId: profile.id }) as Array<{
+						ordinal: number;
+						section_id: string;
+						signature: string;
+						bytes_json: string;
+					}>).map(frame => ({
+						ordinal: frame.ordinal,
+						sectionId: frame.section_id,
+						signature: frame.signature,
+						bytes: JSON.parse(frame.bytes_json) as number[]
+					}));
+					for (const row of deriveTransitionPositionAggregates(frames)) insertPosition.run({ profileId: profile.id, ...row });
+				}
+
+				const hasFrameTransitions = Boolean(database
+					.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'frame_transitions'")
+					.get());
+				if (hasFrameTransitions) {
+					const updateDiffs = database.prepare(
+						`UPDATE frame_transitions
+						 SET diffs = (
+							 SELECT COUNT(DISTINCT position)
+							 FROM frame_transition_positions positions
+							 WHERE positions.profile_id = frame_transitions.profile_id
+							   AND positions.from_signature = frame_transitions.from_signature
+							   AND positions.to_signature = frame_transitions.to_signature
+						 )
+						 WHERE profile_id = @profileId`
+					);
+					for (const profile of profiles) updateDiffs.run({ profileId: profile.id });
 				}
 			}
 		}
