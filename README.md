@@ -41,6 +41,16 @@ send, transport, notes, dialogs, and data-transfer modules, and `src/shared/`
 contains cross-feature state and utilities. React components live at the UI
 feature boundary; controllers and domain modules remain DOM-free.
 
+## Agent query pagination
+
+Agent query `limit` values are maximums, not guaranteed page sizes. Each pageable
+response reports the validated `requestedLimit`, the `effectiveLimit` used for
+that response, and the actual `returned` count. When more matching evidence is
+available, `meta.truncated` is true; `meta.page.truncationReason` distinguishes
+a reached `page-limit` from a response-size reduction. Cursors remain bound to
+their evidence filters and snapshots, not to page size, so callers may change
+`limit` while continuing with an existing cursor.
+
 ## Capture framing
 
 The serial input is a raw binary stream, compatible with ESP32 `Serial.write()`.

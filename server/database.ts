@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 
 export type SqliteDatabase = InstanceType<typeof Database>;
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 11;
 
 type Migration = {
 	version: number;
@@ -665,6 +665,221 @@ const migrations: Migration[] = [
 						data_revision
 					);
 			`);
+		}
+	},
+	{
+		version: 7,
+		up: database => {
+			// Agent reads use keyset ordering and explicit profile revisions. These
+			// indexes keep discovery, frame paging, and analytical summaries bounded
+			// without changing the existing complete-capture UI paths.
+			const tables = new Set(
+				(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(row => row.name)
+			);
+			const indexes: Array<[string, string, string]> = [
+				["captures_agent_discovery", "captures", "updated_at DESC, id ASC"],
+				["captures_agent_filters", "captures", "lifecycle, created_at, updated_at DESC, id ASC"],
+				["capture_storage_agent_discovery", "capture_storage", "status, updated_at DESC, capture_id ASC"],
+				["capture_parameters_agent_filter", "capture_parameters", "capture_id, key_text, value_text"],
+				["framing_profiles_agent_revision", "framing_profiles", "capture_id, version, id"],
+				["materialized_frames_agent_ordinal", "materialized_frames", "profile_id, ordinal, id"],
+				["frame_signatures_agent_count", "frame_signatures", "profile_id, count DESC, signature ASC"],
+				["frame_transitions_agent_count", "frame_transitions", "profile_id, count DESC, from_signature, to_signature"],
+				["sequence_occurrences_agent_group_ordinal", "sequence_occurrences", "group_id, start_frame_ordinal, occurrence_index"]
+			];
+			for (const [index, table, columns] of indexes) {
+				if (tables.has(table)) database.exec(`CREATE INDEX IF NOT EXISTS ${index} ON ${table} (${columns})`);
+			}
+		}
+	},
+	{
+		version: 8,
+		up: database => {
+			// Scoped byte statistics commonly constrain a profile by section and
+			// exact signature before expanding the frame byte arrays.
+			database.exec(`
+				CREATE INDEX IF NOT EXISTS materialized_frames_agent_scope
+					ON materialized_frames (profile_id, section_id, signature);
+			`);
+		}
+	},
+	{
+		version: 9,
+		up: database => {
+			// Raw-range message lookup constrains a profile by the first and last
+			// raw offsets stored in each frame's immutable offset array.
+			database.exec(`
+				CREATE INDEX IF NOT EXISTS materialized_frames_agent_raw_span
+					ON materialized_frames (
+						profile_id,
+					CAST(json_extract(raw_offsets_json, '$[0]') AS INTEGER),
+					CAST(json_extract(raw_offsets_json, '$[#-1]') AS INTEGER)
+				);
+			`);
+		}
+	},
+	{
+		version: 10,
+		up: database => {
+			// A profile is an immutable analytical snapshot. Capture metadata and
+			// parameters are otherwise replaced in place, so preserve the values and
+			// data extent that were current when each profile was materialized.
+			database.exec(`
+				CREATE TABLE IF NOT EXISTS framing_profile_metadata_snapshots (
+					profile_id TEXT PRIMARY KEY NOT NULL REFERENCES framing_profiles(id) ON DELETE CASCADE,
+					capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+					name TEXT NOT NULL,
+					description TEXT NOT NULL,
+					controller_view TEXT NOT NULL,
+					baud_rate INTEGER CHECK (baud_rate IS NULL OR baud_rate > 0),
+					input_format TEXT NOT NULL,
+					lifecycle TEXT NOT NULL,
+					byte_count INTEGER NOT NULL CHECK (byte_count >= 0),
+					folder_id TEXT,
+					data_revision INTEGER NOT NULL CHECK (data_revision >= 0),
+					metadata_revision INTEGER NOT NULL CHECK (metadata_revision >= 0),
+					content_revision INTEGER NOT NULL CHECK (content_revision >= 0),
+					retained_start_offset INTEGER NOT NULL CHECK (retained_start_offset >= 0),
+					parameters_json TEXT NOT NULL CHECK (json_valid(parameters_json)),
+					created_at TEXT NOT NULL
+				);
+				CREATE INDEX IF NOT EXISTS framing_profile_metadata_snapshots_capture
+					ON framing_profile_metadata_snapshots (capture_id, profile_id);
+
+				INSERT OR IGNORE INTO framing_profile_metadata_snapshots (
+					profile_id, capture_id, name, description, controller_view, baud_rate,
+					input_format, lifecycle, byte_count, folder_id, data_revision,
+					metadata_revision, content_revision, retained_start_offset, parameters_json,
+					created_at
+				)
+				SELECT profiles.id, captures.id, captures.name, captures.description,
+					captures.controller_view, captures.baud_rate, captures.input_format,
+					captures.lifecycle, captures.byte_count, captures.folder_id,
+					COALESCE(profiles.source_data_revision, captures.data_revision),
+					captures.metadata_revision, captures.content_revision,
+					COALESCE(profiles.retained_start_offset, captures.retained_start_offset),
+					COALESCE((
+						SELECT json_group_array(json_object('key', ordered.key_text, 'value', ordered.value_text))
+						FROM (
+							SELECT key_text, value_text
+							FROM capture_parameters
+							WHERE capture_id = captures.id
+							ORDER BY position
+						) AS ordered
+					), '[]'),
+					profiles.created_at
+				FROM framing_profiles AS profiles
+				JOIN captures ON captures.id = profiles.capture_id;
+
+				CREATE TRIGGER IF NOT EXISTS framing_profile_metadata_snapshot_insert
+				AFTER INSERT ON framing_profiles
+				BEGIN
+					INSERT INTO framing_profile_metadata_snapshots (
+						profile_id, capture_id, name, description, controller_view, baud_rate,
+						input_format, lifecycle, byte_count, folder_id, data_revision,
+						metadata_revision, content_revision, retained_start_offset, parameters_json,
+						created_at
+					)
+					SELECT NEW.id, captures.id, captures.name, captures.description,
+						captures.controller_view, captures.baud_rate, captures.input_format,
+						captures.lifecycle, captures.byte_count, captures.folder_id,
+						COALESCE(NEW.source_data_revision, captures.data_revision),
+						captures.metadata_revision, captures.content_revision,
+						COALESCE(NEW.retained_start_offset, captures.retained_start_offset),
+						COALESCE((
+							SELECT json_group_array(json_object('key', ordered.key_text, 'value', ordered.value_text))
+							FROM (
+								SELECT key_text, value_text
+								FROM capture_parameters
+								WHERE capture_id = captures.id
+								ORDER BY position
+							) AS ordered
+						), '[]'),
+						NEW.created_at
+					FROM captures
+					WHERE captures.id = NEW.capture_id;
+				END;
+			`);
+		}
+	},
+	{
+		version: 11,
+		up: database => {
+			// A database produced by the pre-rebase notes branch may have recorded
+			// version 9 for the notes migration, so ensure the base branch's raw-span
+			// index is present before applying the notes schema below.
+			database.exec(`
+				CREATE INDEX IF NOT EXISTS materialized_frames_agent_raw_span
+					ON materialized_frames (
+						profile_id,
+					CAST(json_extract(raw_offsets_json, '$[0]') AS INTEGER),
+					CAST(json_extract(raw_offsets_json, '$[#-1]') AS INTEGER)
+					);
+			`);
+			const noteColumns = new Set(
+				(database.prepare("PRAGMA table_info(stable_notes)").all() as Array<{ name: string }>).map(column => column.name)
+			);
+			if (noteColumns.has("author_type")) {
+				database.exec(`
+					CREATE INDEX IF NOT EXISTS stable_notes_capture_kind ON stable_notes (capture_id, target_kind);
+					CREATE INDEX IF NOT EXISTS stable_notes_capture_raw_offset ON stable_notes (capture_id, raw_offset);
+					CREATE INDEX IF NOT EXISTS stable_notes_profile_target ON stable_notes (profile_id, target_kind);
+					CREATE INDEX IF NOT EXISTS stable_notes_sequence_group ON stable_notes (sequence_group_id);
+					CREATE INDEX IF NOT EXISTS stable_notes_author_type ON stable_notes (capture_id, author_type, created_at DESC);
+				`);
+				const hasSettings = (database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'application_settings'").get() as { 1: number } | undefined);
+				if (hasSettings) database.prepare("INSERT OR IGNORE INTO application_settings (key, value_json, updated_at) VALUES (@key, 'false', CURRENT_TIMESTAMP)").run({ key: "allow_agent_authored_notes" });
+				return;
+			}
+			// Agent notes need durable attribution and two stable range target kinds.
+			// Rebuild the table because SQLite cannot widen the existing target CHECK
+			// constraint with ALTER TABLE.
+			database.exec(`
+				CREATE TABLE stable_notes_v11 (
+					id TEXT PRIMARY KEY NOT NULL,
+					capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+					text TEXT NOT NULL,
+					created_at TEXT NOT NULL,
+					updated_at TEXT,
+					target_kind TEXT NOT NULL CHECK (target_kind IN ('capture','byte','frame','range','raw-range','frame-range','sequence-group','sequence','pattern','legacy-sequence')),
+					raw_offset INTEGER CHECK (raw_offset >= 0),
+					profile_id TEXT REFERENCES framing_profiles(id) ON DELETE SET NULL,
+					raw_offsets_json TEXT CHECK (raw_offsets_json IS NULL OR json_valid(raw_offsets_json)),
+					start_offset INTEGER CHECK (start_offset >= 0),
+					end_offset INTEGER CHECK (end_offset >= 0),
+					sequence_key TEXT,
+					start_row INTEGER,
+					end_row INTEGER,
+					message_id TEXT,
+					byte_position INTEGER CHECK (byte_position >= 0),
+					frame_id TEXT,
+					sequence_group_id TEXT REFERENCES sequence_groups(id) ON DELETE SET NULL,
+					author_type TEXT NOT NULL DEFAULT 'human' CHECK (author_type IN ('human','agent')),
+					reported_client_name TEXT,
+					reported_client_version TEXT,
+					protocol_version TEXT
+				);
+
+				INSERT INTO stable_notes_v11
+					(id, capture_id, text, created_at, updated_at, target_kind, raw_offset, profile_id,
+					 raw_offsets_json, start_offset, end_offset, sequence_key, start_row, end_row,
+					 message_id, byte_position, frame_id, sequence_group_id, author_type,
+					 reported_client_name, reported_client_version, protocol_version)
+				SELECT id, capture_id, text, created_at, updated_at, target_kind, raw_offset, profile_id,
+					raw_offsets_json, start_offset, end_offset, sequence_key, start_row, end_row,
+					message_id, byte_position, frame_id, sequence_group_id, 'human', NULL, NULL, NULL
+				FROM stable_notes;
+
+				DROP TABLE stable_notes;
+				ALTER TABLE stable_notes_v11 RENAME TO stable_notes;
+				CREATE INDEX stable_notes_capture_kind ON stable_notes (capture_id, target_kind);
+				CREATE INDEX stable_notes_capture_raw_offset ON stable_notes (capture_id, raw_offset);
+				CREATE INDEX stable_notes_profile_target ON stable_notes (profile_id, target_kind);
+				CREATE INDEX stable_notes_sequence_group ON stable_notes (sequence_group_id);
+				CREATE INDEX stable_notes_author_type ON stable_notes (capture_id, author_type, created_at DESC);
+			`);
+			const hasSettings = (database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'application_settings'").get() as { 1: number } | undefined);
+			if (hasSettings) database.prepare("INSERT OR IGNORE INTO application_settings (key, value_json, updated_at) VALUES (@key, 'false', CURRENT_TIMESTAMP)").run({ key: "allow_agent_authored_notes" });
 		}
 	}
 ];

@@ -54,6 +54,7 @@ import {
 	type ViewStateAction,
 	type ViewStateSnapshot
 } from "../shared/view-state";
+import { MCP_SETTINGS_PATH, McpSettingsPage, type AgentAccessStatus } from "./mcp-settings-page";
 import "./styles.css";
 
 function TopBar() {
@@ -63,6 +64,20 @@ function TopBar() {
 		getTransportSnapshot
 	);
 	const actions = getTransportActions();
+	const [mcpStatus, setMcpStatus] = useState<AgentAccessStatus["status"] | "checking" | "unavailable">("checking");
+
+	useEffect(() => {
+		let disposed = false;
+		void fetch("/api/agent-access", { headers: { accept: "application/json" } })
+			.then(response => response.ok ? response.json() as Promise<Pick<AgentAccessStatus, "status">> : Promise.reject(new Error("MCP status unavailable")))
+			.then(value => {
+				if (!disposed) setMcpStatus(value.status);
+			})
+			.catch(() => {
+				if (!disposed) setMcpStatus("unavailable");
+			});
+		return () => { disposed = true; };
+	}, []);
 
 	return (
 		<header className="topbar">
@@ -78,6 +93,24 @@ function TopBar() {
 				</div>
 			</div>
 			<div className="transport">
+				<div className={`mcp-status-control ${mcpStatus === "running" ? "connected" : ""}`.trim()}>
+					<span id="mcpStatusBadge" className="mcp-status-value" role="status" aria-live="polite">
+						<i /> MCP {mcpStatus}
+					</span>
+					<a
+						id="mcpSettingsBtn"
+						className="mcp-settings-link"
+						href={MCP_SETTINGS_PATH}
+						aria-label="Open MCP settings"
+						title="MCP settings"
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+							<circle cx="12" cy="12" r="3" />
+						</svg>
+					</a>
+				</div>
+				<span className="transport-divider" aria-hidden="true" />
 				<span id="connectionBadge" className={`status-badge ${snapshot.connected ? "connected" : ""}`.trim()}>
 					<i /> {snapshot.connectionLabel}
 				</span>
@@ -894,6 +927,8 @@ function NotesPanelContent() {
 	const [sequenceStart, setSequenceStart] = useState("1");
 	const [sequenceEnd, setSequenceEnd] = useState("2");
 	const [noteText, setNoteText] = useState("");
+	const [originFilter, setOriginFilter] = useState<"all" | "human" | "agent">("all");
+	const visibleNotes = snapshot.notes.filter(note => originFilter === "all" || (note.authorType ?? "human") === originFilter);
 
 	return (
 		<div className="notes-layout">
@@ -902,23 +937,38 @@ function NotesPanelContent() {
 						<span className="eyebrow">Notebook</span>
 						<h2>Protocol observations</h2>
 					</div>
+					<label className="notes-origin-filter">
+						<span>Origin</span>
+						<select
+							value={originFilter}
+							onChange={event => {
+								const value = event.currentTarget.value as "all" | "human" | "agent";
+								setOriginFilter(value);
+							}}
+						>
+							<option value="all">All notes</option>
+							<option value="human">Human notes</option>
+							<option value="agent">Agent notes</option>
+						</select>
+					</label>
 					<div id="notesList" className="notes-list">
-						{snapshot.notes.length ? (
-							snapshot.notes.map(note => (
+						{visibleNotes.length ? (
+							visibleNotes.map(note => (
 								<article className="note-card" key={note.id}>
 									<header>
 										<span>
+											<span className={`note-origin ${note.authorType === "agent" ? "agent" : "human"}`.trim()}>{note.authorType === "agent" ? `AGENT · ${note.reportedClientName ?? "unknown-mcp-client"}` : "HUMAN"}</span>{" "}
 											{note.label}
 											{note.targetLabel ? ` · ${note.targetLabel}` : ""}
 										</span>
-										<span>{new Date(note.createdAt).toLocaleString()}</span>
+										<span>{new Date(note.createdAt).toLocaleString()}{note.authorType === "agent" && note.protocolVersion ? ` · ${note.protocolVersion}` : ""}</span>
 									</header>
 									<p>{note.text}</p>
 								</article>
 							))
 						) : (
 							<p className="muted">
-								{snapshot.captureId ? "No observations recorded for this capture." : "No capture selected."}
+								{snapshot.captureId ? originFilter === "all" ? "No observations recorded for this capture." : `No ${originFilter} notes recorded for this capture.` : "No capture selected."}
 							</p>
 						)}
 					</div>
@@ -1141,34 +1191,36 @@ function App() {
 			<div className="app-shell">
 				<TopBar />
 				<PersistenceErrorBanner />
-				<main
-					className={`workspace ${sidebarResizing ? "sidebar-resizing" : ""}`.trim()}
-					style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
-				>
-					<ArchiveSidebar />
-					<SidebarResizeHandle
-						width={sidebarWidth}
-						onWidthChange={setSidebarWidth}
-						onResizingChange={setSidebarResizing}
-					/>
-					<section className="main-panel">
-						<CaptureHeader />
-						<Toolbar
-							viewState={viewState}
-							dispatchViewState={dispatchViewState}
-							messageFilterRef={messageFilterRef}
-							messageFilterToggleRef={messageFilterToggleRef}
+				{window.location.pathname === MCP_SETTINGS_PATH ? <McpSettingsPage /> : (
+					<main
+						className={`workspace ${sidebarResizing ? "sidebar-resizing" : ""}`.trim()}
+						style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+					>
+						<ArchiveSidebar />
+						<SidebarResizeHandle
+							width={sidebarWidth}
+							onWidthChange={setSidebarWidth}
+							onResizingChange={setSidebarResizing}
 						/>
-						<StreamPanel
-							viewState={viewState}
-							dispatchViewState={dispatchViewState}
-							messageFilterRef={messageFilterRef}
-							messageFilterToggleRef={messageFilterToggleRef}
-						/>
-						<AnalysisPanel active={viewState.activePanel === "patterns"} />
-						<NotesPanel active={viewState.activePanel === "notes"} />
-					</section>
-				</main>
+						<section className="main-panel">
+							<CaptureHeader />
+							<Toolbar
+								viewState={viewState}
+								dispatchViewState={dispatchViewState}
+								messageFilterRef={messageFilterRef}
+								messageFilterToggleRef={messageFilterToggleRef}
+							/>
+							<StreamPanel
+								viewState={viewState}
+								dispatchViewState={dispatchViewState}
+								messageFilterRef={messageFilterRef}
+								messageFilterToggleRef={messageFilterToggleRef}
+							/>
+							<AnalysisPanel active={viewState.activePanel === "patterns"} />
+							<NotesPanel active={viewState.activePanel === "notes"} />
+						</section>
+					</main>
+				)}
 			</div>
 			<SendPanel open={sendPopupOpen} onOpenChange={handleSendPopupChange} />
 			<ContextDialog />

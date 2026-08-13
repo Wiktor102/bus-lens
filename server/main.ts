@@ -2,18 +2,21 @@ import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { createArchiveHttpService } from "./http-service.ts";
-import { LOOPBACK_HOST, resolveAppPort, resolveDatabaseConfig, resolveDevPort, resolveMaxBodyBytes, resolveServicePort } from "./config.ts";
+import { assertLoopbackHost, LOOPBACK_HOST, resolveAppPort, resolveDatabaseConfig, resolveDevPort, resolveMaxBodyBytes, resolveMcpBindHost, resolveServicePort } from "./config.ts";
 
 const databaseConfig = resolveDatabaseConfig();
 const staticDirectory = join(process.cwd(), "dist");
 const production = !process.argv.includes("--dev") && existsSync(join(staticDirectory, "index.html"));
 const serverOnly = process.argv.includes("--server-only");
 const port = production ? resolveAppPort() : resolveServicePort();
-const service = createArchiveHttpService({ databasePath: databaseConfig.databasePath, staticDirectory: production ? staticDirectory : undefined, maxBodyBytes: resolveMaxBodyBytes() });
+const mcpBindHost = resolveMcpBindHost();
+assertLoopbackHost(mcpBindHost);
+const endpointHost = mcpBindHost.includes(":") ? `[${mcpBindHost}]` : mcpBindHost;
+const service = createArchiveHttpService({ databasePath: databaseConfig.databasePath, staticDirectory: production ? staticDirectory : undefined, maxBodyBytes: resolveMaxBodyBytes(), mcpEndpoint: `http://${endpointHost}:${port}/mcp` });
 
-service.server.listen(port, LOOPBACK_HOST, () => {
+service.server.listen(port, mcpBindHost, () => {
 	console.info(`Bus Lens archive database: ${databaseConfig.databasePath}`);
-	console.info(`Bus Lens service listening at http://${LOOPBACK_HOST}:${port}`);
+	console.info(`Bus Lens service listening at http://${endpointHost}:${port}`);
 });
 
 let vite: ReturnType<typeof spawn> | undefined;

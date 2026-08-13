@@ -756,6 +756,30 @@ test("retention prunes only notes whose referenced evidence is outside the retai
 			text: "retained range",
 			target: { kind: "range", profileId: finalized.profileId, startOrdinal: 4000, endOrdinal: 4000 }
 		});
+		service.createNote({
+			captureId: "target-aware-retention",
+			noteId: "old-raw-range-note",
+			text: "outside raw range",
+			target: { kind: "raw-range", startRawOffset: 0, endRawOffset: 9 }
+		});
+		service.createNote({
+			captureId: "target-aware-retention",
+			noteId: "retained-raw-range-note",
+			text: "retained raw range",
+			target: { kind: "raw-range", startRawOffset: 40_000, endRawOffset: 40_009 }
+		});
+		service.createNote({
+			captureId: "target-aware-retention",
+			noteId: "old-frame-range-note",
+			text: "outside frame range",
+			target: { kind: "frame-range", profileId: finalized.profileId, startOrdinal: 0, endOrdinal: 0 }
+		});
+		service.createNote({
+			captureId: "target-aware-retention",
+			noteId: "retained-frame-range-note",
+			text: "retained frame range",
+			target: { kind: "frame-range", profileId: finalized.profileId, startOrdinal: 4000, endOrdinal: 4000 }
+		});
 
 		const insertCompatibilityNote = database.prepare(
 			`INSERT INTO stable_notes
@@ -801,7 +825,9 @@ test("retention prunes only notes whose referenced evidence is outside the retai
 				"legacy-sequence-note",
 				"pattern-note",
 				"retained-frame-note",
+				"retained-frame-range-note",
 				"retained-range-note",
+				"retained-raw-range-note",
 				"retained-sequence-note"
 			]
 		);

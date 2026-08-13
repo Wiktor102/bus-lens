@@ -20,6 +20,10 @@ import {
 	type CreateCaptureRequest,
 	type FramingSectionRequest
 } from "./canonical-capture-command-service.ts";
+import { createMcpAccess, type AgentAccessStatus, type McpAccess, type McpToolRegistrar } from "./mcp-server.ts";
+import { registerAnalysisTools } from "./mcp-analysis.ts";
+import { registerComparisonTools } from "./mcp-comparison.ts";
+import { registerAgentNoteTools } from "./mcp-notes.ts";
 
 const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
 const MIME_TYPES: Record<string, string> = {
@@ -36,6 +40,9 @@ type ServiceOptions = {
 	databasePath: string;
 	staticDirectory?: string;
 	maxBodyBytes?: number;
+	mcpEndpoint?: string;
+	mcpAgentNotes?: AgentAccessStatus["agentNotes"];
+	mcpToolRegistrar?: McpToolRegistrar;
 };
 
 export type ArchiveHttpService = {
@@ -43,6 +50,7 @@ export type ArchiveHttpService = {
 	repository: ArchiveRepository;
 	commandService: CanonicalCaptureCommandService;
 	database: SqliteDatabase;
+	mcpAccess: McpAccess;
 	close: () => Promise<void>;
 };
 
@@ -123,15 +131,30 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 	const commandService = new CanonicalCaptureCommandService(database);
 	const staticDirectory = options.staticDirectory ? resolve(options.staticDirectory) : undefined;
 	const maxBodyBytes = options.maxBodyBytes ?? 128 * 1024 * 1024;
+	const phase4ToolRegistrar: McpToolRegistrar = (server, queries, recordClient, commands) => {
+		registerAnalysisTools(server, queries, recordClient);
+		registerComparisonTools(server, queries, recordClient);
+		registerAgentNoteTools(server, queries, recordClient, commands);
+	};
+	const mcpAccess = createMcpAccess({
+		database,
+		databasePath: options.databasePath,
+		endpoint: options.mcpEndpoint ?? "http://127.0.0.1/mcp",
+		serverVersion: "1.0.0",
+		agentNotes: options.mcpAgentNotes,
+		toolRegistrar: options.mcpToolRegistrar ?? phase4ToolRegistrar
+	});
 	const server = createServer(async (request, response) => {
 		try {
 			const url = new URL(request.url ?? "/", "http://127.0.0.1");
 			const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+			if (url.pathname === "/mcp") return await mcpAccess.handle(request, response);
 			if (segments[0] !== "api") {
 				if (staticDirectory && await serveStatic(response, staticDirectory, url.pathname)) return;
 				return send(response, 404, { error: "Not found" });
 			}
 			if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { ok: true });
+			if (request.method === "GET" && url.pathname === "/api/agent-access") return send(response, 200, mcpAccess.getStatus());
 			if (request.method === "GET" && url.pathname === "/api/archive") {
 				return send(response, 200, { captures: repository.listCaptures(), folders: repository.listFolders(), index: repository.getArchiveIndex(), queue: repository.listQueue(), history: repository.listHistory(), settings: repository.getSettings() });
 			}
@@ -457,5 +480,16 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			return send(response, 500, { error: "Internal server error" });
 		}
 	});
-	return { server, repository, commandService, database, close: () => new Promise(resolveClose => server.close(() => { database.close(); resolveClose(); })) };
+	return {
+		server,
+		repository,
+		commandService,
+		database,
+		mcpAccess,
+		close: async () => {
+			await mcpAccess.close();
+			await new Promise<void>(resolveClose => server.close(() => resolveClose()));
+			database.close();
+		}
+	};
 }
