@@ -6,6 +6,7 @@ import test from "node:test";
 import { ArchiveRepository } from "../server/archive-repository.ts";
 import {
 	AGENT_CONTRACT_VERSION,
+	AGENT_NORMAL_RESPONSE_BYTES,
 	AgentQueryError,
 	assertCursorFilters,
 	decodeAgentCursor,
@@ -269,5 +270,26 @@ test("agent discovery reports response-size when the response budget lowers the 
 		assert.equal(response.meta.truncated, true);
 		assert.ok(response.meta.page?.nextCursor);
 		repository.close();
+	});
+});
+
+test("agent discovery measures Unicode pages in UTF-8 bytes before the response-size check", async () => {
+	await withTemporaryArchive(async directory => {
+		const database = openDatabase(join(directory, "archive.sqlite"));
+		const repository = new ArchiveRepository(database);
+		for (let index = 0; index < 100; index++) {
+			repository.putCapture(
+				`unicode-${String(index).padStart(3, "0")}`,
+				legacyDocument(`unicode-${index}`, `Unicode ${index}`, "🚍".repeat(40))
+			);
+		}
+		const queries = new CanonicalQueryService(database);
+		const response = queries.queryCaptureDiscovery({ limit: 100 });
+		assert.equal(response.meta.page?.requestedLimit, 100);
+		assert.ok((response.meta.page?.effectiveLimit ?? 100) < 100);
+		assert.equal(response.meta.page?.returned, response.data.captures.length);
+		assert.equal(response.meta.page?.truncationReason, "response-size");
+		assert.ok(Buffer.byteLength(JSON.stringify(response), "utf8") <= AGENT_NORMAL_RESPONSE_BYTES);
+		database.close();
 	});
 });

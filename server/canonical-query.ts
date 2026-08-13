@@ -643,7 +643,7 @@ export class CanonicalQueryService {
 		// target still wins. Rows are complete records; only the number of rows is
 		// reduced and the keyset cursor makes the reduction explicit to the caller.
 		while (pageRows.length > 1) {
-			const estimated = JSON.stringify({ captures: mappedRows() }).length;
+			const estimated = Buffer.byteLength(JSON.stringify({ captures: mappedRows() }), "utf8");
 			if (estimated <= AGENT_NORMAL_RESPONSE_BYTES) break;
 			pageRows = pageRows.slice(0, Math.max(1, Math.floor(pageRows.length / 2)));
 			effectiveLimit = pageRows.length;
