@@ -401,6 +401,79 @@ test("duplicateCapture makes an idempotent full canonical copy with remapped ide
 	}
 });
 
+test("duplicateCapture preserves historical profile metadata snapshots", () => {
+	const database = openDatabase(":memory:");
+	try {
+		const service = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-09T00:00:00.000Z" });
+		const firstProfile = recordCapture(service, "duplicate-history");
+		service.patchMetadata({
+			captureId: "duplicate-history",
+			expectedMetadataRevision: 0,
+			patch: {
+				name: "historical profile two",
+				description: "description for profile two",
+				parameters: [{ key: "mode", value: "historical" }]
+			}
+		});
+		const secondProfile = service.reframe({
+			captureId: "duplicate-history",
+			expectedActiveProfileId: firstProfile.profileId,
+			expectedDataRevision: firstProfile.dataRevision,
+			sections: [{ start: 0, framingMode: "length", frameSize: 1 }],
+			algorithmVersion: 2
+		});
+		service.patchMetadata({
+			captureId: "duplicate-history",
+			expectedMetadataRevision: 1,
+			patch: {
+				name: "latest capture metadata",
+				description: "latest description",
+				parameters: [{ key: "mode", value: "latest" }, { key: "channel", value: "B" }]
+			}
+		});
+
+		const snapshotFields = `snapshots.name, snapshots.description, snapshots.controller_view, snapshots.baud_rate,
+			snapshots.input_format, snapshots.lifecycle, snapshots.byte_count, snapshots.folder_id,
+			snapshots.data_revision, snapshots.metadata_revision, snapshots.content_revision,
+			snapshots.retained_start_offset, snapshots.parameters_json, snapshots.created_at`;
+		const sourceSnapshots = database
+			.prepare(
+				`SELECT profiles.version, snapshots.profile_id, snapshots.capture_id, ${snapshotFields}
+				 FROM framing_profile_metadata_snapshots AS snapshots
+				 JOIN framing_profiles AS profiles ON profiles.id = snapshots.profile_id
+				 WHERE snapshots.capture_id = 'duplicate-history'
+				 ORDER BY profiles.version`
+			)
+			.all() as Array<Record<string, unknown>>;
+		assert.equal(sourceSnapshots.length, 2);
+		assert.equal(sourceSnapshots[0]?.profile_id, firstProfile.profileId);
+		assert.equal(sourceSnapshots[1]?.profile_id, secondProfile.profileId);
+		assert.equal(sourceSnapshots[0]?.name, "duplicate-history name");
+		assert.equal(sourceSnapshots[1]?.name, "historical profile two");
+
+		service.duplicateCapture({ captureId: "duplicate-history", duplicateCaptureId: "duplicate-history-copy" });
+		const copiedSnapshots = database
+			.prepare(
+				`SELECT profiles.version, snapshots.profile_id, snapshots.capture_id, ${snapshotFields}
+				 FROM framing_profile_metadata_snapshots AS snapshots
+				 JOIN framing_profiles AS profiles ON profiles.id = snapshots.profile_id
+				 WHERE snapshots.capture_id = 'duplicate-history-copy'
+				 ORDER BY profiles.version`
+			)
+			.all() as Array<Record<string, unknown>>;
+		assert.equal(copiedSnapshots.length, sourceSnapshots.length);
+		assert.deepEqual(
+			copiedSnapshots.map(({ profile_id: _profileId, capture_id: _captureId, ...snapshot }) => snapshot),
+			sourceSnapshots.map(({ profile_id: _profileId, capture_id: _captureId, ...snapshot }) => snapshot)
+		);
+		assert.deepEqual(copiedSnapshots.map(snapshot => snapshot.capture_id), ["duplicate-history-copy", "duplicate-history-copy"]);
+		assert.notEqual(copiedSnapshots[0]?.profile_id, sourceSnapshots[0]?.profile_id);
+		assert.notEqual(copiedSnapshots[1]?.profile_id, sourceSnapshots[1]?.profile_id);
+	} finally {
+		database.close();
+	}
+});
+
 test("duplicateCapture rejects active sources and allows a finalized copy to start a new session", () => {
 	const database = openDatabase(":memory:");
 	try {

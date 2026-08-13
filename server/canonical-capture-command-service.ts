@@ -2613,6 +2613,24 @@ export class CanonicalCaptureCommandService {
 			retained_start_offset: number;
 			verified: number;
 		};
+		type SourceProfileMetadataSnapshot = {
+			profile_id: string;
+			capture_id: string;
+			name: string;
+			description: string;
+			controller_view: string;
+			baud_rate: number | null;
+			input_format: string;
+			lifecycle: string;
+			byte_count: number;
+			folder_id: string | null;
+			data_revision: number;
+			metadata_revision: number;
+			content_revision: number;
+			retained_start_offset: number;
+			parameters_json: string;
+			created_at: string;
+		};
 		type SourceSection = {
 			id: string;
 			profile_id: string;
@@ -2791,6 +2809,17 @@ export class CanonicalCaptureCommandService {
 				)
 				.all({ captureId: sourceCaptureId }) as SourceProfile[];
 			const profileIds = profiles.map(profile => profile.id);
+			const profileMetadataSnapshots = this.database
+				.prepare(
+					`SELECT profile_id, capture_id, name, description, controller_view, baud_rate,
+							input_format, lifecycle, byte_count, folder_id, data_revision,
+							metadata_revision, content_revision, retained_start_offset, parameters_json,
+							created_at
+					 FROM framing_profile_metadata_snapshots
+					 WHERE capture_id = @captureId
+					 ORDER BY profile_id`
+				)
+				.all({ captureId: sourceCaptureId }) as SourceProfileMetadataSnapshot[];
 			const sections = this.database
 				.prepare(
 					`SELECT id, profile_id, start_offset, position, framing_mode, frame_length, marker_bytes,
@@ -3100,6 +3129,45 @@ export class CanonicalCaptureCommandService {
 					verified: profile.verified
 				})
 			);
+
+			const insertProfileMetadataSnapshot = this.database.prepare(
+				`INSERT OR REPLACE INTO framing_profile_metadata_snapshots
+					(profile_id, capture_id, name, description, controller_view, baud_rate,
+					 input_format, lifecycle, byte_count, folder_id, data_revision,
+					 metadata_revision, content_revision, retained_start_offset, parameters_json,
+					 created_at)
+				 VALUES (@profileId, @captureId, @name, @description, @controllerView, @baudRate,
+					 @inputFormat, @lifecycle, @byteCount, @folderId, @dataRevision,
+					 @metadataRevision, @contentRevision, @retainedStartOffset, @parametersJson,
+					 @createdAt)`
+			);
+			profileMetadataSnapshots.forEach(snapshot => {
+				const profileId = profileIdsBySource.get(snapshot.profile_id);
+				if (!profileId) {
+					throw new CanonicalCaptureConflictError("profile metadata snapshot has no duplicated profile", {
+						captureId: sourceCaptureId,
+						profileId: snapshot.profile_id
+					});
+				}
+				insertProfileMetadataSnapshot.run({
+					profileId,
+					captureId: duplicateCaptureId,
+					name: snapshot.name,
+					description: snapshot.description,
+					controllerView: snapshot.controller_view,
+					baudRate: snapshot.baud_rate,
+					inputFormat: snapshot.input_format,
+					lifecycle: snapshot.lifecycle,
+					byteCount: snapshot.byte_count,
+					folderId: snapshot.folder_id,
+					dataRevision: snapshot.data_revision,
+					metadataRevision: snapshot.metadata_revision,
+					contentRevision: snapshot.content_revision,
+					retainedStartOffset: snapshot.retained_start_offset,
+					parametersJson: snapshot.parameters_json,
+					createdAt: snapshot.created_at
+				});
+			});
 
 			const insertSection = this.database.prepare(
 				`INSERT INTO framing_sections
