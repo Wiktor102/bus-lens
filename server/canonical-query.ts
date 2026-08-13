@@ -1689,7 +1689,7 @@ export class CanonicalQueryService {
 		return response;
 	}
 
-	private readSequenceGroupSummary(row: SequenceGroupRow, profileId: string): AgentSequenceSummary {
+	private readSequenceGroupSummary(row: SequenceGroupRow, captureId: string, profileId: string): AgentSequenceSummary {
 		const sections = this.database.prepare(
 			`SELECT DISTINCT frames.section_id
 			 FROM sequence_occurrences occurrences
@@ -1731,9 +1731,11 @@ export class CanonicalQueryService {
 		).get({ profileId, ordinal: last.start_ordinal }) as { timestamps_json: string } | undefined : undefined;
 		const note = this.database.prepare(
 			`SELECT text FROM stable_notes
-			 WHERE sequence_group_id = @groupId OR (target_kind = 'pattern' AND sequence_key = @sequenceKey)
+			 WHERE capture_id = @captureId
+			   AND (profile_id IS NULL OR profile_id = @profileId)
+			   AND (sequence_group_id = @groupId OR (target_kind = 'pattern' AND sequence_key = @sequenceKey))
 			 ORDER BY created_at DESC, id DESC LIMIT 1`
-		).get({ groupId: row.id, sequenceKey: row.key_text }) as { text: string } | undefined;
+		).get({ captureId, profileId, groupId: row.id, sequenceKey: row.key_text }) as { text: string } | undefined;
 		return {
 			id: row.id,
 			signatures: jsonArray<string>(row.signatures_json),
@@ -1761,7 +1763,7 @@ export class CanonicalQueryService {
 		const { profile, snapshot } = this.resolveAnalysisProfile(captureId, requested);
 		if (cursorPayload && stableJson(cursorPayload.snapshot) !== stableJson(snapshot)) throw new AgentQueryError("invalid-cursor", "The pagination cursor is bound to a different profile revision", { reason: "snapshot-mismatch" });
 		const limit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT);
-		const params: Record<string, unknown> = { profileId: profile.id, limit: limit + 1 };
+		const params: Record<string, unknown> = { captureId, profileId: profile.id, limit: limit + 1 };
 		const cursorSql = cursorPayload ? " WHERE occurrence_count < @cursorOccurrenceCount OR (occurrence_count = @cursorOccurrenceCount AND id > @cursorId)" : "";
 		if (cursorPayload) {
 			params.cursorOccurrenceCount = cursorPayload.key.occurrenceCount;
@@ -1776,7 +1778,7 @@ export class CanonicalQueryService {
 				        MAX(occurrences.start_frame_ordinal) AS last_ordinal
 				 FROM sequence_groups groups
 				 LEFT JOIN sequence_occurrences occurrences ON occurrences.group_id = groups.id
-				 WHERE groups.profile_id = @profileId
+				 WHERE groups.capture_id = @captureId AND groups.profile_id = @profileId
 				 GROUP BY groups.id
 			 ) groups_summary
 			${cursorSql}
