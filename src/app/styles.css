@@ -62,6 +62,9 @@ button {
 	background: rgba(13, 16, 14, 0.94);
 	backdrop-filter: blur(12px);
 }
+.topbar a {
+	text-decoration: none;
+}
 .brand {
 	display: flex;
 	gap: 13px;
@@ -2838,6 +2841,29 @@ tr:hover .row-action,
 	border-radius: 12px;
 	background: rgba(20, 31, 24, 0.72);
 }
+.mcp-page {
+	max-width: 1180px;
+	margin: 0 auto;
+	padding: 34px 22px 48px;
+}
+.mcp-page-heading {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 24px;
+	margin: 0 0 18px;
+}
+.mcp-page-heading h1 {
+	margin: 4px 0 0;
+	font-size: 25px;
+	letter-spacing: -0.02em;
+}
+.mcp-page-heading p {
+	margin: 8px 0 0;
+}
+.mcp-page .agent-access-panel {
+	margin: 0;
+}
 .agent-access-heading,
 .agent-access-configs header {
 	display: flex;
@@ -2903,6 +2929,9 @@ tr:hover .row-action,
 	font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 @media (max-width: 900px) {
+	.mcp-page-heading {
+		flex-direction: column;
+	}
 	.agent-access-grid,
 	.agent-access-configs {
 		grid-template-columns: 1fr;
