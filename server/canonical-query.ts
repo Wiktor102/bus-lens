@@ -1786,7 +1786,7 @@ export class CanonicalQueryService {
 			 LIMIT @limit`
 		).all(params) as SequenceGroupRow[];
 		return selectSizeBoundedPage(rows, limit, (pageRows, page) => {
-			const groups = pageRows.map(row => this.readSequenceGroupSummary(row, profile.id));
+			const groups = pageRows.map(row => this.readSequenceGroupSummary(row, captureId, profile.id));
 			const hasMore = rows.length > pageRows.length;
 			const last = pageRows.at(-1);
 			const nextCursor = hasMore && last
