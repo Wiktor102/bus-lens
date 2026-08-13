@@ -5,6 +5,8 @@ import { agentResponseSchema } from "./mcp-server.ts";
 import type {
 	AgentByteStatisticsInput,
 	AgentByteStatisticsResult,
+	AgentCaptureDifferenceInput,
+	AgentCaptureDifferenceResult,
 	AgentMessageContext,
 	AgentMessageContextInput,
 	AgentMessageQueryInput,
@@ -57,6 +59,61 @@ const byteStatisticsScopeSchema = z.union([
 	z.object({ ...byteStatisticsScopeFields, direction: z.string().min(1) })
 ], {
 	error: "scope must contain at least one of sectionId, frameLength, exactSignature, wildcardHexPattern, or direction"
+});
+
+const differentialSnapshotSchema = z.object({
+	captureId: z.string().min(1),
+	profileId: z.string().min(1),
+	profileVersion: z.number().int().positive(),
+	sourceDataRevision: z.number().int().nonnegative()
+});
+
+const differentialMessageFiltersSchema = z.object({
+	ordinalFrom: z.number().int().nonnegative().optional(),
+	ordinalTo: z.number().int().nonnegative().optional(),
+	frameOrdinalFrom: z.number().int().nonnegative().optional(),
+	frameOrdinalTo: z.number().int().nonnegative().optional(),
+	rawOffsetFrom: z.number().int().nonnegative().optional(),
+	rawOffsetTo: z.number().int().nonnegative().optional(),
+	timestampFrom: z.number().finite().optional(),
+	timestampTo: z.number().finite().optional(),
+	sectionId: z.string().min(1).optional(),
+	direction: z.string().min(1).optional(),
+	exactSignature: z.string().min(1).optional(),
+	signature: z.string().min(1).optional(),
+	wildcardHexPattern: z.string().min(1).optional(),
+	hidden: z.enum(["include", "visible-only", "hidden-only"]).optional(),
+	notePresence: z.enum(["any", "with-note", "without-note"]).optional(),
+	sequenceGroupId: z.string().min(1).optional()
+});
+
+const differentialScopeSchema = z.object({
+	sectionId: z.string().min(1).optional(),
+	frameLength: z.number().int().positive().optional(),
+	exactSignature: z.string().min(1).optional(),
+	wildcardHexPattern: z.string().min(1).optional(),
+	direction: z.string().min(1).optional()
+});
+
+const differentialInputSchema = z.object({
+	baseline: z.object({
+		snapshot: differentialSnapshotSchema,
+		label: z.string().min(1),
+		filters: differentialMessageFiltersSchema.optional()
+	}),
+	changed: z.object({
+		snapshot: differentialSnapshotSchema,
+		label: z.string().min(1),
+		filters: differentialMessageFiltersSchema.optional()
+	}),
+	alignment: z.object({
+		mode: z.enum(["ordinal", "raw-relative", "timestamp-nearest", "signature-sequence"]),
+		maximumTimestampDeltaMs: z.number().finite().nonnegative().max(60_000).optional()
+	}),
+	scope: differentialScopeSchema.optional(),
+	minimumSupport: z.number().int().positive().max(1_000).optional(),
+	cursor: z.string().optional(),
+	limit: z.number().int().positive().max(100).optional()
 });
 
 function errorResult(error: unknown): { isError: true; structuredContent: AgentResponse<unknown>; content: [{ type: "text"; text: string }] } {
@@ -219,6 +276,19 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 		transitionInputSchema,
 		input => queries.getTransitions(input as AgentTransitionsInput),
 		response => `Returned ${(response.data as AgentTransitionsResult).transitions.length} bounded transition result${(response.data as AgentTransitionsResult).transitions.length === 1 ? "" : "s"}.`,
+		recordClient
+	);
+
+	registerAnalysisTool(
+		server,
+		"analyze_capture_difference",
+		"Compare two explicitly pinned, labelled experiments with bounded ordinal, raw-relative, timestamp-nearest, or signature-sequence alignment. Returns ranked candidateFields with byte/bit evidence and score components only; it never names or persists inferred protocol fields. Sequence alignment is capped at 250 filtered frames per side, all other modes at 1,000, and raw-relative orders frames by retained raw start offsets.",
+		differentialInputSchema,
+		input => queries.analyzeCaptureDifference(input as AgentCaptureDifferenceInput),
+		response => {
+			const result = response as AgentResponse<AgentCaptureDifferenceResult>;
+			return `Compared ${result.data.alignment.pairedFrameCount} aligned frame pair${result.data.alignment.pairedFrameCount === 1 ? "" : "s"} with ${result.data.candidateFields.length} bounded candidate field${result.data.candidateFields.length === 1 ? "" : "s"} using ${result.data.alignment.mode} alignment.`;
+		},
 		recordClient
 	);
 

@@ -15,6 +15,44 @@ import {
 	type AgentResponse,
 	type AgentSnapshotReference
 } from "./agent-contracts.ts";
+import {
+	AGENT_DIFFERENTIAL_ALIGNMENT_MODES,
+	MAX_DIFFERENTIAL_FRAMES,
+	MAX_SIGNATURE_ALIGNMENT_FRAMES,
+	alignOrdinal,
+	alignSignatureSequence,
+	alignTimestampNearest,
+	calculateDifferentialEvidence,
+	differentialFramePredicate,
+	makeDifferentialFrame,
+	normalizeDifferentialMessageFilters,
+	normalizeDifferentialScope,
+	type AgentCaptureDifferenceInput,
+	type AgentCaptureDifferenceResult,
+	type AgentDifferentialAlignmentMode,
+	type DifferentialAlignedPair,
+	type DifferentialFrame,
+	type NormalizedDifferentialMessageFilters,
+	type NormalizedDifferentialScope
+} from "./differential-analysis.ts";
+
+export type {
+	AgentCaptureDifferenceInput,
+	AgentCaptureDifferenceResult,
+	AgentDifferentialAlignmentMode,
+	AgentDifferentialAlignmentSummary,
+	AgentDifferentialCandidate,
+	AgentDifferentialDifferenceSummary,
+	AgentDifferentialLengthChange,
+	AgentDifferentialMessageFilters,
+	AgentDifferentialPositionSummary,
+	AgentDifferentialScope,
+	AgentDifferentialSnapshotSummary,
+	AgentDifferentialEvidence,
+	AgentDifferentialScoreComponents,
+	AgentMaskCount,
+	AgentValueCount
+} from "./differential-analysis.ts";
 
 export const DEFAULT_FRAME_WINDOW_LIMIT = 50;
 export const MAX_FRAME_WINDOW_LIMIT = 200;
@@ -2437,6 +2475,217 @@ export class CanonicalQueryService {
 		});
 		assertEncodedResponseSize(response);
 		return response;
+	}
+
+	private resolveDifferentialSnapshot(reference: AgentSnapshotReference): AgentSnapshotReference {
+		const captureId = requiredText(reference?.captureId, "snapshot.captureId");
+		const profileId = requiredText(reference?.profileId, "snapshot.profileId");
+		const profileVersion = optionalNonNegativeInteger(reference?.profileVersion, "snapshot.profileVersion");
+		const sourceDataRevision = optionalNonNegativeInteger(reference?.sourceDataRevision, "snapshot.sourceDataRevision");
+		if (profileVersion === undefined || sourceDataRevision === undefined) {
+			throw new AgentQueryError("invalid-input", "Differential snapshots require captureId, profileId, profileVersion, and sourceDataRevision");
+		}
+		return this.resolveAnalysisProfile(captureId, { profileId, profileVersion, sourceDataRevision }).snapshot;
+	}
+
+	private readDifferentialFrames(
+		profileId: string,
+		filters: NormalizedDifferentialMessageFilters,
+		scope: NormalizedDifferentialScope,
+		parameterPrefix: string
+	): { frames: DifferentialFrame[]; totalFrameCount: number; filteredFrameCount: number; excludedFrameCount: number } {
+		const filterPredicate = differentialFramePredicate(filters, `${parameterPrefix}Filter`);
+		const scopePredicate = differentialFramePredicate(scope, `${parameterPrefix}Scope`);
+		const predicates = `${filterPredicate.sql}${scopePredicate.sql}`;
+		const predicateParameters = {
+			profileId,
+			...filterPredicate.params,
+			...scopePredicate.params
+		};
+		const totalFrameCount = (this.database.prepare(
+			"SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId"
+		).get({ profileId }) as { count: number }).count;
+		const filteredFrameCount = (this.database.prepare(
+			`SELECT COUNT(*) AS count FROM materialized_frames AS frames WHERE frames.profile_id = @profileId${predicates}`
+		).get(predicateParameters) as { count: number }).count;
+		if (filteredFrameCount > MAX_DIFFERENTIAL_FRAMES) {
+			throw new AgentQueryError(
+				"invalid-input",
+				`Differential alignment accepts at most ${MAX_DIFFERENTIAL_FRAMES} filtered frames per side`,
+				{ maximumFramesPerSide: MAX_DIFFERENTIAL_FRAMES, filteredFrameCount, parameterPrefix }
+			);
+		}
+		const rows = this.database.prepare(
+			`SELECT id, ordinal, section_id, raw_offsets_json, bytes_json, timestamps_json,
+			        directions_json, hidden, signature
+			 FROM materialized_frames AS frames
+			 WHERE frames.profile_id = @profileId${predicates}
+			 ORDER BY ordinal ASC, id ASC
+			 LIMIT @differentialLimit`
+		).all({ ...predicateParameters, differentialLimit: MAX_DIFFERENTIAL_FRAMES + 1 }) as Array<{
+			id: string;
+			ordinal: number;
+			section_id: string;
+			raw_offsets_json: string;
+			bytes_json: string;
+			timestamps_json: string;
+			directions_json: string;
+			hidden: number;
+			signature: string;
+		}>;
+		const frames = rows.map(row => makeDifferentialFrame({
+			id: row.id,
+			ordinal: row.ordinal,
+			sectionId: row.section_id,
+			bytes: jsonArray<number>(row.bytes_json).map(Number),
+			timestamps: jsonArray<number>(row.timestamps_json).map(Number),
+			directions: jsonArray<string>(row.directions_json).map(String),
+			hidden: Boolean(row.hidden),
+			signature: row.signature,
+			rawOffsets: jsonArray<number>(row.raw_offsets_json).map(Number)
+		}));
+		return {
+			frames,
+			totalFrameCount,
+			filteredFrameCount,
+			excludedFrameCount: Math.max(0, totalFrameCount - filteredFrameCount)
+		};
+	}
+
+	analyzeCaptureDifference(input: AgentCaptureDifferenceInput): AgentResponse<AgentCaptureDifferenceResult> {
+		const baselineLabel = requiredText(input?.baseline?.label, "baseline.label");
+		const changedLabel = requiredText(input?.changed?.label, "changed.label");
+		const baselineSnapshot = this.resolveDifferentialSnapshot(input?.baseline?.snapshot);
+		const changedSnapshot = this.resolveDifferentialSnapshot(input?.changed?.snapshot);
+		const baselineFilters = normalizeDifferentialMessageFilters(input.baseline.filters);
+		const changedFilters = normalizeDifferentialMessageFilters(input.changed.filters);
+		const scope = normalizeDifferentialScope(input.scope);
+		if (!input.alignment || typeof input.alignment !== "object") {
+			throw new AgentQueryError("invalid-input", "alignment is required", { label: "alignment" });
+		}
+		const requestedMode = input.alignment.mode;
+		if (!AGENT_DIFFERENTIAL_ALIGNMENT_MODES.includes(requestedMode as AgentDifferentialAlignmentMode)) {
+			throw new AgentQueryError("invalid-input", "alignment.mode must be ordinal, raw-relative, timestamp-nearest, or signature-sequence", { mode: requestedMode });
+		}
+		const mode = requestedMode as AgentDifferentialAlignmentMode;
+		if (mode !== "timestamp-nearest" && input.alignment.maximumTimestampDeltaMs !== undefined) {
+			throw new AgentQueryError("invalid-input", "maximumTimestampDeltaMs is only valid for timestamp-nearest alignment", { mode });
+		}
+		const requestedTimestampDelta = optionalFiniteNumber(input.alignment.maximumTimestampDeltaMs, "maximumTimestampDeltaMs");
+		if (requestedTimestampDelta !== undefined && requestedTimestampDelta < 0) {
+			throw new AgentQueryError("invalid-input", "maximumTimestampDeltaMs must be non-negative", { maximumTimestampDeltaMs: requestedTimestampDelta });
+		}
+		if (requestedTimestampDelta !== undefined && requestedTimestampDelta > 60_000) {
+			throw new AgentQueryError("invalid-input", "maximumTimestampDeltaMs must not exceed 60000", { maximum: 60_000 });
+		}
+		const maximumTimestampDeltaMs = mode === "timestamp-nearest" ? requestedTimestampDelta ?? 1_000 : undefined;
+		const minimumSupport = boundedLimit(input.minimumSupport, 1, MAX_DIFFERENTIAL_FRAMES, "minimumSupport");
+		const requestedLimit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT, "limit");
+		const cursorFilters = {
+			baseline: { snapshot: baselineSnapshot, label: baselineLabel, filters: baselineFilters },
+			changed: { snapshot: changedSnapshot, label: changedLabel, filters: changedFilters },
+			alignment: { mode, ...(maximumTimestampDeltaMs === undefined ? {} : { maximumTimestampDeltaMs }) },
+			scope,
+			minimumSupport
+		};
+		const cursor = input.cursor ? decodeAgentCursor(input.cursor, "capture-difference", ["score", "sectionId", "frameFamily", "bytePosition", "bitMask"]) : undefined;
+		if (cursor) {
+			assertCursorFilters(cursor, cursorFilters, baselineSnapshot);
+			if (stableJson(cursor.snapshot) !== stableJson(baselineSnapshot)) {
+				throw new AgentQueryError("invalid-cursor", "The pagination cursor is bound to a different baseline snapshot", { reason: "snapshot-mismatch" });
+			}
+		}
+
+		const baselineRead = this.readDifferentialFrames(baselineSnapshot.profileId, baselineFilters, scope, "baseline");
+		const changedRead = this.readDifferentialFrames(changedSnapshot.profileId, changedFilters, scope, "changed");
+		if (mode === "signature-sequence" && (baselineRead.frames.length > MAX_SIGNATURE_ALIGNMENT_FRAMES || changedRead.frames.length > MAX_SIGNATURE_ALIGNMENT_FRAMES)) {
+			throw new AgentQueryError(
+				"invalid-input",
+				`signature-sequence alignment accepts at most ${MAX_SIGNATURE_ALIGNMENT_FRAMES} filtered frames per side`,
+				{ maximumFramesPerSide: MAX_SIGNATURE_ALIGNMENT_FRAMES, baselineFrames: baselineRead.frames.length, changedFrames: changedRead.frames.length }
+			);
+		}
+		let alignmentResult: {
+			pairs: readonly DifferentialAlignedPair[];
+			baselineUnpaired: readonly DifferentialFrame[];
+			changedUnpaired: readonly DifferentialFrame[];
+			insertedFrameCount: number;
+			deletedFrameCount: number;
+		};
+		switch (mode) {
+			case "ordinal":
+			case "raw-relative":
+				alignmentResult = alignOrdinal(baselineRead.frames, changedRead.frames, mode);
+				break;
+			case "timestamp-nearest":
+				alignmentResult = alignTimestampNearest(baselineRead.frames, changedRead.frames, maximumTimestampDeltaMs!);
+				break;
+			case "signature-sequence":
+				alignmentResult = alignSignatureSequence(baselineRead.frames, changedRead.frames);
+				break;
+		}
+		const alignmentSummary = {
+			mode,
+			pairedFrameCount: alignmentResult.pairs.length,
+			baselineUnpairedFrameCount: alignmentResult.baselineUnpaired.length,
+			changedUnpairedFrameCount: alignmentResult.changedUnpaired.length,
+			insertedFrameCount: alignmentResult.insertedFrameCount,
+			deletedFrameCount: alignmentResult.deletedFrameCount,
+			excludedFrameCount: { baseline: baselineRead.excludedFrameCount, changed: changedRead.excludedFrameCount },
+			unpairedFrameCount: { baseline: alignmentResult.baselineUnpaired.length, changed: alignmentResult.changedUnpaired.length },
+			...(maximumTimestampDeltaMs === undefined ? {} : { maximumTimestampDeltaMs })
+		};
+		const evidence = calculateDifferentialEvidence(alignmentResult.pairs, minimumSupport);
+		const afterCursor = cursor
+			? evidence.candidateFields.filter(candidate => {
+				const score = Number(cursor.key.score);
+				const sectionId = String(cursor.key.sectionId ?? "");
+				const frameFamily = String(cursor.key.frameFamily ?? "");
+				const bytePosition = Number(cursor.key.bytePosition);
+				const mask = String(cursor.key.bitMask ?? "");
+				if (candidate.score < score) return true;
+				if (candidate.score > score) return false;
+				if (candidate.sectionId !== sectionId) return candidate.sectionId > sectionId;
+				if (candidate.frameFamily !== frameFamily) return candidate.frameFamily > frameFamily;
+				if (candidate.bytePosition !== bytePosition) return candidate.bytePosition > bytePosition;
+				return candidate.bitMask > mask;
+			})
+			: [...evidence.candidateFields];
+		return selectSizeBoundedPage(afterCursor, requestedLimit, (pageRows, page) => {
+			const hasMore = afterCursor.length > pageRows.length;
+			const last = pageRows.at(-1);
+			const nextCursor = hasMore && last
+				? encodeAgentCursor({
+					contractVersion: 1,
+					scope: "capture-difference",
+					filters: cursorFilters,
+					snapshot: baselineSnapshot,
+					key: { score: last.score, sectionId: last.sectionId, frameFamily: last.frameFamily, bytePosition: last.bytePosition, bitMask: last.bitMask }
+				})
+				: undefined;
+			const responseData: AgentCaptureDifferenceResult = {
+				baseline: { label: baselineLabel, snapshot: baselineSnapshot, totalFrameCount: baselineRead.totalFrameCount, filteredFrameCount: baselineRead.filteredFrameCount, excludedFrameCount: baselineRead.excludedFrameCount },
+				changed: { label: changedLabel, snapshot: changedSnapshot, totalFrameCount: changedRead.totalFrameCount, filteredFrameCount: changedRead.filteredFrameCount, excludedFrameCount: changedRead.excludedFrameCount },
+				alignment: alignmentSummary,
+				differenceSummary: evidence.differenceSummary,
+				candidateFields: pageRows
+			};
+			return makeAgentResponse({
+				data: responseData,
+				appliedFilters: cursorFilters,
+				snapshot: baselineSnapshot,
+				requestedLimit: page.requestedLimit,
+				effectiveLimit: page.effectiveLimit,
+				returned: pageRows.length,
+				nextCursor,
+				truncationReason: page.truncationReason,
+				truncated: hasMore || evidence.differenceSummary.truncated || Boolean(page.truncationReason),
+				suggestedOperations: pageRows.length ? [
+					{ tool: "get_message_context", reason: "Inspect the bounded baseline evidence IDs for the highest-ranked candidate", arguments: { frameId: pageRows[0]!.evidence.baselineFrameIds[0], captureId: baselineSnapshot.captureId, profileId: baselineSnapshot.profileId, profileVersion: baselineSnapshot.profileVersion, sourceDataRevision: baselineSnapshot.sourceDataRevision } },
+					{ tool: "get_message_context", reason: "Inspect the bounded changed evidence IDs for the highest-ranked candidate", arguments: { frameId: pageRows[0]!.evidence.changedFrameIds[0], captureId: changedSnapshot.captureId, profileId: changedSnapshot.profileId, profileVersion: changedSnapshot.profileVersion, sourceDataRevision: changedSnapshot.sourceDataRevision } }
+				] : []
+			});
+		});
 	}
 
 	readRawBytes(input: AgentRawReadInput): AgentResponse<AgentRawRead> {

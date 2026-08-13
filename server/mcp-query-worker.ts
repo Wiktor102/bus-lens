@@ -12,6 +12,8 @@ import {
 	type AgentComparisonResult,
 	type AgentByteStatisticsInput,
 	type AgentByteStatisticsResult,
+	type AgentCaptureDifferenceInput,
+	type AgentCaptureDifferenceResult,
 	type AgentCaptureDiscovery,
 	type AgentCaptureOverview,
 	type AgentMessageContext,
@@ -33,6 +35,7 @@ export type McpQueryRequest =
 	| { operation: "capture-discovery"; input: CaptureDiscoveryFiltersInput }
 	| { operation: "capture-overview"; captureId: string; snapshot?: Partial<AgentSnapshotReference> }
 	| { operation: "comparison"; input: AgentCompareCapturesInput }
+	| { operation: "capture-difference"; input: AgentCaptureDifferenceInput }
 	| { operation: "messages"; input: AgentMessageQueryInput }
 	| { operation: "message-context"; input: AgentMessageContextInput }
 	| { operation: "sequence-groups"; input: AgentSequenceGroupsInput }
@@ -75,9 +78,10 @@ try {
 	const queries = new CanonicalQueryService(database);
 	const value = database.transaction(():
 		| AgentResponse<AgentCaptureDiscovery>
-		| AgentResponse<AgentCaptureOverview>
-		| AgentResponse<AgentComparisonResult>
-		| AgentResponse<AgentMessageQueryResult>
+			| AgentResponse<AgentCaptureOverview>
+			| AgentResponse<AgentComparisonResult>
+			| AgentResponse<AgentCaptureDifferenceResult>
+			| AgentResponse<AgentMessageQueryResult>
 		| AgentResponse<AgentMessageContext>
 		| AgentResponse<AgentSequenceGroupsResult>
 		| AgentResponse<AgentSequenceOccurrencesResult>
@@ -91,6 +95,8 @@ try {
 				return queries.queryCaptureOverview(request.captureId, request.snapshot);
 			case "comparison":
 				return queries.compareCaptures(request.input);
+			case "capture-difference":
+				return queries.analyzeCaptureDifference(request.input);
 			case "messages":
 				return queries.queryMessages(request.input);
 			case "message-context":

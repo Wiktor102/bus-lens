@@ -5,6 +5,8 @@ import type {
 	AgentComparisonResult,
 	AgentByteStatisticsInput,
 	AgentByteStatisticsResult,
+	AgentCaptureDifferenceInput,
+	AgentCaptureDifferenceResult,
 	AgentCaptureDiscovery,
 	AgentCaptureOverview,
 	AgentMessageContext,
@@ -164,6 +166,10 @@ export class McpQueryExecutor {
 
 	getTransitions(input: AgentTransitionsInput): Promise<AgentResponse<AgentTransitionsResult>> {
 		return this.run<AgentResponse<AgentTransitionsResult>>({ operation: "transitions", input });
+	}
+
+	analyzeCaptureDifference(input: AgentCaptureDifferenceInput): Promise<AgentResponse<AgentCaptureDifferenceResult>> {
+		return this.run<AgentResponse<AgentCaptureDifferenceResult>>({ operation: "capture-difference", input });
 	}
 
 	readRawBytes(input: AgentRawReadInput): Promise<AgentResponse<AgentRawRead>> {
