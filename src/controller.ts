@@ -2,6 +2,9 @@
 // behavior can stay byte-for-byte compatible with the original implementation.
 // @ts-nocheck
 const STORAGE_KEY = "bus-lens-state-v1";
+const STORAGE_FORMAT_VERSION = 2;
+const INDEXED_DB_NAME = "bus-lens-state-v1";
+const INDEXED_DB_STORE = "archive";
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const BYTE_COLORS = [
@@ -42,7 +45,7 @@ const MAX_SEND_HISTORY = 250;
 
 const demoCaptures = [
 	{
-		id: crypto.randomUUID(),
+		id: createId(),
 		name: "Overview · Speed 1",
 		view: "Overview",
 		params: [
@@ -77,7 +80,7 @@ const demoCaptures = [
 		].map(([time, hex], i) => makeMessage(hex, parseTime(time), i)),
 		notes: [
 			{
-				id: crypto.randomUUID(),
+				id: createId(),
 				type: "capture",
 				text: "FC appears once immediately after returning to the Overview view; investigate as a possible screen transition marker.",
 				createdAt: Date.now()
@@ -86,7 +89,7 @@ const demoCaptures = [
 		annotations: {}
 	},
 	{
-		id: crypto.randomUUID(),
+		id: createId(),
 		name: "Speed · 1 → 2",
 		view: "Speed",
 		params: [
@@ -141,9 +144,22 @@ let queueDelayResolve = null;
 let patternRemarkTarget = null;
 const patternRecognitionCache = new WeakMap();
 
+function createId() {
+	const runtimeCrypto = globalThis.crypto;
+	if (typeof runtimeCrypto?.randomUUID === "function") return runtimeCrypto.randomUUID();
+	const bytes = new Uint8Array(16);
+	if (typeof runtimeCrypto?.getRandomValues === "function") runtimeCrypto.getRandomValues(bytes);
+	else bytes.forEach((_, index) => (bytes[index] = Math.floor(Math.random() * 256)));
+	bytes[6] = (bytes[6] & 0x0f) | 0x40;
+	bytes[8] = (bytes[8] & 0x3f) | 0x80;
+	return [...bytes]
+		.map((byte, index) => `${byte.toString(16).padStart(2, "0")}${[3, 5, 7, 9].includes(index) ? "-" : ""}`)
+		.join("");
+}
+
 function makeMessage(hex, timestamp = Date.now(), index = 0) {
 	const bytes = typeof hex === "string" ? (hex.match(/[0-9a-f]{2}/gi) || []).map(v => parseInt(v, 16)) : [...hex];
-	return { id: crypto.randomUUID(), timestamp, byteTimestamps: bytes.map(() => timestamp), bytes, sourceIndex: index };
+	return { id: createId(), timestamp, byteTimestamps: bytes.map(() => timestamp), bytes, sourceIndex: index };
 }
 
 function parseTime(value) {
@@ -154,10 +170,168 @@ function parseTime(value) {
 	return d.getTime();
 }
 
+// Raw bytes and framed messages contain the same data in two different shapes.
+// Keep the in-memory model rich for rendering, but store a compact raw stream
+// plus the message ranges needed to preserve annotation IDs across reloads.
+function compactByteStream(records = []) {
+	let previousTimestamp = 0;
+	return records.map((record, index) => {
+		const value = Number(record?.value);
+		const timestampValue = Number(record?.timestamp);
+		const timestamp = Number.isFinite(timestampValue)
+			? timestampValue
+			: index
+				? previousTimestamp
+				: Date.now();
+		const encodedTimestamp = index ? timestamp - previousTimestamp : timestamp;
+		previousTimestamp = timestamp;
+		return record?.direction === "tx"
+			? [Number.isFinite(value) ? value : 0, encodedTimestamp, 1]
+			: [Number.isFinite(value) ? value : 0, encodedTimestamp];
+	});
+}
+
+function restoreByteStream(records) {
+	let previousTimestamp = 0;
+	return records.map((record, index) => {
+		if (!Array.isArray(record)) return record;
+		const value = Number(record[0]);
+		const encodedTimestamp = Number(record[1]);
+		const timestamp = Number.isFinite(encodedTimestamp)
+			? index
+				? previousTimestamp + encodedTimestamp
+				: encodedTimestamp
+			: index
+				? previousTimestamp
+				: Date.now();
+		previousTimestamp = timestamp;
+		return {
+			value: Number.isFinite(value) ? value : 0,
+			timestamp,
+			...(record[2] === 1 ? { direction: "tx" } : {})
+		};
+	});
+}
+
+function compactCapture(capture) {
+	const { messages, byteStream, ...metadata } = capture;
+	return {
+		...metadata,
+		byteStream: compactByteStream(byteStream),
+		messageIndex: (messages || []).map(message => [
+			message.id || null,
+			Number.isFinite(message._byteStart) ? message._byteStart : null,
+			Number.isFinite(message._byteEnd) ? message._byteEnd : null
+		])
+	};
+}
+
+function restoreStoredState(archive) {
+	archive.captures.forEach(capture => {
+		if (Array.isArray(capture.byteStream) && capture.byteStream.some(Array.isArray)) {
+			capture.byteStream = restoreByteStream(capture.byteStream);
+		}
+		if (Array.isArray(capture.messageIndex)) {
+			capture.messages = capture.messageIndex
+				.filter(entry => Array.isArray(entry))
+				.map(([id, start, end]) => ({
+					id,
+					_byteStart: Number.isFinite(start) ? start : null,
+					_byteEnd: Number.isFinite(end) ? end : null
+				}));
+			delete capture.messageIndex;
+		}
+	});
+}
+
+function serializeState() {
+	state.activeId = activeId;
+	return JSON.stringify({
+		...state,
+		storageFormat: STORAGE_FORMAT_VERSION,
+		savedAt: Date.now(),
+		captures: state.captures.map(compactCapture)
+	});
+}
+
+function openStateDatabase() {
+	return new Promise((resolve, reject) => {
+		if (!globalThis.indexedDB) {
+			reject(new Error("IndexedDB is unavailable"));
+			return;
+		}
+		const request = globalThis.indexedDB.open(INDEXED_DB_NAME, 1);
+		request.onupgradeneeded = () => request.result.createObjectStore(INDEXED_DB_STORE);
+		request.onsuccess = () => resolve(request.result);
+		request.onerror = () => reject(request.error || new Error("Could not open IndexedDB"));
+	});
+}
+
+async function writeIndexedState(payload) {
+	const database = await openStateDatabase();
+	await new Promise((resolve, reject) => {
+		const transaction = database.transaction(INDEXED_DB_STORE, "readwrite");
+		transaction.objectStore(INDEXED_DB_STORE).put({ payload, savedAt: Date.now() }, STORAGE_KEY);
+		transaction.oncomplete = resolve;
+		transaction.onerror = () => reject(transaction.error || new Error("Could not save to IndexedDB"));
+		transaction.onabort = () => reject(transaction.error || new Error("Could not save to IndexedDB"));
+	});
+	database.close();
+}
+
+async function readIndexedState() {
+	const database = await openStateDatabase();
+	const value = await new Promise((resolve, reject) => {
+		const transaction = database.transaction(INDEXED_DB_STORE, "readonly");
+		const request = transaction.objectStore(INDEXED_DB_STORE).get(STORAGE_KEY);
+		request.onsuccess = () => resolve(request.result);
+		request.onerror = () => reject(request.error || new Error("Could not read IndexedDB"));
+	});
+	database.close();
+	return value;
+}
+
+async function clearIndexedState() {
+	try {
+		const database = await openStateDatabase();
+		await new Promise((resolve, reject) => {
+			const transaction = database.transaction(INDEXED_DB_STORE, "readwrite");
+			transaction.objectStore(INDEXED_DB_STORE).delete(STORAGE_KEY);
+			transaction.oncomplete = resolve;
+			transaction.onerror = () => reject(transaction.error || new Error("Could not clear IndexedDB"));
+			transaction.onabort = () => reject(transaction.error || new Error("Could not clear IndexedDB"));
+		});
+		database.close();
+	} catch {}
+}
+
+async function restoreIndexedState() {
+	try {
+		const record = await readIndexedState();
+		if (!record?.payload) return;
+		let localSavedAt = 0;
+		try {
+			localSavedAt = Number(JSON.parse(localStorage.getItem(STORAGE_KEY) || "null")?.savedAt) || 0;
+		} catch {}
+		if ((Number(record.savedAt) || 0) <= localSavedAt) return;
+		const restored = JSON.parse(record.payload);
+		if (!Array.isArray(restored?.captures)) return;
+		restoreStoredState(restored);
+		normalizeArchiveState(restored);
+		restored.captures.forEach(normalizeCapture);
+		restored.captures.forEach(capture => rebuildPreview(capture));
+		normalizeSendState(restored);
+		state = restored;
+		activeId = state.activeId || state.captures[0]?.id;
+		render();
+	} catch {}
+}
+
 function loadState() {
 	try {
 		const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
 		if (Array.isArray(saved?.captures)) {
+			restoreStoredState(saved);
 			normalizeArchiveState(saved);
 			saved.captures.forEach(normalizeCapture);
 			saved.captures.forEach(capture => rebuildPreview(capture));
@@ -182,7 +356,7 @@ function normalizeSendState(target = state) {
 		? target.sendQueue
 				.filter(item => Array.isArray(item.bytes) && item.bytes.length)
 				.map(item => ({
-					id: item.id || crypto.randomUUID(),
+					id: item.id || createId(),
 					bytes: item.bytes.map(Number),
 					createdAt: item.createdAt || Date.now()
 				}))
@@ -201,7 +375,7 @@ function normalizeArchiveState(archive) {
 	archive.folders = archive.folders
 		.filter(folder => folder && typeof folder === "object")
 		.map(folder => ({
-			id: String(folder.id || crypto.randomUUID()),
+			id: String(folder.id || createId()),
 			name: String(folder.name || "Untitled folder").trim() || "Untitled folder",
 			collapsed: Boolean(folder.collapsed),
 			createdAt: folder.createdAt || new Date().toISOString()
@@ -222,7 +396,7 @@ function normalizeCapture(c) {
 	c.annotations ||= {};
 	c.patternRemarks ||= {};
 	c.messages ||= [];
-	c.notes.forEach(note => (note.id ||= crypto.randomUUID()));
+	c.notes.forEach(note => (note.id ||= createId()));
 	c.previewMode ||= "length";
 	c.frameSize = Math.max(1, +c.frameSize || 3);
 	if (c.markerConfigured === undefined) {
@@ -243,7 +417,7 @@ function normalizeCapture(c) {
 	c.byteStream.forEach(record => (record.direction ||= "rx"));
 	normalizeSections(c);
 	c.messages.forEach(message => {
-		message.byteTimestamps ||= message.bytes.map(() => message.timestamp);
+		if (Array.isArray(message.bytes)) message.byteTimestamps ||= message.bytes.map(() => message.timestamp);
 	});
 	return c;
 }
@@ -254,13 +428,13 @@ function normalizeSections(c) {
 	(Array.isArray(c.frameSections) ? c.frameSections : []).forEach(section => {
 		const start = Math.max(0, Math.min(Math.max(0, streamLength - 1), Math.floor(+section.start || 0)));
 		byStart.set(start, {
-			id: section.id || crypto.randomUUID(),
+			id: section.id || createId(),
 			start,
 			frameSize: Math.max(1, Math.min(1024, Math.floor(+section.frameSize || c.frameSize || 3))),
 			collapseRuns: Boolean(section.collapseRuns)
 		});
 	});
-	if (!byStart.has(0)) byStart.set(0, { id: crypto.randomUUID(), start: 0, frameSize: c.frameSize, collapseRuns: false });
+	if (!byStart.has(0)) byStart.set(0, { id: createId(), start: 0, frameSize: c.frameSize, collapseRuns: false });
 	c.frameSections = [...byStart.values()].sort((a, b) => a.start - b.start);
 }
 
@@ -336,7 +510,7 @@ function rebuildPreview(c = capture()) {
 		.map(([start, end, sectionId], index) => {
 			const records = stream.slice(start, end);
 			return {
-				id: oldIds.get(`${start}:${end}`) || crypto.randomUUID(),
+				id: oldIds.get(`${start}:${end}`) || createId(),
 				timestamp: records[0].timestamp,
 				byteTimestamps: records.map(record => record.timestamp),
 				bytes: records.map(record => record.value),
@@ -350,12 +524,22 @@ function rebuildPreview(c = capture()) {
 }
 
 function persistState() {
-	state.activeId = activeId;
 	try {
-		localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+		const serialized = serializeState();
+		localStorage.setItem(STORAGE_KEY, serialized);
+		void clearIndexedState();
 	} catch (error) {
 		console.warn("Could not save Bus Lens state", error);
-		showToast("Capture is live, but browser storage is full");
+		let serialized;
+		try {
+			serialized = serializeState();
+		} catch {
+			showToast("Capture is live, but browser storage is full");
+			return;
+		}
+		void writeIndexedState(serialized)
+			.then(() => showToast("Capture is live; saving in extended browser storage"))
+			.catch(() => showToast("Capture is live, but browser storage is full"));
 	}
 }
 
@@ -761,7 +945,7 @@ function saveFolder() {
 		showToast("Folder renamed");
 	} else {
 		state.folders.push({
-			id: crypto.randomUUID(),
+			id: createId(),
 			name,
 			collapsed: false,
 			createdAt: new Date().toISOString()
@@ -1482,7 +1666,7 @@ function saveCaptureNote() {
 		note.updatedAt = Date.now();
 	} else {
 		c.notes ||= [];
-		c.notes.push({ id: crypto.randomUUID(), type: "capture", text, createdAt: Date.now() });
+		c.notes.push({ id: createId(), type: "capture", text, createdAt: Date.now() });
 	}
 	saveState();
 	renderHeader();
@@ -1531,7 +1715,7 @@ function addSectionRow(section) {
 	}
 	const existingStarts = $$("#sectionRows [data-section-start]").map(input => +input.value - 1);
 	const fallbackStart = Math.min(streamLength - 1, Math.max(...existingStarts, 0) + 1);
-	const values = section || { id: crypto.randomUUID(), start: fallbackStart, frameSize: c.frameSize };
+	const values = section || { id: createId(), start: fallbackStart, frameSize: c.frameSize };
 	const row = document.createElement("div");
 	row.className = "section-row";
 	row.dataset.sectionId = values.id;
@@ -1551,7 +1735,7 @@ function saveSections() {
 	if (!c) return;
 	const maxStart = Math.max(0, c.byteStream.length - 1);
 	const draft = $$("#sectionRows .section-row").map(row => ({
-		id: row.dataset.sectionId || crypto.randomUUID(),
+		id: row.dataset.sectionId || createId(),
 		start: Math.max(0, Math.min(maxStart, Math.floor(+row.querySelector("[data-section-start]").value - 1 || 0))),
 		frameSize: Math.max(1, Math.min(1024, Math.floor(+row.querySelector("[data-section-size]").value || c.frameSize))),
 		collapseRuns: Boolean(c.frameSections.find(section => section.id === row.dataset.sectionId)?.collapseRuns)
@@ -1585,7 +1769,7 @@ function startSectionAtByte(messageId, position) {
 	}
 	const preceding = [...c.frameSections].reverse().find(section => section.start < start);
 	c.frameSections.push({
-		id: crypto.randomUUID(),
+		id: createId(),
 		start,
 		frameSize: preceding?.frameSize || c.frameSize,
 		collapseRuns: preceding?.collapseRuns || false
@@ -1643,7 +1827,7 @@ function saveContext() {
 	};
 	if ($("#contextDialog").dataset.mode === "new") {
 		const c = normalizeCapture({
-			id: crypto.randomUUID(),
+			id: createId(),
 			...values,
 			createdAt: new Date().toISOString(),
 			messages: [],
@@ -1854,7 +2038,7 @@ function ingestChunk(bytes) {
 
 function recordSend(bytes, { origin, ok, error = "" }) {
 	const entry = {
-		id: crypto.randomUUID(),
+		id: createId(),
 		timestamp: Date.now(),
 		bytes: [...bytes],
 		origin,
@@ -1915,7 +2099,7 @@ function addDraftToQueue() {
 	const parsed = updateTransmitValidity();
 	if (!parsed.bytes?.length) return;
 	state.sendQueue.push({
-		id: crypto.randomUUID(),
+		id: createId(),
 		bytes: [...parsed.bytes],
 		createdAt: Date.now()
 	});
@@ -2006,7 +2190,7 @@ function parseDump(text) {
 				if (tm) messages.push(makeMessage(tm[2], parseTime(tm[1]), messages.length));
 			});
 			return {
-				id: crypto.randomUUID(),
+				id: createId(),
 				name: `${view} · imported ${index + 1}`,
 				view,
 				params,
@@ -2037,7 +2221,7 @@ async function importFile(file) {
 				const name = String(sourceFolder?.name || "Imported folder").trim() || "Imported folder";
 				let id = existingFolderNames.get(name.toLowerCase());
 				if (!id) {
-					id = crypto.randomUUID();
+					id = createId();
 					state.folders.push({
 						id,
 						name,
@@ -2049,12 +2233,12 @@ async function importFile(file) {
 				if (sourceFolder?.id) folderIdMap.set(sourceFolder.id, id);
 			});
 			captures.forEach(c => {
-				if (!c.id || existingCaptureIds.has(c.id)) c.id = crypto.randomUUID();
+				if (!c.id || existingCaptureIds.has(c.id)) c.id = createId();
 				existingCaptureIds.add(c.id);
 				c.folderId = folderIdMap.get(c.folderId) || null;
 				normalizeCapture(c);
 				rebuildPreview(c);
-				c.messages.forEach(m => (m.id ||= crypto.randomUUID()));
+				c.messages.forEach(m => (m.id ||= createId()));
 			});
 			state.captures.unshift(...captures);
 			if (!Array.isArray(imported) && Array.isArray(imported.sendHistory)) {
@@ -2290,10 +2474,10 @@ $("#sectionsForm").addEventListener("submit", event => {
 $("#moreBtn").onclick = () => $("#moreMenu").classList.toggle("hidden");
 $("#duplicateCaptureBtn").onclick = () => {
 	const copy = structuredClone(capture());
-	copy.id = crypto.randomUUID();
+	copy.id = createId();
 	copy.name += " · copy";
 	copy.createdAt = new Date().toISOString();
-	copy.messages.forEach(m => (m.id = crypto.randomUUID()));
+	copy.messages.forEach(m => (m.id = createId()));
 	copy.annotations = {};
 	state.captures.unshift(copy);
 	activeId = copy.id;
@@ -2339,7 +2523,7 @@ $("#captureNoteForm").onsubmit = e => {
 	e.preventDefault();
 	if (!capture()) return;
 	const type = $("#noteScope").value;
-	const note = { id: crypto.randomUUID(), type, text: $("#captureNoteText").value.trim(), createdAt: Date.now() };
+	const note = { id: createId(), type, text: $("#captureNoteText").value.trim(), createdAt: Date.now() };
 	if (type === "sequence") {
 		const max = Math.max(1, capture().messages.length);
 		note.start = Math.max(1, Math.min(max, +$("#sequenceStart").value || 1));
@@ -2418,5 +2602,6 @@ window.addEventListener("beforeunload", () => {
 });
 
 render();
+void restoreIndexedState();
 
 export {};
