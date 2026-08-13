@@ -83,6 +83,23 @@ const transitionInputSchema = z.union([
 	error: "Invalid get_transitions request: aggregate queries omit sectionId and changedPositions; refined scans require sourceSignature or destinationSignature and do not support cursor"
 });
 
+const byteStatisticsScopeFields = {
+	sectionId: z.string().min(1).optional(),
+	frameLength: z.number().int().positive().optional(),
+	exactSignature: z.string().min(1).optional(),
+	wildcardHexPattern: z.string().min(1).optional(),
+	direction: z.string().min(1).optional()
+};
+const byteStatisticsScopeSchema = z.union([
+	z.object({ ...byteStatisticsScopeFields, sectionId: z.string().min(1) }),
+	z.object({ ...byteStatisticsScopeFields, frameLength: z.number().int().positive() }),
+	z.object({ ...byteStatisticsScopeFields, exactSignature: z.string().min(1) }),
+	z.object({ ...byteStatisticsScopeFields, wildcardHexPattern: z.string().min(1) }),
+	z.object({ ...byteStatisticsScopeFields, direction: z.string().min(1) })
+], {
+	error: "scope must contain at least one of sectionId, frameLength, exactSignature, wildcardHexPattern, or direction"
+});
+
 function errorResult(error: unknown): { isError: true; structuredContent: AgentResponse<unknown>; content: [{ type: "text"; text: string }] } {
 	const normalized = error instanceof AgentQueryError
 		? error
@@ -220,13 +237,14 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 	registerAnalysisTool(
 		server,
 		"get_byte_statistics",
-		"Read vocabulary, bit-one percentages, variance, and applicable-frame counts for at most 32 requested byte positions.",
+		"Read profile-wide vocabulary, bit-one percentages, variance, and applicable-frame counts for at most 32 requested byte positions; optionally scope to a non-empty combination of sectionId, frameLength, exactSignature, wildcardHexPattern, or direction to report matched-frame denominators.",
 		z.object({
 			captureId: z.string().min(1),
 			profileId: z.string().optional(),
 			profileVersion: z.number().int().nonnegative().optional(),
 			sourceDataRevision: z.number().int().nonnegative().optional(),
-			positions: z.array(z.number().int().nonnegative()).min(1).max(32)
+			positions: z.array(z.number().int().nonnegative()).min(1).max(32),
+			scope: byteStatisticsScopeSchema.optional()
 		}),
 		input => queries.getByteStatistics(input as AgentByteStatisticsInput),
 		response => `Returned byte statistics for ${(response.data as AgentByteStatisticsResult).positions.length} requested position${(response.data as AgentByteStatisticsResult).positions.length === 1 ? "" : "s"}.`,

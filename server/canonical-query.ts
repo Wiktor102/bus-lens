@@ -287,6 +287,15 @@ export type AgentByteStatisticsInput = Readonly<{
 	profileVersion?: number;
 	sourceDataRevision?: number;
 	positions: readonly number[];
+	scope?: AgentByteStatisticsScope;
+}>;
+
+export type AgentByteStatisticsScope = Readonly<{
+	sectionId?: string;
+	frameLength?: number;
+	exactSignature?: string;
+	wildcardHexPattern?: string;
+	direction?: string;
 }>;
 
 export type AgentByteStatistics = Readonly<{
@@ -298,6 +307,8 @@ export type AgentByteStatistics = Readonly<{
 }>;
 
 export type AgentByteStatisticsResult = Readonly<{
+	scope: AgentByteStatisticsScope;
+	matchedFrameCount: number;
 	positions: readonly AgentByteStatistics[];
 }>;
 
@@ -444,6 +455,11 @@ type NormalizedMessageFilters = Readonly<{
 	hidden: "include" | "visible-only" | "hidden-only";
 	notePresence: "any" | "with-note" | "without-note";
 	sequenceGroupId?: string;
+}>;
+
+type NormalizedByteStatisticsScope = Readonly<{
+	scope: AgentByteStatisticsScope;
+	wildcardTokens?: readonly WildcardToken[];
 }>;
 
 type SequenceGroupRow = {
@@ -684,6 +700,15 @@ function parseWildcardPattern(value: unknown): { pattern: string; tokens: readon
 	return { pattern: rawTokens.map(token => token.toUpperCase()).join(" "), tokens };
 }
 
+function assertWildcardPatternIsBounded(
+	wildcard: { pattern: string; tokens: readonly WildcardToken[] } | undefined,
+	boundedByRange: boolean
+): void {
+	if (wildcard && wildcard.tokens[0] === null && !boundedByRange) {
+		throw new AgentQueryError("wildcard-too-broad", "A wildcard must begin with a literal byte or include both bounds of an ordinal or timestamp range", { pattern: wildcard.pattern });
+	}
+}
+
 function normalizeMessageFilters(input: AgentMessageQueryInput): NormalizedMessageFilters {
 	const ordinalFrom = optionalNonNegativeInteger(input.ordinalFrom ?? input.frameOrdinalFrom, "ordinalFrom");
 	const ordinalTo = optionalNonNegativeInteger(input.ordinalTo ?? input.frameOrdinalTo, "ordinalTo");
@@ -696,11 +721,7 @@ function normalizeMessageFilters(input: AgentMessageQueryInput): NormalizedMessa
 		throw new AgentQueryError("invalid-input", "timestampFrom must not exceed timestampTo", { timestampFrom, timestampTo });
 	}
 	const wildcard = parseWildcardPattern(input.wildcardHexPattern);
-	if (wildcard && wildcard.tokens[0] === null && !(
-		ordinalFrom !== undefined && ordinalTo !== undefined || timestampFrom !== undefined && timestampTo !== undefined
-	)) {
-		throw new AgentQueryError("wildcard-too-broad", "A wildcard must begin with a literal byte or include both bounds of an ordinal or timestamp range", { pattern: wildcard.pattern });
-	}
+	assertWildcardPatternIsBounded(wildcard, ordinalFrom !== undefined && ordinalTo !== undefined || timestampFrom !== undefined && timestampTo !== undefined);
 	const hidden = input.hidden ?? "include";
 	const notePresence = input.notePresence ?? "any";
 	return {
@@ -716,6 +737,64 @@ function normalizeMessageFilters(input: AgentMessageQueryInput): NormalizedMessa
 		notePresence,
 		...(input.sequenceGroupId ? { sequenceGroupId: requiredText(input.sequenceGroupId, "sequenceGroupId") } : {})
 	};
+}
+
+function normalizeByteStatisticsScope(input: AgentByteStatisticsInput["scope"]): NormalizedByteStatisticsScope {
+	if (input === undefined) return { scope: {} };
+	if (!input || typeof input !== "object" || Array.isArray(input)) {
+		throw new AgentQueryError("invalid-input", "scope must be an object with at least one filter");
+	}
+	const sectionId = input.sectionId === undefined ? undefined : requiredText(input.sectionId, "sectionId");
+	const frameLength = input.frameLength === undefined ? undefined : optionalNonNegativeInteger(input.frameLength, "frameLength");
+	if (frameLength === 0) throw new AgentQueryError("invalid-input", "frameLength must be a positive integer", { label: "frameLength" });
+	const exactSignature = input.exactSignature === undefined ? undefined : normalizedSignature(input.exactSignature, "exactSignature");
+	const wildcard = parseWildcardPattern(input.wildcardHexPattern);
+	assertWildcardPatternIsBounded(wildcard, false);
+	const direction = input.direction === undefined ? undefined : requiredText(input.direction, "direction").toLowerCase();
+	const scope: AgentByteStatisticsScope = {
+		...(sectionId === undefined ? {} : { sectionId }),
+		...(frameLength === undefined ? {} : { frameLength }),
+		...(exactSignature === undefined ? {} : { exactSignature }),
+		...(wildcard === undefined ? {} : { wildcardHexPattern: wildcard.pattern }),
+		...(direction === undefined ? {} : { direction })
+	};
+	if (!Object.keys(scope).length) throw new AgentQueryError("invalid-input", "scope must contain at least one filter");
+	return { scope, ...(wildcard ? { wildcardTokens: wildcard.tokens } : {}) };
+}
+
+function byteStatisticsFramePredicate(
+	normalizedScope: NormalizedByteStatisticsScope,
+	alias = "frames"
+): { sql: string; params: Record<string, unknown> } {
+	const clauses: string[] = [];
+	const params: Record<string, unknown> = {};
+	const scope = normalizedScope.scope;
+	if (scope.sectionId !== undefined) {
+		clauses.push(`${alias}.section_id = @scopeSectionId`);
+		params.scopeSectionId = scope.sectionId;
+	}
+	if (scope.frameLength !== undefined) {
+		clauses.push(`json_array_length(${alias}.bytes_json) = @scopeFrameLength`);
+		params.scopeFrameLength = scope.frameLength;
+	}
+	if (scope.exactSignature !== undefined) {
+		clauses.push(`${alias}.signature = @scopeExactSignature`);
+		params.scopeExactSignature = scope.exactSignature;
+	}
+	if (scope.direction !== undefined) {
+		clauses.push(`EXISTS (SELECT 1 FROM json_each(${alias}.directions_json) direction_values WHERE LOWER(CAST(direction_values.value AS TEXT)) = @scopeDirection)`);
+		params.scopeDirection = scope.direction;
+	}
+	if (normalizedScope.wildcardTokens) {
+		clauses.push(`json_array_length(${alias}.bytes_json) >= @scopeWildcardLength`);
+		params.scopeWildcardLength = normalizedScope.wildcardTokens.length;
+		normalizedScope.wildcardTokens.forEach((token, index) => {
+			if (token === null) return;
+			clauses.push(`CAST(json_extract(${alias}.bytes_json, '$[${index}]') AS INTEGER) = @scopeWildcard${index}`);
+			params[`scopeWildcard${index}`] = token;
+		});
+	}
+	return { sql: clauses.length ? ` AND ${clauses.join(" AND ")}` : "", params };
 }
 
 function timestampFromFrame(row: Pick<FrameRow, "timestamps_json">): number | null {
@@ -1771,6 +1850,8 @@ export class CanonicalQueryService {
 		if (!Array.isArray(input.positions) || input.positions.length === 0) throw new AgentQueryError("invalid-input", "positions must contain at least one byte position");
 		if (input.positions.length > 32) throw new AgentQueryError("invalid-input", "At most 32 byte positions may be requested", { maximum: 32 });
 		const positions = [...new Set(input.positions.map((position, index) => optionalNonNegativeInteger(position, `positions[${index}]`) as number))].sort((left, right) => left - right);
+		const normalizedScope = normalizeByteStatisticsScope(input.scope);
+		const scoped = Object.keys(normalizedScope.scope).length > 0;
 		const requested: Partial<AgentSnapshotReference> = {
 			...(input.profileId ? { profileId: requiredText(input.profileId, "profileId") } : {}),
 			...(input.profileVersion === undefined ? {} : { profileVersion: optionalNonNegativeInteger(input.profileVersion, "profileVersion") }),
@@ -1778,26 +1859,83 @@ export class CanonicalQueryService {
 		};
 		const { profile, snapshot } = this.resolveAnalysisProfile(captureId, requested);
 		const placeholders = positions.map((_position, index) => `@position${index}`);
-		const parameters = { profileId: profile.id, ...Object.fromEntries(positions.map((position, index) => [`position${index}`, position])) };
-		const vocabularyRows = this.database.prepare(
-			`SELECT position, value, count FROM byte_statistics
-			 WHERE profile_id = @profileId AND position IN (${placeholders.join(", ")})
-			 ORDER BY position ASC, value ASC`
-		).all(parameters) as Array<{ position: number; value: number; count: number }>;
-		const bitRows = this.database.prepare(
-			`SELECT position, bit, percentage, variance FROM bit_statistics
-			 WHERE profile_id = @profileId AND position IN (${placeholders.join(", ")})
-			 ORDER BY position ASC, bit ASC`
-		).all(parameters) as Array<{ position: number; bit: number; percentage: number; variance: string }>;
-		const vocabularyByPosition = new Map<number, Array<{ value: number; count: number }>>();
-		for (const row of vocabularyRows) (vocabularyByPosition.get(row.position) ?? (vocabularyByPosition.set(row.position, []), vocabularyByPosition.get(row.position)!)).push({ value: row.value, count: row.count });
+		const positionParameters = Object.fromEntries(positions.map((position, index) => [`position${index}`, position]));
+		const vocabularyRows: Array<{ position: number; value: number; count: number }> = [];
 		const bitsByPosition = new Map<number, Array<{ bit: number; percentage: number }>>();
 		const varianceByPosition = new Map<number, string>();
-		for (const row of bitRows) {
-			(bitsByPosition.get(row.position) ?? (bitsByPosition.set(row.position, []), bitsByPosition.get(row.position)!)).push({ bit: row.bit, percentage: row.percentage });
-			varianceByPosition.set(row.position, row.variance);
+		const applicableFrameCountByPosition = new Map<number, number>();
+		let matchedFrameCount: number;
+		if (!scoped) {
+			const parameters = { profileId: profile.id, ...positionParameters };
+			matchedFrameCount = (this.database.prepare(
+				"SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId"
+			).get({ profileId: profile.id }) as { count: number }).count;
+			vocabularyRows.push(...this.database.prepare(
+				`SELECT position, value, count FROM byte_statistics
+				 WHERE profile_id = @profileId AND position IN (${placeholders.join(", ")})
+				 ORDER BY position ASC, value ASC`
+			).all(parameters) as Array<{ position: number; value: number; count: number }>);
+			const bitRows = this.database.prepare(
+				`SELECT position, bit, percentage, variance FROM bit_statistics
+				 WHERE profile_id = @profileId AND position IN (${placeholders.join(", ")})
+				 ORDER BY position ASC, bit ASC`
+			).all(parameters) as Array<{ position: number; bit: number; percentage: number; variance: string }>;
+			for (const row of bitRows) {
+				(bitsByPosition.get(row.position) ?? (bitsByPosition.set(row.position, []), bitsByPosition.get(row.position)!)).push({ bit: row.bit, percentage: row.percentage });
+				varianceByPosition.set(row.position, row.variance);
+			}
+		} else {
+			const predicate = byteStatisticsFramePredicate(normalizedScope, "frames");
+			const frameParameters = { profileId: profile.id, ...predicate.params };
+			matchedFrameCount = (this.database.prepare(
+				`SELECT COUNT(*) AS count FROM materialized_frames AS frames
+				 WHERE frames.profile_id = @profileId${predicate.sql}`
+			).get(frameParameters) as { count: number }).count;
+			const scopedParameters = { ...frameParameters, ...positionParameters };
+			const scopedBytes = `
+				WITH matched_frames AS (
+					SELECT frames.bytes_json
+					FROM materialized_frames AS frames
+					WHERE frames.profile_id = @profileId${predicate.sql}
+				), expanded_bytes AS (
+					SELECT CAST(byte_values.key AS INTEGER) AS position,
+					       CAST(byte_values.value AS INTEGER) AS value
+					FROM matched_frames
+					CROSS JOIN json_each(matched_frames.bytes_json) AS byte_values
+					WHERE CAST(byte_values.key AS INTEGER) IN (${placeholders.join(", ")})
+				)`;
+			vocabularyRows.push(...this.database.prepare(
+				`${scopedBytes}
+				 SELECT position, value, COUNT(*) AS count
+				 FROM expanded_bytes
+				 GROUP BY position, value
+				 ORDER BY position ASC, value ASC`
+			).all(scopedParameters) as Array<{ position: number; value: number; count: number }>);
+			const bitRows = this.database.prepare(
+				`${scopedBytes}, bit_values(bit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7))
+				 SELECT position, bit_values.bit AS bit, COUNT(*) AS applicable_frame_count,
+				        SUM(CASE WHEN ((value >> bit_values.bit) & 1) = 1 THEN 1 ELSE 0 END) AS bit_one_count
+				 FROM expanded_bytes
+				 CROSS JOIN bit_values
+				 GROUP BY position, bit_values.bit
+				 ORDER BY position ASC, bit_values.bit ASC`
+			).all(scopedParameters) as Array<{ position: number; bit: number; applicable_frame_count: number; bit_one_count: number }>;
+			for (const row of bitRows) {
+				const denominator = Number(row.applicable_frame_count);
+				const ratio = denominator ? Number(row.bit_one_count) / denominator : 0;
+				(bitsByPosition.get(row.position) ?? (bitsByPosition.set(row.position, []), bitsByPosition.get(row.position)!)).push({
+					bit: row.bit,
+					percentage: Math.round(ratio * 100)
+				});
+				applicableFrameCountByPosition.set(row.position, denominator);
+				varianceByPosition.set(row.position, (Math.min(ratio, 1 - ratio) * 2).toFixed(2));
+			}
 		}
+		const vocabularyByPosition = new Map<number, Array<{ value: number; count: number }>>();
+		for (const row of vocabularyRows) (vocabularyByPosition.get(row.position) ?? (vocabularyByPosition.set(row.position, []), vocabularyByPosition.get(row.position)!)).push({ value: row.value, count: row.count });
 		const data = {
+			scope: normalizedScope.scope,
+			matchedFrameCount,
 			positions: positions.map(position => {
 				const vocabulary = vocabularyByPosition.get(position) ?? [];
 				return {
@@ -1805,13 +1943,13 @@ export class CanonicalQueryService {
 					vocabulary,
 					bitOnePercentages: bitsByPosition.get(position) ?? [],
 					variance: varianceByPosition.get(position) ?? null,
-					applicableFrameCount: vocabulary.reduce((sum, row) => sum + row.count, 0)
+					applicableFrameCount: applicableFrameCountByPosition.get(position) ?? vocabulary.reduce((sum, row) => sum + row.count, 0)
 				};
 			})
 		};
 		const response = makeAgentResponse({
 			data,
-			appliedFilters: { captureId, positions },
+			appliedFilters: { captureId, positions, scope: normalizedScope.scope },
 			snapshot,
 			returned: positions.length,
 			truncated: false,

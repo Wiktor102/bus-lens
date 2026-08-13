@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 
 export type SqliteDatabase = InstanceType<typeof Database>;
-export const CURRENT_SCHEMA_VERSION = 7;
+export const CURRENT_SCHEMA_VERSION = 8;
 
 type Migration = {
 	version: number;
@@ -690,6 +690,17 @@ const migrations: Migration[] = [
 			for (const [index, table, columns] of indexes) {
 				if (tables.has(table)) database.exec(`CREATE INDEX IF NOT EXISTS ${index} ON ${table} (${columns})`);
 			}
+		}
+	},
+	{
+		version: 8,
+		up: database => {
+			// Scoped byte statistics commonly constrain a profile by section and
+			// exact signature before expanding the frame byte arrays.
+			database.exec(`
+				CREATE INDEX IF NOT EXISTS materialized_frames_agent_scope
+					ON materialized_frames (profile_id, section_id, signature);
+			`);
 		}
 	}
 ];

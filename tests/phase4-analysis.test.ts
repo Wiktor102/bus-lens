@@ -59,6 +59,33 @@ function seedManyFrameAnalysisCapture(frameCount: number) {
 	return { database, profileId: finalized.profileId };
 }
 
+function seedMixedFrameAnalysisCapture() {
+	const database = openDatabase(":memory:");
+	const commands = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-10T00:00:00.000Z" });
+	const mixedFraming = [
+		{ start: 0, framingMode: "length", frameSize: 2, collapseRuns: false, collapsed: false },
+		{ start: 4, framingMode: "length", frameSize: 3, collapseRuns: false, collapsed: false }
+	] as const;
+	commands.createCapture({ captureId: "mixed-frame-analysis-capture", framing: mixedFraming, name: "Mixed frame analysis capture", inputFormat: "binary" });
+	commands.startSession({ captureId: "mixed-frame-analysis-capture", sessionId: "mixed-frame-analysis-session" });
+	const bytes = [0x10, 0x01, 0x10, 0x02, 0xa0, 0x01, 0x02, 0xa0, 0x03, 0x04];
+	const append = commands.appendChunk({
+		captureId: "mixed-frame-analysis-capture",
+		sessionId: "mixed-frame-analysis-session",
+		requestId: "mixed-frame-analysis-request",
+		sequence: 0,
+		expectedStartOffset: 0,
+		bytes,
+		timestamps: bytes.map((_byte, index) => 100 + index),
+		directions: ["rx", "rx", "rx", "rx", "tx", "tx", "tx", "tx", "tx", "tx"]
+	});
+	const finalized = commands.finalizeSession({ captureId: "mixed-frame-analysis-capture", sessionId: "mixed-frame-analysis-session", expectedDataRevision: append.dataRevision });
+	const sections = database.prepare(
+		"SELECT id, frame_length FROM framing_sections WHERE profile_id = @profileId ORDER BY position"
+	).all({ profileId: finalized.profileId }) as Array<{ id: string; frame_length: number | null }>;
+	return { database, commands, profileId: finalized.profileId, dataRevision: finalized.dataRevision, sections };
+}
+
 test("analysis messages apply bounded filters, stable evidence references, and keyset cursors", () => {
 	const { database, profileId, groupId, firstFrameId } = seedAnalysisCapture();
 	try {
@@ -232,6 +259,99 @@ test("analysis groups, occurrences, statistics, transitions, and raw reads remai
 		assert.equal(raw.data.hex, "01 ?? 01 02");
 		assert.equal(raw.data.timestamps.deltas.length, 3);
 		assert.throws(() => query.readRawBytes({ captureId: "analysis-capture", rawOffset: 0, length: 4097 }), /length/);
+	} finally {
+		database.close();
+	}
+});
+
+test("byte statistics scope frame families with SQL-derived denominators and remains snapshot-pinned", () => {
+	const { database, commands, profileId, dataRevision, sections } = seedMixedFrameAnalysisCapture();
+	try {
+		const query = new CanonicalQueryService(database);
+		const profileWide = query.getByteStatistics({ captureId: "mixed-frame-analysis-capture", profileId, positions: [0, 1, 2] });
+		assert.deepEqual(profileWide.data.scope, {});
+		assert.equal(profileWide.data.matchedFrameCount, 4);
+		assert.deepEqual(profileWide.meta.appliedFilters.scope, {});
+		assert.equal(profileWide.data.positions.find(position => position.position === 0)?.applicableFrameCount, 4);
+		assert.deepEqual(profileWide.data.positions.find(position => position.position === 2)?.vocabulary, [{ value: 2, count: 1 }, { value: 4, count: 1 }]);
+		assert.equal(profileWide.data.positions.find(position => position.position === 2)?.applicableFrameCount, 2);
+
+		const twoByteSection = query.getByteStatistics({
+			captureId: "mixed-frame-analysis-capture",
+			profileId,
+			positions: [0, 1, 2],
+			scope: { sectionId: sections[0]!.id }
+		});
+		assert.deepEqual(twoByteSection.data.scope, { sectionId: sections[0]!.id });
+		assert.equal(twoByteSection.data.matchedFrameCount, 2);
+		assert.equal(twoByteSection.data.positions.find(position => position.position === 0)?.applicableFrameCount, 2);
+		assert.deepEqual(twoByteSection.data.positions.find(position => position.position === 2)?.vocabulary, []);
+		assert.equal(twoByteSection.data.positions.find(position => position.position === 2)?.variance, null);
+
+		const threeByteFrames = query.getByteStatistics({
+			captureId: "mixed-frame-analysis-capture",
+			profileId,
+			positions: [0, 1, 2],
+			scope: { frameLength: 3 }
+		});
+		assert.equal(threeByteFrames.data.matchedFrameCount, 2);
+		assert.equal(threeByteFrames.data.positions.find(position => position.position === 2)?.applicableFrameCount, 2);
+		assert.deepEqual(threeByteFrames.data.positions.find(position => position.position === 0)?.vocabulary, [{ value: 160, count: 2 }]);
+
+		const wildcard = query.getByteStatistics({
+			captureId: "mixed-frame-analysis-capture",
+			profileId,
+			positions: [0, 1, 2],
+			scope: { wildcardHexPattern: "a0 ?? 04" }
+		});
+		assert.deepEqual(wildcard.data.scope, { wildcardHexPattern: "A0 ?? 04" });
+		assert.equal(wildcard.data.matchedFrameCount, 1);
+		assert.deepEqual(wildcard.data.positions.find(position => position.position === 1)?.vocabulary, [{ value: 3, count: 1 }]);
+		assert.equal(wildcard.data.positions.find(position => position.position === 1)?.bitOnePercentages.find(bit => bit.bit === 1)?.percentage, 100);
+
+		const txFrames = query.getByteStatistics({
+			captureId: "mixed-frame-analysis-capture",
+			profileId,
+			positions: [0, 1],
+			scope: { direction: "TX" }
+		});
+		assert.deepEqual(txFrames.data.scope, { direction: "tx" });
+		assert.equal(txFrames.data.matchedFrameCount, 2);
+		assert.equal(txFrames.data.positions.find(position => position.position === 1)?.bitOnePercentages.find(bit => bit.bit === 1)?.percentage, 50);
+		assert.deepEqual(query.getByteStatistics({
+			captureId: "mixed-frame-analysis-capture",
+			profileId,
+			positions: [1],
+			scope: { exactSignature: "a0 03 04" }
+		}).data.scope, { exactSignature: "A0 03 04" });
+
+		const empty = query.getByteStatistics({ captureId: "mixed-frame-analysis-capture", profileId, positions: [0], scope: { sectionId: "missing-section" } });
+		assert.equal(empty.data.matchedFrameCount, 0);
+		assert.deepEqual(empty.data.positions[0], { position: 0, vocabulary: [], bitOnePercentages: [], variance: null, applicableFrameCount: 0 });
+		assert.throws(
+			() => query.getByteStatistics({ captureId: "mixed-frame-analysis-capture", profileId, positions: [0], scope: {} }),
+			error => (error as { code?: string }).code === "invalid-input"
+		);
+		assert.throws(
+			() => query.getByteStatistics({ captureId: "mixed-frame-analysis-capture", profileId, positions: [0], scope: { wildcardHexPattern: "?? 01" } }),
+			error => (error as { code?: string }).code === "wildcard-too-broad"
+		);
+
+		commands.reframe({
+			captureId: "mixed-frame-analysis-capture",
+			expectedActiveProfileId: profileId,
+			expectedDataRevision: dataRevision,
+			sections: [{ start: 0, framingMode: "length", frameSize: 1 }]
+		});
+		const historical = query.getByteStatistics({
+			captureId: "mixed-frame-analysis-capture",
+			profileId,
+			positions: [2],
+			scope: { frameLength: 3 }
+		});
+		assert.equal(historical.meta.snapshot?.profileId, profileId);
+		assert.equal(historical.data.matchedFrameCount, 2);
+		assert.deepEqual(historical.data.positions[0]?.vocabulary, [{ value: 2, count: 1 }, { value: 4, count: 1 }]);
 	} finally {
 		database.close();
 	}
