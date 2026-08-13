@@ -119,6 +119,18 @@ button {
 	align-items: center;
 	gap: 10px;
 }
+.topbar .transport > .btn,
+.topbar .transport > .status-badge {
+	display: inline-flex;
+	align-items: center;
+	height: 38px;
+}
+.transport-divider {
+	width: 1px;
+	height: 24px;
+	margin: 0 2px;
+	background: var(--line);
+}
 .status-badge {
 	font: 11px var(--mono);
 	color: var(--muted);

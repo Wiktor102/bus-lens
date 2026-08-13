@@ -80,6 +80,7 @@ function TopBar() {
 			</div>
 			<div className="transport">
 				<a id="mcpSettingsBtn" className="btn btn-secondary" href={MCP_SETTINGS_PATH}>MCP settings</a>
+				<span className="transport-divider" aria-hidden="true" />
 				<span id="connectionBadge" className={`status-badge ${snapshot.connected ? "connected" : ""}`.trim()}>
 					<i /> {snapshot.connectionLabel}
 				</span>
