@@ -186,6 +186,16 @@ button {
 	stroke-linejoin: round;
 	stroke-width: 1.5;
 }
+.connection-icon {
+	position: relative;
+	display: block;
+	width: 17px;
+	height: 17px;
+}
+.connection-icon svg {
+	position: absolute;
+	inset: 0;
+}
 .transport-divider {
 	width: 1px;
 	height: 24px;
@@ -255,6 +265,23 @@ button {
 .text-btn:hover,
 .icon-btn:hover {
 	color: var(--ink);
+}
+.text-btn svg {
+	width: 14px;
+	height: 14px;
+	margin-right: 4px;
+	vertical-align: -0.2em;
+}
+.text-btn svg,
+.row-action svg,
+.note-link svg,
+.verification-checks svg,
+.agent-config-chevron svg {
+	fill: none;
+	stroke: currentColor;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 1.6;
 }
 .text-btn:disabled,
 .icon-btn:disabled {
@@ -378,6 +405,13 @@ p {
 	color: var(--ink);
 	width: 100%;
 	font: 11px var(--mono);
+}
+.search-box > svg,
+.stream-filter label > svg {
+	flex: 0 0 15px;
+	width: 15px;
+	height: 15px;
+	stroke-width: 1.6;
 }
 .archive-storage-filter {
 	display: flex;
@@ -608,6 +642,16 @@ p {
 }
 .sidebar-actions button {
 	font: 11px var(--mono);
+}
+.sidebar-actions button {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+.sidebar-actions button svg {
+	width: 13px;
+	height: 13px;
+	margin-right: 0;
 }
 
 .folder-modal {
@@ -878,6 +922,34 @@ p {
 	stroke-linejoin: round;
 	stroke-width: 1.6;
 }
+.message-context-menu .section-move-icon {
+	position: relative;
+	display: block;
+	flex: 0 0 17px;
+	width: 17px;
+	height: 17px;
+}
+.message-context-menu .section-move-icon > svg {
+	position: absolute;
+	flex: none;
+}
+.message-context-menu .section-move-icon.byte > svg {
+	inset: 0;
+}
+.message-context-menu .section-move-icon.message .section-move-list {
+	top: 0;
+	left: 0;
+	width: 17px;
+	height: 17px;
+	transform: scaleX(0.58);
+	transform-origin: left center;
+}
+.message-context-menu .section-move-icon.message .section-move-arrow {
+	top: 3px;
+	right: 0;
+	width: 11px;
+	height: 11px;
+}
 .capture-context-menu {
 	width: 220px;
 }
@@ -898,10 +970,15 @@ p {
 	height: 100%;
 }
 .capture-context-chevron {
+	display: inline-flex;
+	align-items: center;
 	margin-left: auto;
 	color: var(--muted);
-	font-size: 16px;
 	line-height: 1;
+}
+.capture-context-chevron svg {
+	width: 15px;
+	height: 15px;
 }
 .capture-context-submenu {
 	margin: 1px 0 4px 27px;
@@ -914,6 +991,11 @@ p {
 	padding: 6px 8px;
 	font-size: 10px;
 	line-height: 1;
+}
+.capture-context-submenu button > svg {
+	flex: 0 0 14px;
+	width: 14px;
+	height: 14px;
 }
 .capture-context-submenu button:disabled {
 	color: var(--acid);
@@ -1336,6 +1418,10 @@ input:checked + .switch::after {
 .queue-item .icon-btn:hover {
 	border-color: var(--line);
 }
+.queue-item .icon-btn svg {
+	width: 13px;
+	height: 13px;
+}
 .history-card {
 	grid-column: 1 / -1;
 }
@@ -1439,6 +1525,11 @@ input:checked + .switch::after {
 	cursor: pointer;
 	font: 16px var(--mono);
 }
+.send-popup-minimize svg {
+	width: 15px;
+	height: 15px;
+	vertical-align: middle;
+}
 .send-popup-minimize:hover { color: var(--ink); background: color-mix(in srgb, var(--blue) 7%, transparent); }
 .send-popup-content {
 	max-height: min(680px, calc(100vh - 110px));
@@ -1485,6 +1576,23 @@ input:checked + .switch::after {
 	cursor: pointer;
 	font: 9px var(--mono);
 	opacity: 0;
+}
+.row-action,
+.note-link {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+.row-action svg,
+.note-link svg {
+	flex: 0 0 12px;
+	width: 12px;
+	height: 12px;
+}
+.note-link > span {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 tr:hover .row-action,
 .row-action:focus-visible {
@@ -2207,6 +2315,16 @@ tr:hover .row-action,
 	gap: 6px 12px;
 	margin-top: 5px;
 	font: 10px var(--mono);
+}
+.verification-checks > span {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+.verification-checks svg {
+	width: 12px;
+	height: 12px;
+	flex: 0 0 12px;
 }
 .verification-checks .passed { color: var(--acid); }
 .verification-checks .failed { color: var(--red); }
@@ -2956,8 +3074,13 @@ tr:hover .row-action,
 	outline: 0;
 }
 .agent-config-chevron {
+	display: inline-flex;
+	align-items: center;
 	color: var(--acid);
-	font-size: 14px;
+}
+.agent-config-chevron svg {
+	width: 14px;
+	height: 14px;
 }
 .agent-access-heading h2 {
 	margin: 2px 0 0;

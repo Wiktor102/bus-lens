@@ -33,6 +33,20 @@ import {
 	type MessageStreamSnapshot
 } from "./message-stream";
 import type { SectionMoveAction, SectionMoveAvailability } from "../capture/section-repositioning.ts";
+import {
+	ArrowDown,
+	ArrowLeft,
+	ArrowRight,
+	ArrowUp,
+	ChevronRight,
+	CornerDownRight,
+	FileText,
+	List,
+	Plus,
+	RotateCcw,
+	Rows3,
+	Trash2
+} from "lucide-react";
 
 type CSSVariableStyle = CSSProperties & Record<`--${string}`, string | number | undefined>;
 
@@ -155,9 +169,7 @@ function SectionEntry({
 								actions.setSectionCollapsed(section.id, !section.collapsed);
 							}}
 						>
-							<svg viewBox="0 0 24 24" aria-hidden="true">
-								<path d="m9 6 6 6-6 6" />
-							</svg>
+							<ChevronRight aria-hidden="true" />
 						</button>
 						<span>Section {sectionNumber} · raw byte {section.start + 1}</span>
 					</div>
@@ -518,11 +530,16 @@ function MessageEntry({
 				<div className="row-actions">
 					{messageNote || sequenceNote ? (
 						<button className="note-link" data-message-note={message.id} type="button">
-							{messageNote?.text || `↳ ${sequenceNote?.text}`}
+							{messageNote?.text || (
+								<>
+									<CornerDownRight aria-hidden="true" />
+									<span>{sequenceNote?.text}</span>
+								</>
+							)}
 						</button>
 					) : (
 						<button className="row-action add-note" data-message-note={message.id} type="button">
-							＋ Add note
+							<Plus aria-hidden="true" /> Add note
 						</button>
 					)}
 					<button
@@ -531,7 +548,7 @@ function MessageEntry({
 						title="Replay this message on the connected serial port"
 						type="button"
 					>
-						↻ Replay
+						<RotateCcw aria-hidden="true" /> Replay
 					</button>
 				</div>
 			</td>
@@ -553,26 +570,19 @@ const SECTION_MOVE_ACTIONS: Array<{ action: SectionMoveAction; label: string }> 
 function SectionMoveIcon({ action }: { action: SectionMoveAction }) {
 	const movesBefore = action.endsWith("before");
 	const isMessage = action.startsWith("message");
-	const arrow = isMessage
+	const DirectionIcon = isMessage
 		? movesBefore
-			? "M15 19V5m0 0-5 5m5-5 5 5"
-			: "M15 5v14m0 0-5-5m5 5 5-5"
+			? ArrowUp
+			: ArrowDown
 		: movesBefore
-			? "M19 12H5m0 0 5-5m-5 5 5 5"
-			: "M5 12h14m0 0-5-5m5 5-5 5";
-	const messageLines = "M4.5 5.5h4M4.5 12h4M4.5 18.5h4";
+			? ArrowLeft
+			: ArrowRight;
 
 	return (
-		<svg viewBox="0 0 24 24" aria-hidden="true">
-			{isMessage ? (
-				<>
-					<path d={messageLines} />
-					<path d={arrow} />
-				</>
-			) : (
-				<path d={arrow} />
-			)}
-		</svg>
+		<span className={`section-move-icon ${isMessage ? "message" : "byte"}`.trim()} aria-hidden="true">
+			{isMessage ? <List className="section-move-list" /> : null}
+			<DirectionIcon className="section-move-arrow" />
+		</span>
 	);
 }
 
@@ -661,26 +671,18 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 						disabled={!state.canDelete}
 						onClick={() => handleAction("delete-section")}
 					>
-						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<path d="M5.5 7.5h13M9.5 7.5V5h5v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5.5M14 11v5.5" />
-						</svg>
+						<Trash2 aria-hidden="true" />
 						<span>Delete section</span>
 					</button>
 				</>
 			) : (
 				<>
 					<button type="button" role="menuitem" data-context-action="note" onClick={() => handleAction("note")}>
-						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<path d="M4.5 4.5h10.25L19.5 9.25V19.5H4.5Z" />
-							<path d="M14.75 4.5v4.75h4.75M8 14.5h4.5M8 17.5h6.5" />
-						</svg>
+						<FileText aria-hidden="true" />
 						<span>Add note</span>
 					</button>
 					<button type="button" role="menuitem" data-context-action="replay" onClick={() => handleAction("replay")}>
-						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<path d="M19 8.5A7.5 7.5 0 1 0 19.15 15" />
-							<path d="M19 4.5v4h-4" />
-						</svg>
+						<RotateCcw aria-hidden="true" />
 						<span>Replay</span>
 					</button>
 					<button
@@ -691,9 +693,7 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 						aria-label={`${deleteLabel} (keep data hidden)`}
 						onClick={() => handleAction("delete")}
 					>
-						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<path d="M5.5 7.5h13M9.5 7.5V5h5v2.5M7 7.5l.75 12h8.5L17 7.5M10 11v5.5M14 11v5.5" />
-						</svg>
+						<Trash2 aria-hidden="true" />
 						<span>{deleteLabel}</span>
 					</button>
 					<button
@@ -703,9 +703,7 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 						data-context-action="section"
 						onClick={() => handleAction("section")}
 					>
-						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<path d="M5 4.5v15M19 4.5v15M5 8.5h5M14 8.5h5M5 15.5h5M14 15.5h5" />
-						</svg>
+						<Rows3 aria-hidden="true" />
 						<span>Begin new section here</span>
 					</button>
 				</>

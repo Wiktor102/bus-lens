@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { createClaudeMcpConfig, createCodexMcpConfig, resolveMcpEndpoint } from "./agent-config";
+import { ChevronDown, ChevronRight } from "lucide-react";
 
 export const MCP_SETTINGS_PATH = "/settings/mcp";
 type ConfigName = "codex" | "claude";
@@ -48,7 +49,7 @@ function AgentConfigCard({ codexConfig, claudeConfig }: { codexConfig: string; c
 						<span className="eyebrow">Configuration</span>
 						<strong id="agentConfigTitle">Copy agent config</strong>
 					</span>
-					<span className="agent-config-chevron" aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+					<span className="agent-config-chevron" aria-hidden="true">{expanded ? <ChevronDown /> : <ChevronRight />}</span>
 				</button>
 				<span className="muted">Use one of these in your local agent settings.</span>
 			</header>
