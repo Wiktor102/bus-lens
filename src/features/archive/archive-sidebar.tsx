@@ -204,7 +204,7 @@ export function ArchiveSidebar() {
 							className="icon-btn"
 							title="New capture"
 							aria-label="New capture"
-							onClick={actions.openNewCapture}
+							onClick={() => actions.openNewCapture()}
 						>
 							<Plus aria-hidden="true" />
 						</button>
@@ -293,7 +293,7 @@ export function ArchiveSidebar() {
 					id="exportBtn"
 					className="text-btn"
 						disabled={!archiveData.captures.length}
-					onClick={actions.openExport}
+					onClick={() => actions.openExport()}
 				>
 					<Download aria-hidden="true" /> Export
 				</button>

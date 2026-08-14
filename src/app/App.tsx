@@ -156,7 +156,7 @@ function TopBar() {
 					id="recordBtn"
 					className={`btn btn-record ${snapshot.recording ? "recording" : ""}`.trim()}
 					disabled={snapshot.recordDisabled}
-					onClick={actions.toggleRecording}
+					onClick={() => actions.toggleRecording()}
 				>
 					<span /> {snapshot.recordLabel}
 				</button>
@@ -748,7 +748,7 @@ function SendPanel({ open, onOpenChange }: SendPanelProps) {
 							className="text-btn"
 							type="button"
 							disabled={view.clearQueueDisabled}
-							onClick={actions.clearQueue}
+							onClick={() => actions.clearQueue()}
 						>
 							Clear queue
 						</button>
@@ -758,7 +758,7 @@ function SendPanel({ open, onOpenChange }: SendPanelProps) {
 							className={`btn btn-danger ${view.stopQueueHidden ? "hidden" : ""}`.trim()}
 							type="button"
 							disabled={view.stopQueueDisabled}
-							onClick={actions.stopQueue}
+							onClick={() => actions.stopQueue()}
 						>
 							{view.stopQueueText}
 						</button>
@@ -785,7 +785,7 @@ function SendPanel({ open, onOpenChange }: SendPanelProps) {
 							className="text-btn"
 							type="button"
 							disabled={view.clearHistoryDisabled}
-							onClick={actions.clearHistory}
+							onClick={() => actions.clearHistory()}
 						>
 							Clear
 						</button>
