@@ -139,3 +139,47 @@ test("get_transitions publishes and enforces aggregate/refined query constraints
 		await rm(directory, { recursive: true, force: true });
 	}
 });
+
+test("get_protocol_report publishes an explicit-snapshot, non-pageable report contract", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "bus-lens-mcp-protocol-report-schema-test-"));
+	const service = createArchiveHttpService({ databasePath: join(directory, "archive.sqlite"), mcpEndpoint: "http://127.0.0.1:4174/mcp" });
+	try {
+		service.commandService.createCapture({ captureId: "mcp-protocol-report-capture", framing: [{ start: 0, framingMode: "length", frameSize: 2 }], inputFormat: "binary" });
+		service.commandService.startSession({ captureId: "mcp-protocol-report-capture", sessionId: "mcp-protocol-report-session" });
+		const append = service.commandService.appendChunk({ captureId: "mcp-protocol-report-capture", sessionId: "mcp-protocol-report-session", requestId: "mcp-protocol-report-request", sequence: 0, expectedStartOffset: 0, bytes: [0, 1, 1, 1, 0, 1, 1, 2] });
+		const finalized = service.commandService.finalizeSession({ captureId: "mcp-protocol-report-capture", sessionId: "mcp-protocol-report-session", expectedDataRevision: append.dataRevision });
+		await new Promise<void>(resolve => service.server.listen(0, "127.0.0.1", resolve));
+		const address = service.server.address();
+		if (!address || typeof address === "string") throw new Error("test server did not bind to a port");
+		const baseUrl = `http://127.0.0.1:${address.port}`;
+		const listResponse = await modernCall(baseUrl, "tools/list", {});
+		const listBody = await listResponse.json() as { result: { tools: Array<{ name: string; description?: string; inputSchema: { required?: string[]; properties?: Record<string, unknown> } }> } };
+		const reportTool = listBody.result.tools.find(tool => tool.name === "get_protocol_report");
+		assert.ok(reportTool);
+		assert.match(reportTool.description ?? "", /non-pageable|explicit-snapshot/i);
+		assert.ok(reportTool.inputSchema.required?.includes("snapshot"));
+		assert.ok(reportTool.inputSchema.properties?.include);
+
+		const response = await modernCall(baseUrl, "tools/call", {
+			name: "get_protocol_report",
+			arguments: {
+				snapshot: {
+					captureId: "mcp-protocol-report-capture",
+					profileId: finalized.profileId,
+					profileVersion: finalized.profileVersion,
+					sourceDataRevision: finalized.dataRevision
+				},
+				include: ["frame-families", "invariants"],
+				detail: "compact"
+			}
+		}, 11);
+		assert.equal(response.status, 200);
+		const body = await response.json() as { result: { structuredContent: { data: { snapshot: { profileId: string }; evidenceQuality: { applicableFrameCount: number } }; meta: { page?: unknown } } } };
+		assert.equal(body.result.structuredContent.data.snapshot.profileId, finalized.profileId);
+		assert.equal(body.result.structuredContent.data.evidenceQuality.applicableFrameCount, 4);
+		assert.equal(body.result.structuredContent.meta.page, undefined);
+	} finally {
+		await service.close();
+		await rm(directory, { recursive: true, force: true });
+	}
+});

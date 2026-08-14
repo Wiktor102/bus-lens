@@ -126,6 +126,7 @@ export type AgentProtocolTransition = Readonly<{
 	changedPercentages: readonly Readonly<{ position: number; percentage: number }>[];
 	changedPositions: readonly number[];
 	changedPositionCount: number;
+	changedPositionSetTruncated?: boolean;
 	classification: "observed" | "insufficient-evidence";
 }>;
 
@@ -138,6 +139,8 @@ export type AgentProtocolSequence = Readonly<{
 	sections: readonly string[];
 	classification: "observed" | "insufficient-evidence";
 }>;
+
+export type AgentProtocolCandidate = AgentDifferentialCandidate & Readonly<{ classification: "candidate" }>;
 
 export type AgentProtocolEvidenceQuality = Readonly<{
 	totalFrameCount: number;
@@ -176,7 +179,7 @@ export type AgentProtocolReportResult = Readonly<{
 	variableBits?: AgentProtocolVariableBitSummary;
 	transitions?: readonly AgentProtocolTransition[];
 	sequences?: readonly AgentProtocolSequence[];
-	differentialCandidates?: readonly AgentDifferentialCandidate[];
+	differentialCandidates?: readonly AgentProtocolCandidate[];
 	differential?: AgentProtocolDifferentialSummary;
 	evidenceQuality: AgentProtocolEvidenceQuality;
 	followUpOperations: readonly AgentSuggestedOperation[];

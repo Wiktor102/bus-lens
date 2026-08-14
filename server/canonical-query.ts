@@ -48,6 +48,7 @@ import type {
 	AgentProtocolReportResult,
 	AgentProtocolReportScope,
 	AgentProtocolReportSection,
+	AgentProtocolCandidate,
 	AgentProtocolSequence,
 	AgentProtocolTransition,
 	AgentProtocolVariableBit,
@@ -84,6 +85,7 @@ export type {
 	AgentProtocolReportInput,
 	AgentProtocolReportResult,
 	AgentProtocolReportScope,
+	AgentProtocolCandidate,
 	AgentProtocolSequence,
 	AgentProtocolTransition,
 	AgentProtocolVariableBit,
@@ -2522,7 +2524,7 @@ export class CanonicalQueryService {
 					minimumSupport: differentialInput.minimumSupport ?? minimumSupport,
 					limit: caps.candidates
 				});
-				differentialCandidates = differentialResponse.data.candidateFields.slice(0, caps.candidates);
+				differentialCandidates = differentialResponse.data.candidateFields.slice(0, caps.candidates).map(candidate => ({ ...candidate, classification: "candidate" as const })) as AgentProtocolCandidate[];
 				differential = {
 					baseline: differentialResponse.data.baseline,
 					changed: differentialResponse.data.changed,
