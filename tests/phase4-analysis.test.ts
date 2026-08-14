@@ -3,6 +3,15 @@ import test from "node:test";
 import { CanonicalCaptureCommandService } from "../server/canonical-capture-command-service.ts";
 import { CanonicalQueryService } from "../server/canonical-query.ts";
 import { openDatabase } from "../server/database.ts";
+import { deriveTransitionPositionAggregates } from "../server/transition-positions.ts";
+
+test("indexed transitions do not bridge filtered ordinal gaps", () => {
+	const rows = deriveTransitionPositionAggregates([
+		{ ordinal: 0, sectionId: "section", signature: "00", bytes: [0] },
+		{ ordinal: 2, sectionId: "section", signature: "01", bytes: [1] }
+	]);
+	assert.deepEqual(rows, []);
+});
 
 const framing = [{ start: 0, framingMode: "length", frameSize: 2, collapseRuns: false, collapsed: false }] as const;
 

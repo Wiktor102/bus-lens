@@ -46,6 +46,9 @@ export function deriveTransitionPositionAggregates(
 		const to = frames[index];
 		if (!from || !to) continue;
 		if (from.eligible === false || to.eligible === false) continue;
+		// Filtering can leave ordinal gaps; only physically adjacent canonical
+		// frames form a transition.
+		if (to.ordinal !== from.ordinal + 1) continue;
 		const width = Math.max(from.bytes.length, to.bytes.length);
 		const changedCounts = new Map<number, number>();
 		for (let position = 0; position < width; position += 1) {
