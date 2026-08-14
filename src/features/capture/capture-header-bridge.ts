@@ -1,6 +1,3 @@
-import { createExternalStore } from "../../shared/external-store.ts";
-import { EMPTY_CAPTURE_HEADER_SNAPSHOT, type CaptureHeaderSnapshot } from "./capture-header.ts";
-
 export type CaptureHeaderActions = {
 	setTitle: (value: string) => void;
 	commitTitle: (value: string) => void;
@@ -25,13 +22,10 @@ const noopActions: CaptureHeaderActions = {
 	upgradeStorage: () => {}
 };
 
-const captureHeaderStore = createExternalStore<CaptureHeaderSnapshot, CaptureHeaderActions>(
-	EMPTY_CAPTURE_HEADER_SNAPSHOT,
-	noopActions
-);
+let actions = noopActions;
 
-export const getCaptureHeaderSnapshot = captureHeaderStore.getSnapshot;
-export const subscribeToCaptureHeader = captureHeaderStore.subscribe;
-export const publishCaptureHeaderSnapshot = captureHeaderStore.publish;
-export const registerCaptureHeaderActions = captureHeaderStore.registerActions;
-export const getCaptureHeaderActions = captureHeaderStore.getActions;
+/** Compatibility action registry; header data is derived from query state. */
+export const registerCaptureHeaderActions = (next: CaptureHeaderActions): void => {
+	actions = next;
+};
+export const getCaptureHeaderActions = (): CaptureHeaderActions => actions;

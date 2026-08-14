@@ -1,13 +1,3 @@
-import type { ArchiveCapture, ArchiveFolder } from "./archive-list";
-import { createExternalStore } from "../../shared/external-store.ts";
-
-export type ArchiveSnapshot = {
-	captures: ArchiveCapture[];
-	folders: ArchiveFolder[];
-	activeId: string | null | undefined;
-	unfiledCollapsed: boolean;
-};
-
 export type ArchiveActions = {
 	selectCapture: (captureId: string) => void;
 	toggleFolder: (folderId: string | null) => void;
@@ -20,13 +10,6 @@ export type ArchiveActions = {
 	saveFolder: (name: string, editingId: string | null) => boolean;
 	deleteFolder: (folderId: string) => void;
 	importFile: (file: File) => void | Promise<void>;
-};
-
-const emptyArchiveSnapshot: ArchiveSnapshot = {
-	captures: [],
-	folders: [],
-	activeId: null,
-	unfiledCollapsed: false
 };
 
 const noopActions: ArchiveActions = {
@@ -43,10 +26,10 @@ const noopActions: ArchiveActions = {
 	importFile: () => {}
 };
 
-const archiveStore = createExternalStore<ArchiveSnapshot, ArchiveActions>(emptyArchiveSnapshot, noopActions);
+let actions = noopActions;
 
-export const getArchiveSnapshot = archiveStore.getSnapshot;
-export const subscribeToArchive = archiveStore.subscribe;
-export const publishArchiveSnapshot = archiveStore.publish;
-export const registerArchiveActions = archiveStore.registerActions;
-export const getArchiveActions = archiveStore.getActions;
+/** Compatibility action registry; archive data is Query-owned. */
+export const registerArchiveActions = (next: ArchiveActions): void => {
+	actions = next;
+};
+export const getArchiveActions = (): ArchiveActions => actions;

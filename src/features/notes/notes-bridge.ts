@@ -1,6 +1,3 @@
-import { createExternalStore } from "../../shared/external-store.ts";
-import { EMPTY_NOTES_SNAPSHOT, type NotesSnapshot } from "./notes.ts";
-
 export type SequenceNoteInput = {
 	start: string | number;
 	end: string | number;
@@ -15,10 +12,10 @@ const noopActions: NotesActions = {
 	addSequenceNote: () => false
 };
 
-const notesStore = createExternalStore<NotesSnapshot, NotesActions>(EMPTY_NOTES_SNAPSHOT, noopActions);
+let actions = noopActions;
 
-export const getNotesSnapshot = notesStore.getSnapshot;
-export const subscribeToNotes = notesStore.subscribe;
-export const publishNotesSnapshot = notesStore.publish;
-export const registerNotesActions = notesStore.registerActions;
-export const getNotesActions = notesStore.getActions;
+/** Compatibility action registry; notes are derived from the selected capture query. */
+export const registerNotesActions = (next: NotesActions): void => {
+	actions = next;
+};
+export const getNotesActions = (): NotesActions => actions;

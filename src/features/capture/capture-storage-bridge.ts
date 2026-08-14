@@ -1,4 +1,3 @@
-import { createExternalStore } from "../../shared/external-store.ts";
 import {
 	captureStorageLabel,
 	captureStorageLocked,
@@ -25,15 +24,13 @@ const emptySnapshot: CaptureStorageSnapshot = {
 	canUpgrade: false
 };
 
-const storageStore = createExternalStore<CaptureStorageSnapshot, CaptureStorageActions>(emptySnapshot, {
-	upgrade: () => {}
-});
+let actions: CaptureStorageActions = { upgrade: () => {} };
 
-export const getCaptureStorageSnapshot = storageStore.getSnapshot;
-export const subscribeToCaptureStorage = storageStore.subscribe;
-export const publishCaptureStorageSnapshot = storageStore.publish;
-export const registerCaptureStorageActions = storageStore.registerActions;
-export const getCaptureStorageActions = storageStore.getActions;
+/** Compatibility action registry; storage status is derived from query data. */
+export const registerCaptureStorageActions = (next: CaptureStorageActions): void => {
+	actions = next;
+};
+export const getCaptureStorageActions = (): CaptureStorageActions => actions;
 
 export function captureStorageSnapshot(captureId: string | null, status: unknown): CaptureStorageSnapshot {
 	if (!captureId) return emptySnapshot;
