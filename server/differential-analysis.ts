@@ -11,6 +11,13 @@ export const AGENT_DIFFERENTIAL_ALIGNMENT_MODES = [
 ] as const;
 
 export const MAX_DIFFERENTIAL_FRAMES = 1_000;
+/**
+ * Bounds the total number of JSON array elements materialized by one
+ * differential request. The count includes bytes, timestamps, raw offsets,
+ * and directions on both snapshots; frame count alone is not a sufficient
+ * memory bound for canonical rows.
+ */
+export const MAX_DIFFERENTIAL_ANALYZED_ELEMENTS = 250_000;
 
 export type AgentDifferentialAlignmentMode = typeof AGENT_DIFFERENTIAL_ALIGNMENT_MODES[number];
 
@@ -92,6 +99,8 @@ export type DifferentialFrame = Readonly<{
 	id: string;
 	ordinal: number;
 	sectionId: string;
+	/** Stable framing-section identity; section IDs themselves are profile-local. */
+	sectionKey?: string;
 	bytes: readonly number[];
 	timestamps: readonly number[];
 	directions: readonly string[];
@@ -136,6 +145,7 @@ export type AgentDifferentialScoreComponents = Readonly<{
 export type AgentDifferentialCandidate = Readonly<{
 	sectionId: string;
 	frameFamily: string;
+	changedFrameFamily: string;
 	bytePosition: number;
 	bitMask: string;
 	baselineValues: readonly AgentValueCount[];
@@ -165,6 +175,7 @@ export type AgentDifferentialPositionSummary = Readonly<{
 export type AgentDifferentialLengthChange = Readonly<{
 	sectionId: string;
 	frameFamily: string;
+	changedFrameFamily: string;
 	baselineLength: number;
 	changedLength: number;
 	support: number;
@@ -185,6 +196,15 @@ export type AgentDifferentialSnapshotSummary = Readonly<{
 	totalFrameCount: number;
 	filteredFrameCount: number;
 	excludedFrameCount: number;
+	analyzedElementCount: number;
+}>;
+
+export type AgentDifferentialPairCompatibility = Readonly<{
+	compatiblePairCount: number;
+	incompatiblePairCount: number;
+	sectionMismatchCount: number;
+	frameFamilyMismatchCount: number;
+	lengthMismatchCount: number;
 }>;
 
 export type AgentDifferentialAlignmentSummary = Readonly<{
@@ -196,6 +216,7 @@ export type AgentDifferentialAlignmentSummary = Readonly<{
 	deletedFrameCount: number;
 	excludedFrameCount: Readonly<{ baseline: number; changed: number }>;
 	unpairedFrameCount: Readonly<{ baseline: number; changed: number }>;
+	pairCompatibility: AgentDifferentialPairCompatibility;
 	maximumTimestampDeltaMs?: number;
 }>;
 
@@ -435,8 +456,12 @@ export function frameTimestamp(frame: Pick<DifferentialFrame, "timestamps">): nu
 }
 
 function frameRawStart(frame: Pick<DifferentialFrame, "rawOffsets">): number | null {
-	const offsets = frame.rawOffsets.filter(Number.isSafeInteger);
-	return offsets.length ? Math.min(...offsets) : null;
+	let minimum: number | null = null;
+	for (const offset of frame.rawOffsets) {
+		if (!Number.isSafeInteger(offset)) continue;
+		if (minimum === null || offset < minimum) minimum = offset;
+	}
+	return minimum;
 }
 
 export function makeDifferentialFrame(frame: Omit<DifferentialFrame, "timestamp" | "rawStart">): DifferentialFrame {
@@ -471,13 +496,42 @@ export type DifferentialAlignment = Readonly<{
 	deletedFrameCount: number;
 	}>;
 
+type AlignmentAction = "pair" | "delete" | "insert";
+
+const ALIGNMENT_ACTION_PRIORITY: Readonly<Record<AlignmentAction, number>> = {
+	insert: 0,
+	delete: 1,
+	pair: 2
+};
+
+function isBetterAlignmentCell(
+	candidate: { count: number; cost: number; action: AlignmentAction },
+	current: { count: number; cost: number; action: AlignmentAction }
+): boolean {
+	if (candidate.count !== current.count) return candidate.count > current.count;
+	if (candidate.cost !== current.cost) return candidate.cost < current.cost;
+	return ALIGNMENT_ACTION_PRIORITY[candidate.action] > ALIGNMENT_ACTION_PRIORITY[current.action];
+}
+
+function minimumRawStart(frames: readonly DifferentialFrame[]): number | null {
+	let minimum: number | null = null;
+	for (const frame of frames) {
+		if (frame.rawStart === null) continue;
+		if (minimum === null || frame.rawStart < minimum) minimum = frame.rawStart;
+	}
+	return minimum;
+}
+
 export function alignOrdinal(
 	baseline: readonly DifferentialFrame[],
 	changed: readonly DifferentialFrame[],
-	mode: "ordinal" | "raw-relative"
+	mode: "ordinal" | "raw-relative",
+	baselineRawOrigin?: number | null,
+	changedRawOrigin?: number | null
 ): DifferentialAlignment {
-	const left = [...baseline].sort(mode === "raw-relative" ? rawRelativeOrder : frameOrder);
-	const right = [...changed].sort(mode === "raw-relative" ? rawRelativeOrder : frameOrder);
+	if (mode === "raw-relative") return alignRawRelative(baseline, changed, baselineRawOrigin, changedRawOrigin);
+	const left = [...baseline].sort(frameOrder);
+	const right = [...changed].sort(frameOrder);
 	const pairCount = Math.min(left.length, right.length);
 	const pairs = Array.from({ length: pairCount }, (_value, index) => ({
 		baseline: left[index]!,
@@ -494,55 +548,158 @@ export function alignOrdinal(
 	};
 }
 
-export function alignTimestampNearest(
+/**
+ * Match only equal retained-raw positions after normalizing each snapshot to
+ * its profile's first retained raw position. This is deliberately exact: a
+ * boundary shift is reported as insertion/deletion evidence instead of being
+ * silently converted into an ordinal pair. Duplicate positions, if present
+ * in legacy data, are paired in stable frame order and never reused.
+ */
+export function alignRawRelative(
 	baseline: readonly DifferentialFrame[],
 	changed: readonly DifferentialFrame[],
-	maximumTimestampDeltaMs: number
+	baselineRawOrigin?: number | null,
+	changedRawOrigin?: number | null
 ): DifferentialAlignment {
-	const orderedBaseline = [...baseline].sort(timestampOrder);
-	const orderedChanged = [...changed].sort(timestampOrder);
-	const used = new Set<string>();
+	const baselineOrigin = baselineRawOrigin ?? minimumRawStart(baseline);
+	const changedOrigin = changedRawOrigin ?? minimumRawStart(changed);
+	const changedByRelativeOffset = new Map<number, DifferentialFrame[]>();
+	const changedWithoutOffset: DifferentialFrame[] = [];
+	for (const frame of [...changed].sort(rawRelativeOrder)) {
+		if (frame.rawStart === null || changedOrigin === null) {
+			changedWithoutOffset.push(frame);
+			continue;
+		}
+		const relativeOffset = frame.rawStart - changedOrigin;
+		const entries = changedByRelativeOffset.get(relativeOffset) ?? [];
+		entries.push(frame);
+		changedByRelativeOffset.set(relativeOffset, entries);
+	}
+
 	const pairs: DifferentialAlignedPair[] = [];
 	const baselineUnpaired: DifferentialFrame[] = [];
-	for (const baselineFrame of orderedBaseline) {
-		if (baselineFrame.timestamp === null) {
-			baselineUnpaired.push(baselineFrame);
+	const usedChanged = new Set<string>();
+	for (const frame of [...baseline].sort(rawRelativeOrder)) {
+		if (frame.rawStart === null || baselineOrigin === null) {
+			baselineUnpaired.push(frame);
 			continue;
 		}
-		const candidates = orderedChanged
-			.filter(changedFrame => changedFrame.timestamp !== null && !used.has(changedFrame.id))
-			.map(changedFrame => ({
-				frame: changedFrame,
-				delta: Math.abs(changedFrame.timestamp! - baselineFrame.timestamp!)
-			}))
-			.filter(candidate => candidate.delta <= maximumTimestampDeltaMs)
-			.sort((left, right) => left.delta - right.delta
-				|| (left.frame.timestamp ?? 0) - (right.frame.timestamp ?? 0)
-				|| frameOrder(left.frame, right.frame));
-		const selected = candidates[0];
-		if (!selected) {
-			baselineUnpaired.push(baselineFrame);
+		const relativeOffset = frame.rawStart - baselineOrigin;
+		const candidates = changedByRelativeOffset.get(relativeOffset) ?? [];
+		const changedFrame = candidates.find(candidate => !usedChanged.has(candidate.id));
+		if (!changedFrame) {
+			baselineUnpaired.push(frame);
 			continue;
 		}
-		used.add(selected.frame.id);
+		usedChanged.add(changedFrame.id);
 		pairs.push({
-			baseline: baselineFrame,
-			changed: selected.frame,
-			quality: maximumTimestampDeltaMs === 0 ? 1 : Math.max(0, 1 - selected.delta / maximumTimestampDeltaMs),
-			timestampDeltaMs: selected.delta
+			baseline: frame,
+			changed: changedFrame,
+			quality: 1,
+			timestampDeltaMs: frame.timestamp !== null && changedFrame.timestamp !== null
+				? Math.abs(frame.timestamp - changedFrame.timestamp)
+				: null
 		});
 	}
-	const changedUnpaired = orderedChanged.filter(frame => !used.has(frame.id));
+	const changedUnpaired = [
+		...changedWithoutOffset,
+		...changed.filter(frame => !usedChanged.has(frame.id) && frame.rawStart !== null && changedOrigin !== null)
+	].sort(rawRelativeOrder);
 	return {
 		pairs: pairs.sort((left, right) => frameOrder(left.baseline, right.baseline)),
-		baselineUnpaired,
+		baselineUnpaired: baselineUnpaired.sort(rawRelativeOrder),
 		changedUnpaired,
 		insertedFrameCount: changedUnpaired.length,
 		deletedFrameCount: baselineUnpaired.length
 	};
 }
 
-type AlignmentAction = "pair" | "delete" | "insert";
+export function alignTimestampNearest(
+	baseline: readonly DifferentialFrame[],
+	changed: readonly DifferentialFrame[],
+	maximumTimestampDeltaMs: number
+): DifferentialAlignment {
+	// For one-dimensional timestamps, an optimal absolute-distance matching has
+	// a non-crossing ordering. Dynamic programming therefore gives maximum
+	// cardinality first, then minimum total timestamp distance, with stable
+	// action precedence for equal-score paths.
+	const orderedBaseline = [...baseline].sort(timestampOrder);
+	const orderedChanged = [...changed].sort(timestampOrder);
+	const timestampedBaseline = orderedBaseline.filter((frame): frame is DifferentialFrame & { timestamp: number } => frame.timestamp !== null);
+	const timestampedChanged = orderedChanged.filter((frame): frame is DifferentialFrame & { timestamp: number } => frame.timestamp !== null);
+	const rows = timestampedBaseline.length + 1;
+	const columns = timestampedChanged.length + 1;
+	const counts = Array.from({ length: rows }, () => new Int32Array(columns));
+	const costs = Array.from({ length: rows }, () => new Float64Array(columns));
+	const actions = Array.from({ length: rows }, () => new Uint8Array(columns));
+	const actionFor = (value: number): AlignmentAction => value === 1 ? "pair" : value === 2 ? "delete" : "insert";
+	for (let row = 1; row < rows; row += 1) actions[row]![0] = 2;
+	for (let column = 1; column < columns; column += 1) actions[0]![column] = 3;
+	for (let row = 1; row < rows; row += 1) {
+		for (let column = 1; column < columns; column += 1) {
+			const baselineFrame = timestampedBaseline[row - 1]!;
+			const changedFrame = timestampedChanged[column - 1]!;
+			let best = {
+				count: counts[row - 1]![column]!,
+				cost: costs[row - 1]![column]!,
+				action: "delete" as AlignmentAction
+			};
+			const insertion = {
+				count: counts[row]![column - 1]!,
+				cost: costs[row]![column - 1]!,
+				action: "insert" as AlignmentAction
+			};
+			if (isBetterAlignmentCell(insertion, best)) best = insertion;
+			const delta = Math.abs(baselineFrame.timestamp - changedFrame.timestamp);
+			if (delta <= maximumTimestampDeltaMs) {
+				const pair = {
+					count: counts[row - 1]![column - 1]! + 1,
+					cost: costs[row - 1]![column - 1]! + delta,
+					action: "pair" as AlignmentAction
+				};
+				if (isBetterAlignmentCell(pair, best)) best = pair;
+			}
+			counts[row]![column] = best.count;
+			costs[row]![column] = best.cost;
+			actions[row]![column] = best.action === "pair" ? 1 : best.action === "delete" ? 2 : 3;
+		}
+	}
+	const pairs: DifferentialAlignedPair[] = [];
+	const baselineUnpaired: DifferentialFrame[] = orderedBaseline.filter(frame => frame.timestamp === null);
+	const changedUnpaired: DifferentialFrame[] = orderedChanged.filter(frame => frame.timestamp === null);
+	let row = timestampedBaseline.length;
+	let column = timestampedChanged.length;
+	while (row > 0 || column > 0) {
+		const action = actionFor(actions[row]![column]!);
+		if (action === "pair") {
+			const baselineFrame = timestampedBaseline[row - 1]!;
+			const changedFrame = timestampedChanged[column - 1]!;
+			const delta = Math.abs(baselineFrame.timestamp - changedFrame.timestamp);
+			pairs.push({
+				baseline: baselineFrame,
+				changed: changedFrame,
+				quality: maximumTimestampDeltaMs === 0 ? 1 : Math.max(0, 1 - delta / maximumTimestampDeltaMs),
+				timestampDeltaMs: delta
+			});
+			row -= 1;
+			column -= 1;
+		} else if (action === "delete") {
+			baselineUnpaired.push(timestampedBaseline[row - 1]!);
+			row -= 1;
+		} else {
+			changedUnpaired.push(timestampedChanged[column - 1]!);
+			column -= 1;
+		}
+	}
+	pairs.reverse();
+	return {
+		pairs: pairs.sort((left, right) => frameOrder(left.baseline, right.baseline)),
+		baselineUnpaired: baselineUnpaired.sort(timestampOrder),
+		changedUnpaired: changedUnpaired.sort(timestampOrder),
+		insertedFrameCount: changedUnpaired.length,
+		deletedFrameCount: baselineUnpaired.length
+	};
+}
 
 export const MAX_SIGNATURE_ALIGNMENT_FRAMES = 250;
 
@@ -573,14 +730,16 @@ export function alignSignatureSequence(
 		for (let column = 1; column < columns; column += 1) {
 			const baselineFrame = baseline[row - 1]!;
 			const changedFrame = changed[column - 1]!;
-			const diagonal = scores[row - 1]![column - 1]! + (baselineFrame.signature === changedFrame.signature ? 3 : -1);
-			const deletion = scores[row - 1]![column]! - 2;
-			const insertion = scores[row]![column - 1]! - 2;
-			// Prefer a real pair, then a baseline deletion, then a changed insertion.
-			// This makes equal-score paths stable across runtimes and preserves the
-			// evidence order used by the cursor and follow-up queries.
-			if (diagonal >= deletion && diagonal >= insertion) {
-				scores[row]![column] = diagonal;
+			const deletion = scores[row - 1]![column]!;
+			const insertion = scores[row]![column - 1]!;
+			// This is an exact-signature LCS, not an edit-distance substitution
+			// matcher. A substitution is therefore represented explicitly as one
+			// deleted baseline frame plus one inserted changed frame. That avoids
+			// allowing a mismatching diagonal to hide an insertion or deletion.
+			if (baselineFrame.signature === changedFrame.signature
+				&& scores[row - 1]![column - 1]! + 1 >= deletion
+				&& scores[row - 1]![column - 1]! + 1 >= insertion) {
+				scores[row]![column] = scores[row - 1]![column - 1]! + 1;
 				actions[row]![column] = "pair";
 			} else if (deletion >= insertion) {
 				scores[row]![column] = deletion;
@@ -605,7 +764,7 @@ export function alignSignatureSequence(
 			pairs.push({
 				baseline: baselineFrame,
 				changed: changedFrame,
-				quality: baselineFrame.signature === changedFrame.signature ? 1 : 0.5,
+				quality: 1,
 				timestampDeltaMs: baselineFrame.timestamp !== null && changedFrame.timestamp !== null ? Math.abs(baselineFrame.timestamp - changedFrame.timestamp) : null
 			});
 			row -= 1;
@@ -655,10 +814,31 @@ function sortedMaskCounts(values: Map<number, number>): AgentMaskCount[] {
 }
 
 function familyText(pair: DifferentialAlignedPair): string {
-	// The baseline signature defines the comparable frame family. Changed-side
-	// noise may legitimately alter a signature; keeping it in the grouping key
-	// would prevent repeated controlled evidence from accumulating support.
+	// A signature is observable evidence, not a semantic field name. Keep both
+	// sides in the grouping key so two unrelated changed families cannot
+	// contaminate one another while a repeated controlled mutation can still
+	// accumulate support.
 	return pair.baseline.signature;
+}
+
+function changedFamilyText(pair: DifferentialAlignedPair): string {
+	return pair.changed.signature;
+}
+
+function sectionKey(frame: DifferentialFrame): string {
+	return frame.sectionKey ?? frame.sectionId;
+}
+
+export function differentialPairCompatibility(pair: DifferentialAlignedPair): {
+	sectionCompatible: boolean;
+	lengthCompatible: boolean;
+	frameFamilyChanged: boolean;
+} {
+	return {
+		sectionCompatible: sectionKey(pair.baseline) === sectionKey(pair.changed),
+		lengthCompatible: pair.baseline.bytes.length === pair.changed.bytes.length,
+		frameFamilyChanged: pair.baseline.signature !== pair.changed.signature
+	};
 }
 
 type PositionStats = {
@@ -680,11 +860,22 @@ type PositionStats = {
 
 type FamilyStats = {
 	sectionId: string;
+	sectionKey: string;
 	frameFamily: string;
+	changedFrameFamily: string;
 	pairs: number;
 	qualitySum: number;
 	positions: Map<number, PositionStats>;
-	lengths: Map<string, { baselineLength: number; changedLength: number; count: number }>;
+};
+
+type LengthChangeStats = {
+	sectionId: string;
+	frameFamily: string;
+	changedFrameFamily: string;
+	baselineLength: number;
+	changedLength: number;
+	support: number;
+	pairedFrameCount: number;
 };
 
 function positionStats(): PositionStats {
@@ -754,26 +945,59 @@ export function calculateDifferentialEvidence(
 ): Readonly<{
 	candidateFields: readonly AgentDifferentialCandidate[];
 	differenceSummary: AgentDifferentialDifferenceSummary;
+	pairCompatibility: AgentDifferentialPairCompatibility;
 }> {
 	const families = new Map<string, FamilyStats>();
+	const observedLengthChanges = new Map<string, LengthChangeStats>();
+	let compatiblePairCount = 0;
+	let incompatiblePairCount = 0;
+	let sectionMismatchCount = 0;
+	let frameFamilyMismatchCount = 0;
+	let lengthMismatchCount = 0;
 	for (const pair of pairs) {
+		const compatibility = differentialPairCompatibility(pair);
+		if (compatibility.frameFamilyChanged) frameFamilyMismatchCount += 1;
+		if (!compatibility.sectionCompatible) sectionMismatchCount += 1;
+		if (!compatibility.lengthCompatible) lengthMismatchCount += 1;
+		if (!compatibility.sectionCompatible || !compatibility.lengthCompatible) {
+			incompatiblePairCount += 1;
+			if (compatibility.sectionCompatible) {
+				const key = `${sectionKey(pair.baseline)}\u0000${pair.baseline.signature}\u0000${pair.changed.signature}\u0000${pair.baseline.bytes.length}\u0000${pair.changed.bytes.length}`;
+				const existing = observedLengthChanges.get(key);
+				if (existing) {
+					existing.support += 1;
+					existing.pairedFrameCount += 1;
+				} else {
+					observedLengthChanges.set(key, {
+						sectionId: pair.baseline.sectionId,
+						frameFamily: familyText(pair),
+						changedFrameFamily: changedFamilyText(pair),
+						baselineLength: pair.baseline.bytes.length,
+						changedLength: pair.changed.bytes.length,
+						support: 1,
+						pairedFrameCount: 1
+					});
+				}
+			}
+			continue;
+		}
+		compatiblePairCount += 1;
 		const sectionId = pair.baseline.sectionId;
 		const frameFamily = familyText(pair);
-		const key = `${sectionId}\u0000${frameFamily}`;
+		const changedFrameFamily = changedFamilyText(pair);
+		const structuralSectionKey = sectionKey(pair.baseline);
+		const key = `${structuralSectionKey}\u0000${frameFamily}\u0000${changedFrameFamily}`;
 		const family = families.get(key) ?? {
 			sectionId,
+			sectionKey: structuralSectionKey,
 			frameFamily,
+			changedFrameFamily,
 			pairs: 0,
 			qualitySum: 0,
-			positions: new Map(),
-			lengths: new Map()
+			positions: new Map()
 		};
 		family.pairs += 1;
 		family.qualitySum += pair.quality;
-		const lengthKey = `${pair.baseline.bytes.length}\u0000${pair.changed.bytes.length}`;
-		const length = family.lengths.get(lengthKey) ?? { baselineLength: pair.baseline.bytes.length, changedLength: pair.changed.bytes.length, count: 0 };
-		length.count += 1;
-		family.lengths.set(lengthKey, length);
 		const maximumLength = Math.max(pair.baseline.bytes.length, pair.changed.bytes.length);
 		for (let position = 0; position < maximumLength; position += 1) {
 			const baselineValue = pair.baseline.bytes[position];
@@ -792,13 +1016,15 @@ export function calculateDifferentialEvidence(
 		families.set(key, family);
 	}
 
-	const familyList = [...families.values()].sort((left, right) => left.sectionId.localeCompare(right.sectionId) || left.frameFamily.localeCompare(right.frameFamily));
+	const familyList = [...families.values()].sort((left, right) => left.sectionId.localeCompare(right.sectionId)
+		|| left.frameFamily.localeCompare(right.frameFamily)
+		|| left.changedFrameFamily.localeCompare(right.changedFrameFamily));
 	const familyCountBySection = new Map<string, number>();
-	for (const family of familyList) familyCountBySection.set(family.sectionId, (familyCountBySection.get(family.sectionId) ?? 0) + 1);
+	for (const family of familyList) familyCountBySection.set(family.sectionKey, (familyCountBySection.get(family.sectionKey) ?? 0) + 1);
 	const invariantPositions: AgentDifferentialPositionSummary[] = [];
 	const conditionallyChangingPositions: AgentDifferentialPositionSummary[] = [];
 	const alwaysChangingPositions: AgentDifferentialPositionSummary[] = [];
-	const lengthChanges: AgentDifferentialLengthChange[] = [];
+	const lengthChanges: AgentDifferentialLengthChange[] = [...observedLengthChanges.values()];
 	const candidates: AgentDifferentialCandidate[] = [];
 
 	for (const family of familyList) {
@@ -817,24 +1043,13 @@ export function calculateDifferentialEvidence(
 			else if (stats.changedCount === family.pairs) alwaysChangingPositions.push(positionSummary);
 			else conditionallyChangingPositions.push(positionSummary);
 		}
-		for (const length of family.lengths.values()) {
-			if (length.baselineLength === length.changedLength) continue;
-			lengthChanges.push({
-				sectionId: family.sectionId,
-				frameFamily: family.frameFamily,
-				baselineLength: length.baselineLength,
-				changedLength: length.changedLength,
-				support: length.count,
-				pairedFrameCount: family.pairs
-			});
-		}
 		for (const [position, stats] of family.positions) {
 			for (const [bit, bitStats] of stats.bitStats) {
 				if (bitStats.support < minimumSupport) continue;
 				const changeConsistency = family.pairs ? bitStats.support / family.pairs : 0;
 				const directionConsistency = bitStats.support ? Math.max(bitStats.setCount, bitStats.clearCount) / bitStats.support : 0;
 				const supportFactor = Math.min(1, bitStats.support / Math.max(3, minimumSupport));
-				const familySpecificity = 1 / Math.max(1, familyCountBySection.get(family.sectionId) ?? 1);
+				const familySpecificity = 1 / Math.max(1, familyCountBySection.get(family.sectionKey) ?? 1);
 				const alignmentQuality = family.pairs ? family.qualitySum / family.pairs : 0;
 				const scoreComponents = {
 					supportFactor: roundScore(supportFactor),
@@ -851,6 +1066,7 @@ export function calculateDifferentialEvidence(
 				candidates.push({
 					sectionId: family.sectionId,
 					frameFamily: family.frameFamily,
+					changedFrameFamily: family.changedFrameFamily,
 					bytePosition: position,
 					bitMask: bitMask(bit),
 					baselineValues: sortedValueCounts(bitStats.baselineValues),
@@ -879,16 +1095,25 @@ export function calculateDifferentialEvidence(
 	const always = boundedPositionSummaries(alwaysChangingPositions, MAX_DIFFERENTIAL_POSITION_SUMMARIES);
 	lengthChanges.sort((left, right) => left.sectionId.localeCompare(right.sectionId)
 		|| left.frameFamily.localeCompare(right.frameFamily)
+		|| left.changedFrameFamily.localeCompare(right.changedFrameFamily)
 		|| left.baselineLength - right.baselineLength
 		|| left.changedLength - right.changedLength);
 	const boundedLengths = lengthChanges.slice(0, MAX_DIFFERENTIAL_LENGTH_SUMMARIES);
 	candidates.sort((left, right) => right.score - left.score
 		|| left.sectionId.localeCompare(right.sectionId)
 		|| left.frameFamily.localeCompare(right.frameFamily)
+		|| left.changedFrameFamily.localeCompare(right.changedFrameFamily)
 		|| left.bytePosition - right.bytePosition
 		|| left.bitMask.localeCompare(right.bitMask));
 	return {
 		candidateFields: candidates,
+		pairCompatibility: {
+			compatiblePairCount,
+			incompatiblePairCount,
+			sectionMismatchCount,
+			frameFamilyMismatchCount,
+			lengthMismatchCount
+		},
 		differenceSummary: {
 			invariantPositions: invariant.values,
 			conditionallyChangingPositions: conditional.values,

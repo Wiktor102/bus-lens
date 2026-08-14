@@ -116,6 +116,109 @@ const differentialInputSchema = z.object({
 	limit: z.number().int().positive().max(100).optional()
 });
 
+const differentialSnapshotOutputSchema = z.object({
+	captureId: z.string(),
+	profileId: z.string(),
+	profileVersion: z.number().int().nonnegative(),
+	sourceDataRevision: z.number().int().nonnegative()
+});
+const differentialValueCountSchema = z.object({ value: z.number().int().nonnegative(), count: z.number().int().nonnegative() });
+const differentialMaskCountSchema = z.object({ mask: z.string(), count: z.number().int().nonnegative() });
+const differentialEvidenceSchema = z.object({
+	baselineFrameIds: z.array(z.string()),
+	changedFrameIds: z.array(z.string()),
+	evidenceTruncated: z.boolean()
+});
+const differentialScoreComponentsSchema = z.object({
+	supportFactor: z.number().finite(),
+	changeConsistency: z.number().finite(),
+	directionConsistency: z.number().finite(),
+	familySpecificity: z.number().finite(),
+	alignmentQuality: z.number().finite()
+});
+const differentialCandidateSchema = z.object({
+	sectionId: z.string(),
+	frameFamily: z.string(),
+	changedFrameFamily: z.string(),
+	bytePosition: z.number().int().nonnegative(),
+	bitMask: z.string(),
+	baselineValues: z.array(differentialValueCountSchema),
+	changedValues: z.array(differentialValueCountSchema),
+	xorMasks: z.array(differentialMaskCountSchema),
+	setCount: z.number().int().nonnegative(),
+	clearCount: z.number().int().nonnegative(),
+	support: z.number().int().nonnegative(),
+	pairedFrameCount: z.number().int().nonnegative(),
+	changeConsistency: z.number().finite(),
+	directionConsistency: z.number().finite(),
+	score: z.number().finite(),
+	scoreComponents: differentialScoreComponentsSchema,
+	evidence: differentialEvidenceSchema
+});
+const differentialPositionSummarySchema = z.object({
+	sectionId: z.string(),
+	frameFamily: z.string(),
+	bytePosition: z.number().int().nonnegative(),
+	pairedFrameCount: z.number().int().nonnegative(),
+	observedFrameCount: z.number().int().nonnegative(),
+	changedPairCount: z.number().int().nonnegative(),
+	changeConsistency: z.number().finite()
+});
+const differentialLengthChangeSchema = z.object({
+	sectionId: z.string(),
+	frameFamily: z.string(),
+	changedFrameFamily: z.string(),
+	baselineLength: z.number().int().nonnegative(),
+	changedLength: z.number().int().nonnegative(),
+	support: z.number().int().nonnegative(),
+	pairedFrameCount: z.number().int().nonnegative()
+});
+const differentialResultSchema = z.object({
+	baseline: z.object({
+		label: z.string(),
+		snapshot: differentialSnapshotOutputSchema,
+		totalFrameCount: z.number().int().nonnegative(),
+		filteredFrameCount: z.number().int().nonnegative(),
+		excludedFrameCount: z.number().int().nonnegative(),
+		analyzedElementCount: z.number().int().nonnegative()
+	}),
+	changed: z.object({
+		label: z.string(),
+		snapshot: differentialSnapshotOutputSchema,
+		totalFrameCount: z.number().int().nonnegative(),
+		filteredFrameCount: z.number().int().nonnegative(),
+		excludedFrameCount: z.number().int().nonnegative(),
+		analyzedElementCount: z.number().int().nonnegative()
+	}),
+	alignment: z.object({
+		mode: z.enum(["ordinal", "raw-relative", "timestamp-nearest", "signature-sequence"]),
+		pairedFrameCount: z.number().int().nonnegative(),
+		baselineUnpairedFrameCount: z.number().int().nonnegative(),
+		changedUnpairedFrameCount: z.number().int().nonnegative(),
+		insertedFrameCount: z.number().int().nonnegative(),
+		deletedFrameCount: z.number().int().nonnegative(),
+		excludedFrameCount: z.object({ baseline: z.number().int().nonnegative(), changed: z.number().int().nonnegative() }),
+		unpairedFrameCount: z.object({ baseline: z.number().int().nonnegative(), changed: z.number().int().nonnegative() }),
+		pairCompatibility: z.object({
+			compatiblePairCount: z.number().int().nonnegative(),
+			incompatiblePairCount: z.number().int().nonnegative(),
+			sectionMismatchCount: z.number().int().nonnegative(),
+			frameFamilyMismatchCount: z.number().int().nonnegative(),
+			lengthMismatchCount: z.number().int().nonnegative()
+		}),
+		maximumTimestampDeltaMs: z.number().finite().nonnegative().optional()
+	}),
+	differenceSummary: z.object({
+		invariantPositions: z.array(differentialPositionSummarySchema),
+		conditionallyChangingPositions: z.array(differentialPositionSummarySchema),
+		alwaysChangingPositions: z.array(differentialPositionSummarySchema),
+		lengthChanges: z.array(differentialLengthChangeSchema),
+		truncated: z.boolean()
+	}),
+	candidateFields: z.array(differentialCandidateSchema)
+});
+const differentialOutputSchema = agentResponseSchema.extend({ data: differentialResultSchema });
+
 function errorResult(error: unknown): { isError: true; structuredContent: AgentResponse<unknown>; content: [{ type: "text"; text: string }] } {
 	const normalized = error instanceof AgentQueryError
 		? error
@@ -152,9 +255,10 @@ function registerAnalysisTool<TInput extends object>(
 	inputSchema: z.ZodType<TInput>,
 	call: (input: TInput) => Promise<AgentResponse<unknown>>,
 	synopsis: (response: AgentResponse<unknown>) => string,
-	recordClient: RecordClient
+	recordClient: RecordClient,
+	outputSchema: z.ZodTypeAny = agentResponseSchema
 ): void {
-	server.registerTool(name, { description, inputSchema, outputSchema: agentResponseSchema }, async (input, context) => {
+	server.registerTool(name, { description, inputSchema, outputSchema }, async (input, context) => {
 		recordClient(context, server);
 		try {
 			const response = await call(input as TInput);
@@ -282,14 +386,15 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 	registerAnalysisTool(
 		server,
 		"analyze_capture_difference",
-		"Compare two explicitly pinned, labelled experiments with bounded ordinal, raw-relative, timestamp-nearest, or signature-sequence alignment. Returns ranked candidateFields with byte/bit evidence and score components only; it never names or persists inferred protocol fields. Sequence alignment is capped at 250 filtered frames per side, all other modes at 1,000, and raw-relative orders frames by retained raw start offsets.",
+		"Compare two explicitly pinned, labelled experiments with bounded ordinal, raw-relative, timestamp-nearest, or exact-signature sequence alignment. Returns ranked candidateFields with byte/bit evidence and score components only; it never names or persists inferred protocol fields. Both snapshots are subject to a total bounded byte/timestamp/raw-position/direction array budget before materialization. Sequence alignment is an exact-signature LCS, so substitutions are reported as one deletion plus one insertion. Raw-relative pairs only equal relative retained-raw starts; shifted boundaries remain explicit unpaired evidence. A shared scope.sectionId must exist in both snapshots; use side-specific filters for profile-local section IDs.",
 		differentialInputSchema,
 		input => queries.analyzeCaptureDifference(input as AgentCaptureDifferenceInput),
 		response => {
 			const result = response as AgentResponse<AgentCaptureDifferenceResult>;
 			return `Compared ${result.data.alignment.pairedFrameCount} aligned frame pair${result.data.alignment.pairedFrameCount === 1 ? "" : "s"} with ${result.data.candidateFields.length} bounded candidate field${result.data.candidateFields.length === 1 ? "" : "s"} using ${result.data.alignment.mode} alignment.`;
 		},
-		recordClient
+		recordClient,
+		differentialOutputSchema
 	);
 
 	registerAnalysisTool(

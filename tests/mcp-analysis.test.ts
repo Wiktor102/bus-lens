@@ -100,12 +100,16 @@ test("get_transitions publishes and enforces aggregate/refined query constraints
 
 		const listResponse = await modernCall(baseUrl, "tools/list", {});
 		assert.equal(listResponse.status, 200);
-		const listBody = await listResponse.json() as { result: { tools: Array<{ name: string; description?: string; inputSchema: { type?: string; properties?: Record<string, { enum?: unknown[] }> } }> } };
+		const listBody = await listResponse.json() as { result: { tools: Array<{ name: string; description?: string; inputSchema: { type?: string; properties?: Record<string, { enum?: unknown[] }> }; outputSchema?: { type?: string; properties?: Record<string, { type?: string; properties?: Record<string, { type?: string }> }> } }> } };
 		const transitionsTool = listBody.result.tools.find(tool => tool.name === "get_transitions");
 		assert.ok(transitionsTool);
 		assert.equal(transitionsTool.inputSchema.type, "object");
 		assert.match(transitionsTool.description ?? "", /position-only and section-only/i);
 		assert.deepEqual(transitionsTool.inputSchema.properties?.changedPositionMatch?.enum, ["all", "any"]);
+		const differenceTool = listBody.result.tools.find(tool => tool.name === "analyze_capture_difference");
+		assert.ok(differenceTool);
+		assert.equal(differenceTool.outputSchema?.properties?.data?.type, "object");
+		assert.equal(differenceTool.outputSchema?.properties?.data?.properties?.candidateFields?.type, "array");
 
 		const callTool = async (argumentsValue: Record<string, unknown>, id: number): Promise<ToolCallBody> => {
 			const response = await modernCall(baseUrl, "tools/call", { name: "get_transitions", arguments: argumentsValue }, id);

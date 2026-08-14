@@ -17,8 +17,10 @@ import {
 } from "./agent-contracts.ts";
 import {
 	AGENT_DIFFERENTIAL_ALIGNMENT_MODES,
+	MAX_DIFFERENTIAL_ANALYZED_ELEMENTS,
 	MAX_DIFFERENTIAL_FRAMES,
 	MAX_SIGNATURE_ALIGNMENT_FRAMES,
+	alignRawRelative,
 	alignOrdinal,
 	alignSignatureSequence,
 	alignTimestampNearest,
@@ -49,6 +51,7 @@ export type {
 	AgentDifferentialScope,
 	AgentDifferentialSnapshotSummary,
 	AgentDifferentialEvidence,
+	AgentDifferentialPairCompatibility,
 	AgentDifferentialScoreComponents,
 	AgentMaskCount,
 	AgentValueCount
@@ -630,6 +633,46 @@ type RawChunkRow = {
 	directions_json: string;
 	hidden_json: string;
 };
+
+type DifferentialSectionRow = {
+	id: string;
+	position: number;
+	start_offset: number;
+	framing_mode: string;
+	frame_length: number | null;
+	marker_bytes: string | null;
+	marker_position: string | null;
+	time_gap_ms: number | null;
+	collapse_runs: number;
+	collapsed: number;
+};
+
+type DifferentialFramePlan = Readonly<{
+	profileId: string;
+	parameterPrefix: string;
+	predicates: string;
+	predicateParameters: Readonly<Record<string, unknown>>;
+	totalFrameCount: number;
+	filteredFrameCount: number;
+	analyzedElementCount: number;
+	excludedFrameCount: number;
+	rawOrigin: number | null;
+	sectionKeys: ReadonlyMap<string, string>;
+}>;
+
+function differentialSectionKey(section: DifferentialSectionRow, rawOrigin: number | null): string {
+	return JSON.stringify({
+		position: section.position,
+		startOffset: section.start_offset - (rawOrigin ?? 0),
+		framingMode: section.framing_mode,
+		frameLength: section.frame_length,
+		markerBytes: section.marker_bytes,
+		markerPosition: section.marker_position,
+		timeGapMs: section.time_gap_ms,
+		collapseRuns: Boolean(section.collapse_runs),
+		collapsed: Boolean(section.collapsed)
+	});
+}
 
 function optionalString(value: unknown): string | null {
 	return typeof value === "string" && value ? value : null;
@@ -2488,12 +2531,32 @@ export class CanonicalQueryService {
 		return this.resolveAnalysisProfile(captureId, { profileId, profileVersion, sourceDataRevision }).snapshot;
 	}
 
-	private readDifferentialFrames(
+	private assertDifferentialScopeExists(
+		scope: NormalizedDifferentialScope,
+		baselineProfileId: string,
+		changedProfileId: string
+	): void {
+		if (scope.sectionId === undefined) return;
+		const exists = (profileId: string): boolean => Boolean(this.database.prepare(
+			"SELECT 1 FROM framing_sections WHERE profile_id = @profileId AND id = @sectionId LIMIT 1"
+		).get({ profileId, sectionId: scope.sectionId }));
+		const baselineExists = exists(baselineProfileId);
+		const changedExists = exists(changedProfileId);
+		if (!baselineExists || !changedExists) {
+			throw new AgentQueryError(
+				"invalid-input",
+				"scope.sectionId must identify a section in both pinned snapshots; use baseline.filters.sectionId and changed.filters.sectionId for snapshot-local section IDs",
+				{ sectionId: scope.sectionId, baselineExists, changedExists }
+			);
+		}
+	}
+
+	private prepareDifferentialFrames(
 		profileId: string,
 		filters: NormalizedDifferentialMessageFilters,
 		scope: NormalizedDifferentialScope,
 		parameterPrefix: string
-	): { frames: DifferentialFrame[]; totalFrameCount: number; filteredFrameCount: number; excludedFrameCount: number } {
+	): DifferentialFramePlan {
 		const filterPredicate = differentialFramePredicate(filters, `${parameterPrefix}Filter`);
 		const scopePredicate = differentialFramePredicate(scope, `${parameterPrefix}Scope`);
 		const predicates = `${filterPredicate.sql}${scopePredicate.sql}`;
@@ -2515,14 +2578,56 @@ export class CanonicalQueryService {
 				{ maximumFramesPerSide: MAX_DIFFERENTIAL_FRAMES, filteredFrameCount, parameterPrefix }
 			);
 		}
+		const analyzedElementCount = (this.database.prepare(
+			`SELECT COALESCE(SUM(
+				json_array_length(frames.bytes_json)
+				+ json_array_length(frames.timestamps_json)
+				+ json_array_length(frames.raw_offsets_json)
+				+ json_array_length(frames.directions_json)
+			), 0) AS count
+			 FROM materialized_frames AS frames
+			 WHERE frames.profile_id = @profileId${predicates}`
+		).get(predicateParameters) as { count: number }).count;
+		const rawOrigin = (this.database.prepare(
+			`SELECT MIN(CAST(json_extract(raw_offsets_json, '$[0]') AS INTEGER)) AS raw_origin
+			 FROM materialized_frames WHERE profile_id = @profileId`
+		).get({ profileId }) as { raw_origin: number | null }).raw_origin;
+		const sectionRows = this.database.prepare(
+			`SELECT id, position, start_offset, framing_mode, frame_length, marker_bytes,
+					marker_position, time_gap_ms, collapse_runs, collapsed
+			 FROM framing_sections WHERE profile_id = @profileId ORDER BY position`
+		).all({ profileId }) as DifferentialSectionRow[];
+		const sectionKeys = new Map(sectionRows.map(section => [section.id, differentialSectionKey(section, rawOrigin)]));
+		return {
+			profileId,
+			parameterPrefix,
+			predicates,
+			predicateParameters,
+			totalFrameCount,
+			filteredFrameCount,
+			analyzedElementCount,
+			excludedFrameCount: Math.max(0, totalFrameCount - filteredFrameCount),
+			rawOrigin,
+			sectionKeys
+		};
+	}
+
+	private readDifferentialFrames(plan: DifferentialFramePlan): { frames: DifferentialFrame[]; totalFrameCount: number; filteredFrameCount: number; excludedFrameCount: number; analyzedElementCount: number } {
+		if (plan.analyzedElementCount > MAX_DIFFERENTIAL_ANALYZED_ELEMENTS) {
+			throw new AgentQueryError(
+				"invalid-input",
+				`Differential analysis exceeds the ${MAX_DIFFERENTIAL_ANALYZED_ELEMENTS}-element byte/position budget`,
+				{ maximumAnalyzedElements: MAX_DIFFERENTIAL_ANALYZED_ELEMENTS, analyzedElements: plan.analyzedElementCount, parameterPrefix: plan.parameterPrefix }
+			);
+		}
 		const rows = this.database.prepare(
 			`SELECT id, ordinal, section_id, raw_offsets_json, bytes_json, timestamps_json,
 			        directions_json, hidden, signature
 			 FROM materialized_frames AS frames
-			 WHERE frames.profile_id = @profileId${predicates}
+			 WHERE frames.profile_id = @profileId${plan.predicates}
 			 ORDER BY ordinal ASC, id ASC
 			 LIMIT @differentialLimit`
-		).all({ ...predicateParameters, differentialLimit: MAX_DIFFERENTIAL_FRAMES + 1 }) as Array<{
+		).all({ ...plan.predicateParameters, differentialLimit: MAX_DIFFERENTIAL_FRAMES + 1 }) as Array<{
 			id: string;
 			ordinal: number;
 			section_id: string;
@@ -2537,6 +2642,7 @@ export class CanonicalQueryService {
 			id: row.id,
 			ordinal: row.ordinal,
 			sectionId: row.section_id,
+			sectionKey: plan.sectionKeys.get(row.section_id),
 			bytes: jsonArray<number>(row.bytes_json).map(Number),
 			timestamps: jsonArray<number>(row.timestamps_json).map(Number),
 			directions: jsonArray<string>(row.directions_json).map(String),
@@ -2546,9 +2652,10 @@ export class CanonicalQueryService {
 		}));
 		return {
 			frames,
-			totalFrameCount,
-			filteredFrameCount,
-			excludedFrameCount: Math.max(0, totalFrameCount - filteredFrameCount)
+			totalFrameCount: plan.totalFrameCount,
+			filteredFrameCount: plan.filteredFrameCount,
+			excludedFrameCount: plan.excludedFrameCount,
+			analyzedElementCount: plan.analyzedElementCount
 		};
 	}
 
@@ -2588,7 +2695,7 @@ export class CanonicalQueryService {
 			scope,
 			minimumSupport
 		};
-		const cursor = input.cursor ? decodeAgentCursor(input.cursor, "capture-difference", ["score", "sectionId", "frameFamily", "bytePosition", "bitMask"]) : undefined;
+		const cursor = input.cursor ? decodeAgentCursor(input.cursor, "capture-difference", ["score", "sectionId", "frameFamily", "changedFrameFamily", "bytePosition", "bitMask"]) : undefined;
 		if (cursor) {
 			assertCursorFilters(cursor, cursorFilters, baselineSnapshot);
 			if (stableJson(cursor.snapshot) !== stableJson(baselineSnapshot)) {
@@ -2596,8 +2703,27 @@ export class CanonicalQueryService {
 			}
 		}
 
-		const baselineRead = this.readDifferentialFrames(baselineSnapshot.profileId, baselineFilters, scope, "baseline");
-		const changedRead = this.readDifferentialFrames(changedSnapshot.profileId, changedFilters, scope, "changed");
+		this.assertDifferentialScopeExists(scope, baselineSnapshot.profileId, changedSnapshot.profileId);
+		// Prepare both sides before materializing any JSON arrays. The aggregate
+		// budget is intentionally total across the pinned snapshots, not merely a
+		// per-side frame-count check.
+		const baselinePlan = this.prepareDifferentialFrames(baselineSnapshot.profileId, baselineFilters, scope, "baseline");
+		const changedPlan = this.prepareDifferentialFrames(changedSnapshot.profileId, changedFilters, scope, "changed");
+		const analyzedElementCount = baselinePlan.analyzedElementCount + changedPlan.analyzedElementCount;
+		if (analyzedElementCount > MAX_DIFFERENTIAL_ANALYZED_ELEMENTS) {
+			throw new AgentQueryError(
+				"invalid-input",
+				`Differential analysis exceeds the ${MAX_DIFFERENTIAL_ANALYZED_ELEMENTS}-element total byte/position budget`,
+				{
+					maximumAnalyzedElements: MAX_DIFFERENTIAL_ANALYZED_ELEMENTS,
+					analyzedElements: analyzedElementCount,
+					baselineAnalyzedElements: baselinePlan.analyzedElementCount,
+					changedAnalyzedElements: changedPlan.analyzedElementCount
+				}
+			);
+		}
+		const baselineRead = this.readDifferentialFrames(baselinePlan);
+		const changedRead = this.readDifferentialFrames(changedPlan);
 		if (mode === "signature-sequence" && (baselineRead.frames.length > MAX_SIGNATURE_ALIGNMENT_FRAMES || changedRead.frames.length > MAX_SIGNATURE_ALIGNMENT_FRAMES)) {
 			throw new AgentQueryError(
 				"invalid-input",
@@ -2614,8 +2740,10 @@ export class CanonicalQueryService {
 		};
 		switch (mode) {
 			case "ordinal":
-			case "raw-relative":
 				alignmentResult = alignOrdinal(baselineRead.frames, changedRead.frames, mode);
+				break;
+			case "raw-relative":
+				alignmentResult = alignRawRelative(baselineRead.frames, changedRead.frames, baselinePlan.rawOrigin, changedPlan.rawOrigin);
 				break;
 			case "timestamp-nearest":
 				alignmentResult = alignTimestampNearest(baselineRead.frames, changedRead.frames, maximumTimestampDeltaMs!);
@@ -2624,6 +2752,7 @@ export class CanonicalQueryService {
 				alignmentResult = alignSignatureSequence(baselineRead.frames, changedRead.frames);
 				break;
 		}
+		const evidence = calculateDifferentialEvidence(alignmentResult.pairs, minimumSupport);
 		const alignmentSummary = {
 			mode,
 			pairedFrameCount: alignmentResult.pairs.length,
@@ -2633,20 +2762,22 @@ export class CanonicalQueryService {
 			deletedFrameCount: alignmentResult.deletedFrameCount,
 			excludedFrameCount: { baseline: baselineRead.excludedFrameCount, changed: changedRead.excludedFrameCount },
 			unpairedFrameCount: { baseline: alignmentResult.baselineUnpaired.length, changed: alignmentResult.changedUnpaired.length },
+			pairCompatibility: evidence.pairCompatibility,
 			...(maximumTimestampDeltaMs === undefined ? {} : { maximumTimestampDeltaMs })
 		};
-		const evidence = calculateDifferentialEvidence(alignmentResult.pairs, minimumSupport);
 		const afterCursor = cursor
 			? evidence.candidateFields.filter(candidate => {
 				const score = Number(cursor.key.score);
 				const sectionId = String(cursor.key.sectionId ?? "");
 				const frameFamily = String(cursor.key.frameFamily ?? "");
+				const changedFrameFamily = String(cursor.key.changedFrameFamily ?? "");
 				const bytePosition = Number(cursor.key.bytePosition);
 				const mask = String(cursor.key.bitMask ?? "");
 				if (candidate.score < score) return true;
 				if (candidate.score > score) return false;
 				if (candidate.sectionId !== sectionId) return candidate.sectionId > sectionId;
 				if (candidate.frameFamily !== frameFamily) return candidate.frameFamily > frameFamily;
+				if (candidate.changedFrameFamily !== changedFrameFamily) return candidate.changedFrameFamily > changedFrameFamily;
 				if (candidate.bytePosition !== bytePosition) return candidate.bytePosition > bytePosition;
 				return candidate.bitMask > mask;
 			})
@@ -2660,12 +2791,12 @@ export class CanonicalQueryService {
 					scope: "capture-difference",
 					filters: cursorFilters,
 					snapshot: baselineSnapshot,
-					key: { score: last.score, sectionId: last.sectionId, frameFamily: last.frameFamily, bytePosition: last.bytePosition, bitMask: last.bitMask }
+					key: { score: last.score, sectionId: last.sectionId, frameFamily: last.frameFamily, changedFrameFamily: last.changedFrameFamily, bytePosition: last.bytePosition, bitMask: last.bitMask }
 				})
 				: undefined;
 			const responseData: AgentCaptureDifferenceResult = {
-				baseline: { label: baselineLabel, snapshot: baselineSnapshot, totalFrameCount: baselineRead.totalFrameCount, filteredFrameCount: baselineRead.filteredFrameCount, excludedFrameCount: baselineRead.excludedFrameCount },
-				changed: { label: changedLabel, snapshot: changedSnapshot, totalFrameCount: changedRead.totalFrameCount, filteredFrameCount: changedRead.filteredFrameCount, excludedFrameCount: changedRead.excludedFrameCount },
+				baseline: { label: baselineLabel, snapshot: baselineSnapshot, totalFrameCount: baselineRead.totalFrameCount, filteredFrameCount: baselineRead.filteredFrameCount, excludedFrameCount: baselineRead.excludedFrameCount, analyzedElementCount: baselineRead.analyzedElementCount },
+				changed: { label: changedLabel, snapshot: changedSnapshot, totalFrameCount: changedRead.totalFrameCount, filteredFrameCount: changedRead.filteredFrameCount, excludedFrameCount: changedRead.excludedFrameCount, analyzedElementCount: changedRead.analyzedElementCount },
 				alignment: alignmentSummary,
 				differenceSummary: evidence.differenceSummary,
 				candidateFields: pageRows
