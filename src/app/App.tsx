@@ -5,7 +5,6 @@ import {
 	useLayoutEffect,
 	useRef,
 	useState,
-	useSyncExternalStore,
 	type CSSProperties,
 	type PointerEvent as ReactPointerEvent,
 	type RefObject
@@ -32,10 +31,7 @@ import { deriveNotesSnapshot } from "../features/notes/notes.ts";
 import { deriveAnalysisSnapshot } from "../features/analysis/analysis.ts";
 import { getTransportActions } from "../features/transport/transport-bridge";
 import { getNotesActions } from "../features/notes/notes-bridge";
-import { getToastSnapshot, subscribeToToast } from "../shared/toast-bridge";
-import {
-	getPersistenceErrorActions,
-} from "../shared/persistence-error-bridge";
+import { getPersistenceErrorActions } from "../shared/persistence-error-bridge";
 import {
 	AnnotationDialog,
 	CanonicalizationDialog,
@@ -51,6 +47,7 @@ import {
 	selectMessageStream,
 	selectPersistenceError,
 	selectSendRuntime,
+	selectToast,
 	selectTransport,
 	selectViewState,
 	viewStateActionToApplicationEvent
@@ -1094,7 +1091,7 @@ function NotesPanelContent() {
 }
 
 function Toast({ sendPopupOpen }: { sendPopupOpen: boolean }) {
-	const snapshot = useSyncExternalStore(subscribeToToast, getToastSnapshot, getToastSnapshot);
+	const snapshot = useApplicationSelector(selectToast);
 	return (
 		<div
 			id="toast"

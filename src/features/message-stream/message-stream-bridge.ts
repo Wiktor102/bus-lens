@@ -1,8 +1,3 @@
-import { createExternalStore } from "../../shared/external-store.ts";
-import {
-	EMPTY_MESSAGE_STREAM_SNAPSHOT,
-	type MessageStreamSnapshot
-} from "./message-stream.ts";
 import type { SectionMoveAction } from "../capture/section-repositioning.ts";
 import type { SectionFramingUpdate } from "../capture/capture-framing.ts";
 
@@ -51,13 +46,10 @@ const noopActions: MessageStreamActions = {
 	setSectionCollapsed: () => {}
 };
 
-const messageStreamStore = createExternalStore<MessageStreamSnapshot, MessageStreamActions>(
-	EMPTY_MESSAGE_STREAM_SNAPSHOT,
-	noopActions
-);
+/** Action compatibility boundary; message stream snapshots are application-store owned. */
+let actions = noopActions;
 
-export const getMessageStreamSnapshot = messageStreamStore.getSnapshot;
-export const subscribeToMessageStream = messageStreamStore.subscribe;
-export const publishMessageStreamSnapshot = messageStreamStore.publish;
-export const registerMessageStreamActions = messageStreamStore.registerActions;
-export const getMessageStreamActions = messageStreamStore.getActions;
+export const registerMessageStreamActions = (next: MessageStreamActions): void => {
+	actions = next;
+};
+export const getMessageStreamActions = (): MessageStreamActions => actions;

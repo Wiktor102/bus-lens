@@ -1,5 +1,5 @@
 import { loadState, normalizeSendState, STORAGE_KEY, type AppState, type StateStorage } from "../shared/app-state.ts";
-import { publishToastSnapshot } from "../shared/toast-bridge.ts";
+import { applicationStore } from "../shared/application-store.ts";
 import type { Capture } from "../features/capture/capture-framing.ts";
 import type {
 	CanonicalCaptureSummary,
@@ -82,8 +82,8 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 	const writer = dependencies.captureWriter || archive?.commands.recordingWriter;
 
 	const showToast = (message: string): void => {
-		publishToastSnapshot({ message, visible: true });
-		setTimeout(() => publishToastSnapshot({ message: "", visible: false }), 2_600);
+		applicationStore.send({ type: "toast/changed", state: { message, visible: true } });
+		setTimeout(() => applicationStore.send({ type: "toast/changed", state: { message: "", visible: false } }), 2_600);
 	};
 
 	function applyHydration(hydrated: Awaited<ReturnType<NonNullable<ArchiveDataLayer["commands"]>["hydrate"]>>): void {
