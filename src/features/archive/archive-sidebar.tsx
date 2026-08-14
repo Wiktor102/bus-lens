@@ -2,16 +2,16 @@ import {
 	useCallback,
 	useEffect,
 	useLayoutEffect,
-	useMemo,
 	useRef,
 	useState,
-	useSyncExternalStore,
 	type MouseEvent as ReactMouseEvent
 } from "react";
-import { getArchiveActions, getArchiveSnapshot, subscribeToArchive } from "./archive-bridge";
-import { buildArchiveGroups, type ArchiveCapture, type ArchiveGroup, type ArchiveStorageFilter } from "./archive-list";
+import { getArchiveActions } from "./archive-bridge";
+import { type ArchiveCapture, type ArchiveGroup, type ArchiveStorageFilter } from "./archive-list";
 import { captureStorageLabel, captureStorageUiStatus } from "../capture/capture-storage";
+<<<<<<< HEAD
 import { ArrowUp, Check, ChevronRight, Copy, Download, Folder, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
+import { useArchiveGroups, useArchiveList, useSelectedCaptureId } from "../../data/archive-react.tsx";
 
 const FOLDER_ICON = (
 	<Folder aria-hidden="true" />
@@ -150,11 +150,12 @@ function CaptureItem({
 }
 
 export function ArchiveSidebar() {
-	const snapshot = useSyncExternalStore(subscribeToArchive, getArchiveSnapshot, getArchiveSnapshot);
 	const actions = getArchiveActions();
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const [query, setQuery] = useState("");
 	const [storageFilter, setStorageFilter] = useState<ArchiveStorageFilter>("all");
+	const selectedCaptureId = useSelectedCaptureId();
+	const archiveData = useArchiveGroups(query, storageFilter);
 	const [folderDialogId, setFolderDialogId] = useState<string | null | undefined>(undefined);
 	const [folderMoveCaptureId, setFolderMoveCaptureId] = useState<string | null>(null);
 	const [captureMenuState, setCaptureMenuState] = useState<CaptureContextMenuState | null>(null);
@@ -179,10 +180,7 @@ export function ArchiveSidebar() {
 			return null;
 		});
 	}, []);
-	const archive = useMemo(
-		() => buildArchiveGroups(snapshot.captures, snapshot.folders, query, snapshot.unfiledCollapsed, storageFilter),
-		[snapshot, query, storageFilter]
-	);
+	const archive = archiveData;
 
 	return (
 		<>
@@ -240,13 +238,19 @@ export function ArchiveSidebar() {
 				</select>
 			</label>
 			<div id="captureList" className="capture-list">
-				{archive.visibleCaptures.length ? (
+				{archive.error ? (
+					<div className="sidebar-empty" role="alert">
+						<strong>Archive unavailable</strong>
+						<span>{archive.error.message}</span>
+						<button className="btn btn-secondary" type="button" onClick={() => archive.retry()}>Retry</button>
+					</div>
+				) : archive.visibleCaptures.length ? (
 					archive.groups.map(group => (
 						<FolderGroup
 							key={group.id || "unfiled"}
 							group={group}
 							searching={archive.searching}
-							activeId={snapshot.activeId}
+							activeId={selectedCaptureId}
 							folderContextMenuOpen={group.id !== "" && folderMenuState?.folderId === group.id}
 							contextMenuCaptureId={captureMenuState?.captureId ?? null}
 							onToggle={actions.toggleFolder}
@@ -289,7 +293,7 @@ export function ArchiveSidebar() {
 				<button
 					id="exportBtn"
 					className="text-btn"
-					disabled={!snapshot.captures.length}
+						disabled={!archiveData.captures.length}
 					onClick={actions.openExport}
 				>
 					<Download aria-hidden="true" /> Export
@@ -342,13 +346,13 @@ function FolderContextMenu({
 	onRename: (folderId: string) => void;
 	onDelete: (folderId: string) => void;
 }) {
-	const snapshot = useSyncExternalStore(subscribeToArchive, getArchiveSnapshot, getArchiveSnapshot);
+	const archive = useArchiveList();
 	const menuRef = useRef<HTMLDivElement>(null);
 	const positionRef = useRef({ left: 10, top: 10 });
 	const [position, setPosition] = useState({ left: 10, top: 10 });
 	positionRef.current = position;
 
-	const folder = state ? snapshot.folders.find(item => item.id === state.folderId) : undefined;
+	const folder = state ? archive.folders.find(item => item.id === state.folderId) : undefined;
 
 	useLayoutEffect(() => {
 		if (!state || !menuRef.current) return;
@@ -438,7 +442,7 @@ function CaptureContextMenu({
 	onClose: (restoreFocus?: boolean) => void;
 	onCreateFolder: (captureId: string) => void;
 }) {
-	const snapshot = useSyncExternalStore(subscribeToArchive, getArchiveSnapshot, getArchiveSnapshot);
+	const archive = useArchiveList();
 	const actions = getArchiveActions();
 	const menuRef = useRef<HTMLDivElement>(null);
 	const positionRef = useRef({ left: 10, top: 10 });
@@ -446,13 +450,13 @@ function CaptureContextMenu({
 	const [moveOpen, setMoveOpen] = useState(false);
 	positionRef.current = position;
 
-	const capture = state ? snapshot.captures.find(item => item.id === state.captureId) : undefined;
+	const capture = state ? archive.captures.find(item => item.id === state.captureId) : undefined;
 	const storageStatus = capture ? captureStorageUiStatus(capture.storageStatus) : null;
 	const canUpgrade = storageStatus === "legacy" || storageStatus === "failed";
 	const currentFolderId = capture?.folderId || null;
 	const orderedFolders = [
-		...snapshot.folders.filter(folder => folder.id === currentFolderId),
-		...snapshot.folders.filter(folder => folder.id !== currentFolderId)
+		...archive.folders.filter(folder => folder.id === currentFolderId),
+		...archive.folders.filter(folder => folder.id !== currentFolderId)
 	];
 	const moveDestinations = [
 		...(currentFolderId === null ? [{ id: null, name: "Unfiled" }] : []),
@@ -619,7 +623,7 @@ export function ArchiveFolderDialog({
 	onCreated?: (folderId: string) => void;
 	onClose: () => void;
 }) {
-	const snapshot = useSyncExternalStore(subscribeToArchive, getArchiveSnapshot, getArchiveSnapshot);
+	const archive = useArchiveList();
 	const actions = getArchiveActions();
 	const dialogRef = useRef<HTMLDialogElement>(null);
 	const inputRef = useRef<HTMLInputElement>(null);
@@ -633,15 +637,15 @@ export function ArchiveFolderDialog({
 			setDraft(null);
 			return;
 		}
-		const folder = snapshot.folders.find(item => item.id === folderId);
+		const folder = archive.folders.find(item => item.id === folderId);
 		setDraft({ editingId: folder?.id || null, name: folder?.name || "" });
 		if (!dialog.open) dialog.showModal();
 		inputRef.current?.focus();
-	}, [folderId]);
+	}, [archive.folders, folderId]);
 
 	const name = draft?.name.trim() || "";
 	const editingId = draft?.editingId || null;
-	const duplicate = snapshot.folders.some(
+	const duplicate = archive.folders.some(
 		folder => folder.id !== editingId && folder.name.toLowerCase() === name.toLowerCase()
 	);
 	const valid = Boolean(name && !duplicate);
@@ -659,7 +663,7 @@ export function ArchiveFolderDialog({
 					if (!valid || !draft) return;
 					if (actions.saveFolder(name, editingId)) {
 						if (!editingId) {
-							const createdFolder = getArchiveSnapshot().folders.find(
+							const createdFolder = archive.folders.find(
 								folder => folder.name.toLowerCase() === name.toLowerCase()
 							);
 							if (createdFolder) onCreated?.(createdFolder.id);

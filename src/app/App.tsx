@@ -11,26 +11,24 @@ import {
 	type RefObject
 } from "react";
 import { ArchiveSidebar } from "../features/archive/archive-sidebar";
-import { getAnalysisSnapshot, subscribeToAnalysis } from "../features/analysis/analysis-bridge";
 import {
-	getCaptureHeaderActions,
-	getCaptureHeaderSnapshot,
-	subscribeToCaptureHeader
+	getCaptureHeaderActions
 } from "../features/capture/capture-header-bridge";
 import {
 	getCaptureStorageActions,
-	getCaptureStorageSnapshot,
-	subscribeToCaptureStorage
+	captureStorageSnapshot
 } from "../features/capture/capture-storage-bridge";
-import { normalizeCaptureDescription, normalizeCaptureTitle } from "../features/capture/capture-header";
+import { deriveCaptureHeaderSnapshot, normalizeCaptureDescription, normalizeCaptureTitle } from "../features/capture/capture-header";
 import {
 	getFramingToolbarSnapshot,
 	subscribeToFramingToolbar
 } from "../features/capture/framing-toolbar-bridge";
 import { getSendActions, getSendSnapshot, subscribeToSend } from "../features/send/send-bridge";
-import { deriveSendViewModel, formatSendTime, parseTransmitHex } from "../features/send/send";
+import { deriveSendViewModel, formatSendTime, parseTransmitHex, type SendHistoryItem, type SendQueueItem, type SendSnapshot } from "../features/send/send";
+import { deriveNotesSnapshot } from "../features/notes/notes.ts";
+import { deriveAnalysisSnapshot } from "../features/analysis/analysis.ts";
 import { getTransportActions, getTransportSnapshot, subscribeToTransport } from "../features/transport/transport-bridge";
-import { getNotesActions, getNotesSnapshot, subscribeToNotes } from "../features/notes/notes-bridge";
+import { getNotesActions } from "../features/notes/notes-bridge";
 import { getToastSnapshot, subscribeToToast } from "../shared/toast-bridge";
 import {
 	getPersistenceErrorActions,
@@ -44,6 +42,7 @@ import {
 	ExportDialog,
 	PatternRemarkDialog
 } from "../features/dialogs/dialogs";
+import { deriveMessageStreamSnapshot } from "../features/message-stream/message-stream";
 import { getMessageStreamSnapshot, subscribeToMessageStream } from "../features/message-stream/message-stream-bridge";
 import { MessageStream } from "../features/message-stream/message-stream-view";
 import { useApplicationSelector, useApplicationSend } from "./application-store-provider";
@@ -67,8 +66,10 @@ import {
 	type ViewStateAction,
 	type ViewStateSnapshot
 } from "../shared/view-state";
+import type { SendSettings } from "../shared/app-state.ts";
 import { MCP_SETTINGS_PATH, McpSettingsPage, type AgentAccessStatus } from "./mcp-settings-page";
 import { StatusSplitControl } from "./status-split-control";
+import { useArchiveDataLayer, useArchiveNotes, useArchiveSelectionSync, useSelectedArchiveCapture, useSendQueryState } from "../data/archive-react";
 import "./styles.css";
 
 function ConnectionIcon({ connected }: { connected: boolean }) {
@@ -164,16 +165,13 @@ function TopBar() {
 }
 
 function CaptureHeader() {
-	const snapshot = useSyncExternalStore(
-		subscribeToCaptureHeader,
-		getCaptureHeaderSnapshot,
-		getCaptureHeaderSnapshot
-	);
+	const activeCapture = useSelectedArchiveCapture();
+	const transport = useSyncExternalStore(subscribeToTransport, getTransportSnapshot, getTransportSnapshot);
+	const snapshot = deriveCaptureHeaderSnapshot(activeCapture.data, transport.recording);
 	const actions = getCaptureHeaderActions();
-	const storage = useSyncExternalStore(
-		subscribeToCaptureStorage,
-		getCaptureStorageSnapshot,
-		getCaptureStorageSnapshot
+	const storage = captureStorageSnapshot(
+		activeCapture.captureId,
+		activeCapture.data?.storageStatus
 	);
 	const storageActions = getCaptureStorageActions();
 	const [titleDraft, setTitleDraft] = useState(snapshot.title);
@@ -367,7 +365,12 @@ function Toolbar({ viewState, dispatchViewState, messageFilterRef, messageFilter
 		getFramingToolbarSnapshot,
 		getFramingToolbarSnapshot
 	);
-	const notes = useSyncExternalStore(subscribeToNotes, getNotesSnapshot, getNotesSnapshot);
+	const activeCapture = useSelectedArchiveCapture();
+	const notesQuery = useArchiveNotes(activeCapture.captureId);
+	const notes = deriveNotesSnapshot(
+		activeCapture.data,
+		activeCapture.data?.storageStatus === "canonical" ? notesQuery.data : undefined
+	);
 
 	return (
 		<div className="toolbar">
@@ -447,11 +450,16 @@ function StreamPanel({ viewState, dispatchViewState, messageFilterRef, messageFi
 		getFramingToolbarSnapshot,
 		getFramingToolbarSnapshot
 	);
-	const messageStream = useSyncExternalStore(
+	const transport = useSyncExternalStore(subscribeToTransport, getTransportSnapshot, getTransportSnapshot);
+	const activeCapture = useSelectedArchiveCapture();
+	const liveMessageStream = useSyncExternalStore(
 		subscribeToMessageStream,
 		getMessageStreamSnapshot,
 		getMessageStreamSnapshot
 	);
+	const messageStream = transport.recording && liveMessageStream.captureId === activeCapture.captureId
+		? liveMessageStream
+		: deriveMessageStreamSnapshot(activeCapture.data, viewState);
 
 	return (
 		<div
@@ -493,7 +501,7 @@ function StreamPanel({ viewState, dispatchViewState, messageFilterRef, messageFi
 					<span id="visibleCount">{messageStream.visibleCount}</span>
 				</div>
 			</div>
-			<MessageStream frameSizeLabel={framing.frameSizeLabel} />
+			<MessageStream frameSizeLabel={framing.frameSizeLabel} snapshot={messageStream} />
 		</div>
 	);
 }
@@ -504,10 +512,39 @@ type SendPanelProps = {
 };
 
 function SendPanel({ open, onOpenChange }: SendPanelProps) {
-	const snapshot = useSyncExternalStore(subscribeToSend, getSendSnapshot, getSendSnapshot);
+	const sendStatus = useSyncExternalStore(subscribeToSend, getSendSnapshot, getSendSnapshot);
+	const transport = useSyncExternalStore(subscribeToTransport, getTransportSnapshot, getTransportSnapshot);
+	const sendQuery = useSendQueryState();
 	const actions = getSendActions();
 	const inputRef = useRef<HTMLInputElement>(null);
 	const delayRef = useRef<HTMLInputElement>(null);
+	const queue: SendQueueItem[] = sendQuery.queue.map(item => ({
+		id: String(item.id || ""),
+		bytes: Array.isArray(item.bytes) ? item.bytes.map(Number) : [],
+		createdAt: Number(item.createdAt || 0)
+	}));
+	const history: SendHistoryItem[] = sendQuery.history.flatMap(item => {
+		if (!Array.isArray(item.bytes)) return [];
+		return [{
+			id: String(item.id || ""),
+			timestamp: Number(item.timestamp || item.createdAt || 0),
+			bytes: item.bytes.map(Number),
+			origin: String(item.origin || "manual"),
+			ok: item.ok !== false,
+			error: String(item.error || ""),
+			captureId: item.captureId ? String(item.captureId) : null
+		}];
+	});
+	const settings = (sendQuery.settings || {}) as Partial<SendSettings>;
+	const snapshot: SendSnapshot = {
+		...sendStatus,
+		connected: transport.connected,
+		recording: transport.recording,
+		draft: String(settings.draft || ""),
+		delayMs: Number(settings.delayMs || 0),
+		queue,
+		history
+	};
 	const [draft, setDraft] = useState(snapshot.draft);
 	const [delayDraft, setDelayDraft] = useState(String(snapshot.delayMs));
 	const [focusComposer, setFocusComposer] = useState(false);
@@ -815,7 +852,8 @@ const AnalysisPanelShell = memo(function AnalysisPanelShell({ active }: { active
 });
 
 function AnalysisPanelContent() {
-	const snapshot = useSyncExternalStore(subscribeToAnalysis, getAnalysisSnapshot, getAnalysisSnapshot);
+	const activeCapture = useSelectedArchiveCapture();
+	const snapshot = deriveAnalysisSnapshot(activeCapture.data);
 	return (
 		<div className="analysis-grid">
 				<article className="analysis-card wide">
@@ -944,7 +982,12 @@ const NotesPanelShell = memo(function NotesPanelShell({ active }: { active: bool
 });
 
 function NotesPanelContent() {
-	const snapshot = useSyncExternalStore(subscribeToNotes, getNotesSnapshot, getNotesSnapshot);
+	const activeCapture = useSelectedArchiveCapture();
+	const notesQuery = useArchiveNotes(activeCapture.captureId);
+	const snapshot = deriveNotesSnapshot(
+		activeCapture.data,
+		activeCapture.data?.storageStatus === "canonical" ? notesQuery.data : undefined
+	);
 	const actions = getNotesActions();
 	const [sequenceStart, setSequenceStart] = useState("1");
 	const [sequenceEnd, setSequenceEnd] = useState("2");
@@ -1170,6 +1213,8 @@ function SidebarResizeHandle({
 }
 
 function App() {
+	const archive = useArchiveDataLayer();
+	useArchiveSelectionSync();
 	const [sendPopupOpen, setSendPopupOpen] = useState(false);
 	const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
 	const [sidebarResizing, setSidebarResizing] = useState(false);
@@ -1198,7 +1243,7 @@ function App() {
 		void import("./controller")
 			.then(({ initializeController }) => {
 				if (disposed) return;
-				const lifecycle = initializeController();
+					const lifecycle = initializeController({ archive });
 				const handleBeforeUnload = (event: BeforeUnloadEvent) => lifecycle.beforeUnload(event);
 				window.addEventListener("beforeunload", handleBeforeUnload);
 				removeBeforeUnload = () => window.removeEventListener("beforeunload", handleBeforeUnload);
@@ -1209,7 +1254,7 @@ function App() {
 			disposed = true;
 			removeBeforeUnload?.();
 		};
-	}, []);
+	}, [archive]);
 
 	return (
 		<>

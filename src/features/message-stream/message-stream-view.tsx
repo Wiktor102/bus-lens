@@ -4,7 +4,6 @@ import {
 	useLayoutEffect,
 	useRef,
 	useState,
-	useSyncExternalStore,
 	type CSSProperties,
 	type MouseEvent as ReactMouseEvent
 } from "react";
@@ -17,12 +16,11 @@ import {
 } from "@tanstack/virtual-core";
 import {
 	getMessageStreamActions,
-	getMessageStreamSnapshot,
-	subscribeToMessageStream,
 	type MessageStreamTarget
 } from "./message-stream-bridge";
 import {
 	colorForByte,
+	deriveMessageStreamSnapshot,
 	formatDelta,
 	formatTime,
 	renderRepeatPillData,
@@ -32,6 +30,8 @@ import {
 	type MessageStreamRow,
 	type MessageStreamSnapshot
 } from "./message-stream";
+import type { Capture } from "../capture/capture-framing.ts";
+import type { ViewStateSnapshot } from "../../shared/view-state.ts";
 import type { SectionMoveAction, SectionMoveAvailability } from "../capture/section-repositioning.ts";
 import {
 	ArrowDown,
@@ -712,12 +712,25 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 	);
 }
 
-export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
-	const snapshot = useSyncExternalStore(
-		subscribeToMessageStream,
-		getMessageStreamSnapshot,
-		getMessageStreamSnapshot
-	);
+export function MessageStream({
+	frameSizeLabel,
+	capture,
+	viewState,
+	snapshot: providedSnapshot
+}: {
+	frameSizeLabel: string;
+	capture?: Capture | null;
+	viewState?: ViewStateSnapshot;
+	snapshot?: MessageStreamSnapshot;
+}) {
+	const snapshot = providedSnapshot || deriveMessageStreamSnapshot(capture, viewState || {
+		activePanel: "stream",
+		filterOpen: false,
+		filterQuery: "",
+		displayMode: "hex",
+		showFrameChanges: true,
+		collapseRuns: false
+	});
 	const actions = getMessageStreamActions();
 	const hasEntries = snapshot.entries.length > 0;
 	const scrollRef = useRef<HTMLDivElement>(null);
