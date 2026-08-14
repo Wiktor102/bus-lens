@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type CSSProperties } from "react";
-import { getDialogActions, getDialogSnapshot, subscribeToDialogs } from "./dialog-bridge";
+import { useEffect, useRef, useState, type FormEvent, type CSSProperties } from "react";
+import { useApplicationSelector, useApplicationStore } from "../../app/application-store-provider.tsx";
+import { selectCanonicalization, selectDialog } from "../../shared/application-store.ts";
+import { getDialogActions } from "./dialog-bridge";
 import {
 	appendContextParameter,
 	annotationTextIsValid,
@@ -11,11 +13,6 @@ import {
 	type ContextDialogDraft,
 	type ExportFormat
 } from "./dialog-model";
-import {
-	getCanonicalizationDialogActions,
-	getCanonicalizationDialogSnapshot,
-	subscribeToCanonicalizationDialog
-} from "../capture/canonicalization-bridge";
 import { Check, Plus, X } from "lucide-react";
 
 function isCancelSubmit(event: FormEvent<HTMLFormElement>): boolean {
@@ -23,7 +20,7 @@ function isCancelSubmit(event: FormEvent<HTMLFormElement>): boolean {
 }
 
 function useDialogCommand() {
-	return useSyncExternalStore(subscribeToDialogs, getDialogSnapshot, getDialogSnapshot).command;
+	return useApplicationSelector(selectDialog);
 }
 
 function DialogHeading({ eyebrow, title }: { eyebrow: string; title: string }) {
@@ -472,12 +469,14 @@ export function ExportDialog() {
 }
 
 export function CanonicalizationDialog() {
-	const snapshot = useSyncExternalStore(
-		subscribeToCanonicalizationDialog,
-		getCanonicalizationDialogSnapshot,
-		getCanonicalizationDialogSnapshot
-	);
-	const actions = getCanonicalizationDialogActions();
+	const snapshot = useApplicationSelector(selectCanonicalization);
+	const store = useApplicationStore();
+	const actions = {
+		close: () => store.sendCommand({ type: "canonicalization/close" }),
+		download: () => store.sendCommand({ type: "canonicalization/download" }),
+		start: () => store.sendCommand({ type: "canonicalization/start" }),
+		retry: () => store.sendCommand({ type: "canonicalization/retry" })
+	};
 	const dialogRef = useRef<HTMLDialogElement>(null);
 	const preflight = snapshot.preflight;
 	const job = snapshot.job;
@@ -555,18 +554,18 @@ export function CanonicalizationDialog() {
 				</div>
 			) : null}
 			<div className="modal-actions">
-				<button className="btn btn-secondary" type="button" onClick={actions.download} disabled={!snapshot.captureId || snapshot.starting}>
+				<button className="btn btn-secondary" type="button" onClick={() => actions.download()} disabled={!snapshot.captureId || snapshot.starting}>
 					Download original JSON
 				</button>
 				<span />
 				{terminalFailure ? (
-					<button className="btn btn-primary" type="button" onClick={actions.retry} disabled={snapshot.starting}>
+					<button className="btn btn-primary" type="button" onClick={() => actions.retry()} disabled={snapshot.starting}>
 						Retry conversion
 					</button>
 				) : terminalSuccess ? (
 					<button className="btn btn-primary" type="button" onClick={() => actions.close()}>Done</button>
 				) : (
-					<button id="startCanonicalizationBtn" className="btn btn-primary" type="button" onClick={actions.start} disabled={!canStart}>
+					<button id="startCanonicalizationBtn" className="btn btn-primary" type="button" onClick={() => actions.start()} disabled={!canStart}>
 						{snapshot.starting ? "Starting…" : preflight?.recordingActive ? "Stop recording first" : "Start conversion"}
 					</button>
 				)}

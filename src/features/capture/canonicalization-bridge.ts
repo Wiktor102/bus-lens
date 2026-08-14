@@ -1,16 +1,16 @@
-import { createExternalStore } from "../../shared/external-store.ts";
-import type { CanonicalizationJob, CanonicalizationPreflight } from "../../persistence/archive-client.ts";
+import {
+	applicationStore,
+	EMPTY_CANONICALIZATION_STATE,
+	selectCanonicalization,
+	type ApplicationState,
+	type CanonicalizationState
+} from "../../shared/application-store.ts";
 
-export type CanonicalizationDialogSnapshot = {
-	open: boolean;
-	captureId: string | null;
-	captureName: string;
-	preflight: CanonicalizationPreflight | null;
-	job: CanonicalizationJob | null;
-	loading: boolean;
-	starting: boolean;
-	error: string | null;
-};
+/**
+ * Compatibility surface for older feature callers. The application store owns
+ * the canonicalization snapshot; this module no longer keeps a second store.
+ */
+export type CanonicalizationDialogSnapshot = CanonicalizationState;
 
 export type CanonicalizationDialogActions = {
 	close: () => void;
@@ -19,27 +19,34 @@ export type CanonicalizationDialogActions = {
 	retry: () => void;
 };
 
-const emptySnapshot: CanonicalizationDialogSnapshot = {
-	open: false,
-	captureId: null,
-	captureName: "",
-	preflight: null,
-	job: null,
-	loading: false,
-	starting: false,
-	error: null
-};
+export const EMPTY_CANONICALIZATION_DIALOG_SNAPSHOT: CanonicalizationDialogSnapshot = EMPTY_CANONICALIZATION_STATE;
 
-const store = createExternalStore<CanonicalizationDialogSnapshot, CanonicalizationDialogActions>(emptySnapshot, {
+let actions: CanonicalizationDialogActions = {
 	close: () => {},
 	download: () => {},
 	start: () => {},
 	retry: () => {}
-});
+};
 
-export const getCanonicalizationDialogSnapshot = store.getSnapshot;
-export const subscribeToCanonicalizationDialog = store.subscribe;
-export const publishCanonicalizationDialogSnapshot = store.publish;
-export const registerCanonicalizationDialogActions = store.registerActions;
-export const getCanonicalizationDialogActions = store.getActions;
-export const EMPTY_CANONICALIZATION_DIALOG_SNAPSHOT = emptySnapshot;
+let lastSnapshot: CanonicalizationDialogSnapshot | undefined;
+let lastState: ApplicationState["canonicalization"] | undefined;
+
+export function getCanonicalizationDialogSnapshot(): CanonicalizationDialogSnapshot {
+	const state = applicationStore.select(selectCanonicalization);
+	if (state !== lastState) {
+		lastState = state;
+		lastSnapshot = state;
+	}
+	return lastSnapshot || state;
+}
+
+export const subscribeToCanonicalizationDialog = applicationStore.subscribe;
+
+export function publishCanonicalizationDialogSnapshot(snapshot: Partial<CanonicalizationDialogSnapshot>): void {
+	applicationStore.send({ type: "canonicalization/changed", update: snapshot });
+}
+
+export const registerCanonicalizationDialogActions = (next: CanonicalizationDialogActions): void => {
+	actions = next;
+};
+export const getCanonicalizationDialogActions = (): CanonicalizationDialogActions => actions;

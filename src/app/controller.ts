@@ -3,12 +3,6 @@ import { createAppRuntime } from "./app-runtime.ts";
 import { download } from "../features/data-transfer/browser-download.ts";
 import { registerCaptureHeaderActions } from "../features/capture/capture-header-bridge.ts";
 import { registerCaptureStorageActions } from "../features/capture/capture-storage-bridge.ts";
-import {
-	EMPTY_CANONICALIZATION_DIALOG_SNAPSHOT,
-	getCanonicalizationDialogSnapshot,
-	publishCanonicalizationDialogSnapshot,
-	registerCanonicalizationDialogActions
-} from "../features/capture/canonicalization-bridge.ts";
 import { rebuildPreview, visibleByteEntries } from "../features/capture/capture-framing.ts";
 import { createCaptureController } from "../features/capture/capture-controller.ts";
 import { createDataTransferController } from "../features/data-transfer/data-transfer.ts";
@@ -22,7 +16,13 @@ import { createSnapshotRuntime } from "./snapshot-runtime.ts";
 import { registerSendActions } from "../features/send/send-bridge.ts";
 import { registerTransportActions } from "../features/transport/transport-bridge.ts";
 import { getViewStateSnapshot } from "../shared/view-state-bridge.ts";
-import { applicationStore } from "../shared/application-store.ts";
+import {
+	applicationStore,
+	EMPTY_CANONICALIZATION_STATE,
+	IDLE_WORKFLOW,
+	selectCanonicalization,
+	type CanonicalizationState
+} from "../shared/application-store.ts";
 import type { ArchiveDataLayer } from "../data/archive-data-layer.ts";
 import {
 	EMPTY_PERSISTENCE_ERROR,
@@ -162,14 +162,22 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 	let canonicalizationToken = 0;
 	let canonicalizationStarting = false;
 
-	function publishCanonicalization(update: Partial<ReturnType<typeof getCanonicalizationDialogSnapshot>>): void {
-		publishCanonicalizationDialogSnapshot({ ...getCanonicalizationDialogSnapshot(), ...update });
+	function canonicalizationFailure(error: unknown, canRetry = true): CanonicalizationState["workflow"] {
+		return {
+			status: "failure",
+			error: error instanceof Error ? error.message : String(error),
+			canRetry
+		};
+	}
+
+	function publishCanonicalization(update: Partial<CanonicalizationState>): void {
+		applicationStore.send({ type: "canonicalization/changed", update });
 	}
 
 	function closeCanonicalizationDialog(): void {
 		canonicalizationToken += 1;
 		canonicalizationStarting = false;
-		publishCanonicalizationDialogSnapshot(EMPTY_CANONICALIZATION_DIALOG_SNAPSHOT);
+		applicationStore.send({ type: "canonicalization/changed", update: EMPTY_CANONICALIZATION_STATE });
 	}
 
 	function openCanonicalization(captureId: string): void {
@@ -178,7 +186,7 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		const status = runtime.getCaptureStorageStatus(captureId) ?? item.storageStatus;
 		if (status === "canonical" || status === "converting") return;
 		const token = ++canonicalizationToken;
-		publishCanonicalizationDialogSnapshot({
+		publishCanonicalization({
 			open: true,
 			captureId: String(captureId),
 			captureName: String(item.name ?? "Untitled capture"),
@@ -186,6 +194,7 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 			job: null,
 			loading: true,
 			starting: false,
+			workflow: { status: "running", startedAt: Date.now() },
 			error: null
 		});
 		void runtime.getCanonicalizationPreflight(captureId).then(preflight => {
@@ -201,17 +210,22 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 					}
 				: preflight;
 			if (token !== canonicalizationToken) return;
-			publishCanonicalization({ preflight: guardedPreflight, loading: false, error: guardedPreflight.error || null });
+			publishCanonicalization({
+				preflight: guardedPreflight,
+				loading: false,
+				error: guardedPreflight.error || null,
+				workflow: guardedPreflight.error ? canonicalizationFailure(guardedPreflight.error) : IDLE_WORKFLOW
+			});
 		}).catch(error => {
 			if (token !== canonicalizationToken) return;
-			publishCanonicalization({ loading: false, error: error instanceof Error ? error.message : String(error) });
+			publishCanonicalization({ loading: false, error: error instanceof Error ? error.message : String(error), workflow: canonicalizationFailure(error) });
 		});
 	}
 
 	openCanonicalizationDialog = openCanonicalization;
 
 	async function downloadLegacyBackup(): Promise<void> {
-		const captureId = getCanonicalizationDialogSnapshot().captureId;
+		const captureId = applicationStore.select(selectCanonicalization).captureId;
 		if (!captureId) return;
 		try {
 			const backup = await runtime.getLegacyBackup(captureId);
@@ -230,12 +244,13 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 			if (token === canonicalizationToken) publishCanonicalization({ job, loading: false });
 		}
 
-		if (job.status === "completed" && job.verified) {
+		const succeeded = job.status === "completed" && job.verified;
+		if (succeeded) {
 			runtime.setCaptureStorageStatus(captureId, "canonical");
 			await runtime.refreshCapture(captureId);
 			snapshots.render();
 			runtime.showToast("Capture upgraded; verification passed");
-		} else if (job.status === "failed") {
+		} else if (job.status === "failed" || job.status === "completed") {
 			runtime.setCaptureStorageStatus(captureId, "canonicalization-failed");
 			await runtime.refreshCapture(captureId);
 			snapshots.render();
@@ -243,12 +258,20 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		}
 		if (token === canonicalizationToken) {
 			canonicalizationStarting = false;
-			publishCanonicalization({ job, loading: false, starting: false, error: job.error });
+			publishCanonicalization({
+				job,
+				loading: false,
+				starting: false,
+				error: job.error || null,
+				workflow: succeeded
+					? { status: "success", completedAt: Date.now() }
+					: canonicalizationFailure(job.error || "Canonicalization verification failed")
+			});
 		}
 	}
 
 	async function startCanonicalization(): Promise<void> {
-		const current = getCanonicalizationDialogSnapshot();
+		const current = applicationStore.select(selectCanonicalization);
 		if (!current.captureId || canonicalizationStarting) return;
 		const captureId = current.captureId;
 		if (transport.isRecording()) {
@@ -263,13 +286,14 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 							error: "Stop recording before converting this capture"
 						}
 					: current.preflight,
-				error: "Stop recording before converting this capture"
+				error: "Stop recording before converting this capture",
+				workflow: canonicalizationFailure("Stop recording before converting this capture")
 			});
 			return;
 		}
 		const token = canonicalizationToken;
 		canonicalizationStarting = true;
-		publishCanonicalization({ starting: true, error: null });
+		publishCanonicalization({ starting: true, error: null, workflow: { status: "running", startedAt: Date.now() } });
 		runtime.setCaptureStorageStatus(captureId, "converting");
 		snapshots.render();
 		try {
@@ -290,19 +314,19 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 								? "converting"
 								: "legacy-not-canonicalized"
 				);
-				if (token === canonicalizationToken) publishCanonicalization({ preflight, starting: false, loading: false, error: error instanceof Error ? error.message : String(error) });
+				if (token === canonicalizationToken) publishCanonicalization({ preflight, starting: false, loading: false, error: error instanceof Error ? error.message : String(error), workflow: canonicalizationFailure(error) });
 			} catch {
-				if (token === canonicalizationToken) publishCanonicalization({ starting: false, loading: false, error: error instanceof Error ? error.message : String(error) });
+				if (token === canonicalizationToken) publishCanonicalization({ starting: false, loading: false, error: error instanceof Error ? error.message : String(error), workflow: canonicalizationFailure(error) });
 			}
 			snapshots.render();
 		}
 	}
 
 	async function retryCanonicalization(): Promise<void> {
-		const current = getCanonicalizationDialogSnapshot();
+		const current = applicationStore.select(selectCanonicalization);
 		if (!current.captureId || canonicalizationStarting) return;
 		const token = ++canonicalizationToken;
-		publishCanonicalization({ job: null, preflight: null, loading: true, starting: false, error: null });
+		publishCanonicalization({ job: null, preflight: null, loading: true, starting: false, error: null, workflow: { status: "running", startedAt: Date.now() } });
 		try {
 			const serverPreflight = await runtime.getCanonicalizationPreflight(current.captureId);
 			const preflight = transport.isRecording()
@@ -316,12 +340,29 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 					}
 				: serverPreflight;
 			if (token !== canonicalizationToken) return;
-			publishCanonicalization({ preflight, loading: false });
+			publishCanonicalization({ preflight, loading: false, workflow: preflight.error ? canonicalizationFailure(preflight.error) : IDLE_WORKFLOW });
 			if (preflight.eligible) await startCanonicalization();
 		} catch (error) {
-			if (token === canonicalizationToken) publishCanonicalization({ loading: false, error: error instanceof Error ? error.message : String(error) });
+			if (token === canonicalizationToken) publishCanonicalization({ loading: false, error: error instanceof Error ? error.message : String(error), workflow: canonicalizationFailure(error) });
 		}
 	}
+
+	applicationStore.subscribeToCommands(command => {
+		switch (command.type) {
+			case "canonicalization/close":
+				closeCanonicalizationDialog();
+				break;
+			case "canonicalization/download":
+				void downloadLegacyBackup();
+				break;
+			case "canonicalization/start":
+				void startCanonicalization();
+				break;
+			case "canonicalization/retry":
+				void retryCanonicalization();
+				break;
+		}
+	});
 
 	const dataTransferController = createDataTransferController({
 		state: runtime.state,
@@ -357,12 +398,6 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 	});
 
 	registerCaptureStorageActions({ upgrade: captureController.upgradeActiveCapture });
-	registerCanonicalizationDialogActions({
-		close: closeCanonicalizationDialog,
-		download: () => { void downloadLegacyBackup(); },
-		start: () => { void startCanonicalization(); },
-		retry: () => { void retryCanonicalization(); }
-	});
 
 	registerArchiveActions({
 		selectCapture: captureController.selectArchiveCapture,

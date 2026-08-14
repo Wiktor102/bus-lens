@@ -35,8 +35,6 @@ import { getNotesActions } from "../features/notes/notes-bridge";
 import { getToastSnapshot, subscribeToToast } from "../shared/toast-bridge";
 import {
 	getPersistenceErrorActions,
-	getPersistenceErrorSnapshot,
-	subscribeToPersistenceError
 } from "../shared/persistence-error-bridge";
 import {
 	AnnotationDialog,
@@ -51,6 +49,7 @@ import { useApplicationSelector, useApplicationSend } from "./application-store-
 import {
 	selectFramingToolbar,
 	selectMessageStream,
+	selectPersistenceError,
 	selectSendRuntime,
 	selectTransport,
 	selectViewState,
@@ -1108,11 +1107,7 @@ function Toast({ sendPopupOpen }: { sendPopupOpen: boolean }) {
 }
 
 function PersistenceErrorBanner() {
-	const snapshot = useSyncExternalStore(
-		subscribeToPersistenceError,
-		getPersistenceErrorSnapshot,
-		getPersistenceErrorSnapshot
-	);
+	const snapshot = useApplicationSelector(selectPersistenceError);
 	if (!snapshot.visible) return null;
 	return (
 		<div className="persistence-error" role="alert">

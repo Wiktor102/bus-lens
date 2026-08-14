@@ -9,7 +9,7 @@ import type {
 	ExportFormat,
 	PatternRemarkSaveInput
 } from "../features/dialogs/dialog-model.ts";
-import type { MessageStreamSnapshot } from "../features/message-stream/message-stream.ts";
+import { EMPTY_MESSAGE_STREAM_SNAPSHOT, type MessageStreamSnapshot } from "../features/message-stream/message-stream.ts";
 import type { SectionFramingUpdate, Capture } from "../features/capture/capture-framing.ts";
 import type { SectionMoveAction } from "../features/capture/section-repositioning.ts";
 import {
@@ -27,7 +27,77 @@ export type WorkflowState =
 	| { status: "success"; completedAt: number }
 	| { status: "failure"; error: string; canRetry: boolean };
 
-export const IDLE_WORKFLOW: WorkflowState = Object.freeze({ status: "idle" });
+function cloneValue<T>(value: T, seen = new WeakMap<object, unknown>()): T {
+	if (!value || typeof value !== "object") return value;
+	if (seen.has(value as object)) return seen.get(value as object) as T;
+
+	if (value instanceof Date) return new Date(value.getTime()) as T;
+	if (value instanceof Map) {
+		const copy = new Map<unknown, unknown>();
+		seen.set(value, copy);
+		value.forEach((item, key) => copy.set(cloneValue(key, seen), cloneValue(item, seen)));
+		return copy as T;
+	}
+	if (value instanceof Set) {
+		const copy = new Set<unknown>();
+		seen.set(value, copy);
+		value.forEach(item => copy.add(cloneValue(item, seen)));
+		return copy as T;
+	}
+	if (Array.isArray(value)) {
+		const copy: unknown[] = [];
+		seen.set(value, copy);
+		value.forEach(item => copy.push(cloneValue(item, seen)));
+		return copy as T;
+	}
+
+	const copy = Object.create(Object.getPrototypeOf(value)) as Record<PropertyKey, unknown>;
+	seen.set(value as object, copy);
+	for (const key of Reflect.ownKeys(value)) {
+		if (Object.prototype.propertyIsEnumerable.call(value, key)) {
+			copy[key] = cloneValue((value as Record<PropertyKey, unknown>)[key], seen);
+		}
+	}
+	return copy as T;
+}
+
+function freezeValue<T>(value: T, seen = new WeakSet<object>()): T {
+	if (!value || typeof value !== "object" || seen.has(value as object)) return value;
+	seen.add(value as object);
+
+	if (value instanceof Map) {
+		value.forEach((item, key) => {
+			freezeValue(key, seen);
+			freezeValue(item, seen);
+		});
+		Object.defineProperties(value, {
+			set: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } },
+			delete: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } },
+			clear: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } }
+		});
+	} else if (value instanceof Set) {
+		value.forEach(item => freezeValue(item, seen));
+		Object.defineProperties(value, {
+			add: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } },
+			delete: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } },
+			clear: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } }
+		});
+	} else {
+		for (const key of Reflect.ownKeys(value)) {
+			if (Object.prototype.propertyIsEnumerable.call(value, key)) {
+				freezeValue((value as Record<PropertyKey, unknown>)[key], seen);
+			}
+		}
+	}
+
+	return Object.freeze(value);
+}
+
+function cloneAndFreeze<T>(value: T): T {
+	return freezeValue(cloneValue(value));
+}
+
+export const IDLE_WORKFLOW: WorkflowState = cloneAndFreeze({ status: "idle" });
 
 export type TransportViewState = {
 	connected: boolean;
@@ -44,7 +114,7 @@ export type TransportState = TransportViewState & {
 	recordingWorkflow: WorkflowState;
 };
 
-export const EMPTY_TRANSPORT_STATE: TransportState = {
+export const EMPTY_TRANSPORT_STATE: TransportState = cloneAndFreeze({
 	connected: false,
 	recording: false,
 	recordingCaptureId: null,
@@ -54,7 +124,7 @@ export const EMPTY_TRANSPORT_STATE: TransportState = {
 	recordDisabled: true,
 	connection: IDLE_WORKFLOW,
 	recordingWorkflow: IDLE_WORKFLOW
-};
+});
 
 export type SendRuntimeState = {
 	sendInFlight: boolean;
@@ -64,13 +134,13 @@ export type SendRuntimeState = {
 	queueWorkflow: WorkflowState;
 };
 
-export const EMPTY_SEND_RUNTIME_STATE: SendRuntimeState = {
+export const EMPTY_SEND_RUNTIME_STATE: SendRuntimeState = cloneAndFreeze({
 	sendInFlight: false,
 	queueRunning: false,
 	stopQueueRequested: false,
 	sendWorkflow: IDLE_WORKFLOW,
 	queueWorkflow: IDLE_WORKFLOW
-};
+});
 
 export type CanonicalizationState = {
 	open: boolean;
@@ -78,19 +148,23 @@ export type CanonicalizationState = {
 	captureName: string;
 	preflight: CanonicalizationPreflight | null;
 	job: CanonicalizationJob | null;
+	loading: boolean;
+	starting: boolean;
 	workflow: WorkflowState;
 	error: string | null;
 };
 
-export const EMPTY_CANONICALIZATION_STATE: CanonicalizationState = {
+export const EMPTY_CANONICALIZATION_STATE: CanonicalizationState = cloneAndFreeze({
 	open: false,
 	captureId: null,
 	captureName: "",
 	preflight: null,
 	job: null,
+	loading: false,
+	starting: false,
 	workflow: IDLE_WORKFLOW,
 	error: null
-};
+});
 
 export type PersistenceErrorState = {
 	visible: boolean;
@@ -100,20 +174,20 @@ export type PersistenceErrorState = {
 	canExportRecovery: boolean;
 };
 
-export const EMPTY_PERSISTENCE_ERROR: PersistenceErrorState = {
+export const EMPTY_PERSISTENCE_ERROR: PersistenceErrorState = cloneAndFreeze({
 	visible: false,
 	captureId: null,
 	message: "",
 	canRetry: false,
 	canExportRecovery: false
-};
+});
 
 export type ToastState = {
 	message: string;
 	visible: boolean;
 };
 
-export const EMPTY_TOAST_STATE: ToastState = { message: "", visible: false };
+export const EMPTY_TOAST_STATE: ToastState = cloneAndFreeze({ message: "", visible: false });
 
 export type FramingToolbarState = {
 	captureId: string | null;
@@ -121,11 +195,11 @@ export type FramingToolbarState = {
 	frameSizeLabel: string;
 };
 
-export const EMPTY_FRAMING_TOOLBAR_STATE: FramingToolbarState = {
+export const EMPTY_FRAMING_TOOLBAR_STATE: FramingToolbarState = cloneAndFreeze({
 	captureId: null,
 	disabled: true,
 	frameSizeLabel: "—"
-};
+});
 
 export type ApplicationCommand =
 	| { type: "transport/connect" }
@@ -253,14 +327,12 @@ export type ApplicationState = Readonly<{
 	persistenceError: PersistenceErrorState;
 }>;
 
-const EMPTY_MESSAGE_STREAM_STATE = {} as MessageStreamSnapshot;
-
 function cloneViewStateSnapshot(snapshot: ViewStateSnapshot): ViewStateSnapshot {
-	return Object.freeze({ ...snapshot });
+	return cloneAndFreeze(snapshot);
 }
 
 function createApplicationState(viewState: ViewStateSnapshot, selectedCaptureId: string | null = null): ApplicationState {
-	return Object.freeze({
+	return cloneAndFreeze({
 		viewState: cloneViewStateSnapshot(viewState),
 		selectedCaptureId,
 		dialog: null,
@@ -268,14 +340,14 @@ function createApplicationState(viewState: ViewStateSnapshot, selectedCaptureId:
 		transport: EMPTY_TRANSPORT_STATE,
 		send: EMPTY_SEND_RUNTIME_STATE,
 		framingToolbar: EMPTY_FRAMING_TOOLBAR_STATE,
-		messageStream: EMPTY_MESSAGE_STREAM_STATE,
+		messageStream: EMPTY_MESSAGE_STREAM_SNAPSHOT,
 		toast: EMPTY_TOAST_STATE,
 		persistenceError: EMPTY_PERSISTENCE_ERROR
 	});
 }
 
 function withViewState(state: ApplicationState, action: ViewStateAction): ApplicationState {
-	return Object.freeze({ ...state, viewState: cloneViewStateSnapshot(reduceViewState(state.viewState, action)) });
+	return cloneAndFreeze({ ...state, viewState: cloneViewStateSnapshot(reduceViewState(state.viewState, action)) });
 }
 
 function workflowFailure(error: string, canRetry: boolean): WorkflowState {
@@ -347,16 +419,16 @@ export function createApplicationStore(
 			"view/collapse-runs-changed": (state, event: { collapseRuns: boolean }) =>
 				withViewState(state, { type: "set-collapse-runs", collapseRuns: event.collapseRuns }),
 			"view/replaced": (state, event: { viewState: ViewStateSnapshot }) =>
-				Object.freeze({ ...state, viewState: cloneViewStateSnapshot(event.viewState) }),
+				cloneAndFreeze({ ...state, viewState: cloneViewStateSnapshot(event.viewState) }),
 			"capture/selected-changed": (state, event: { captureId: string | null }) =>
-				Object.freeze({ ...state, selectedCaptureId: event.captureId }),
+				cloneAndFreeze({ ...state, selectedCaptureId: event.captureId }),
 			"dialog/command-changed": (state, event: { command: DialogCommandInput | null }) => {
-				if (!event.command) return Object.freeze({ ...state, dialog: null });
-				const command = Object.freeze({ ...event.command, requestId: ++nextDialogRequestId }) as DialogCommand;
-				return Object.freeze({ ...state, dialog: command });
+				if (!event.command) return cloneAndFreeze({ ...state, dialog: null });
+				const command = cloneAndFreeze({ ...event.command, requestId: ++nextDialogRequestId }) as DialogCommand;
+				return cloneAndFreeze({ ...state, dialog: command });
 			},
 			"canonicalization/changed": (state, event: { update: Partial<CanonicalizationState> }) =>
-				Object.freeze({
+				cloneAndFreeze({
 					...state,
 					canonicalization: Object.freeze({ ...state.canonicalization, ...event.update })
 				}),
@@ -389,13 +461,13 @@ export function createApplicationStore(
 			"send/runtime-updated": (state, event: { runtime: Pick<SendRuntimeState, "sendInFlight" | "queueRunning" | "stopQueueRequested"> }) =>
 				replaceSend(state, { ...event.runtime }),
 			"framing-toolbar/changed": (state, event: { state: FramingToolbarState }) =>
-				Object.freeze({ ...state, framingToolbar: Object.freeze({ ...event.state }) }),
+				cloneAndFreeze({ ...state, framingToolbar: event.state }),
 			"message-stream/changed": (state, event: { state: MessageStreamSnapshot }) =>
-				Object.freeze({ ...state, messageStream: event.state }),
+				cloneAndFreeze({ ...state, messageStream: event.state }),
 			"toast/changed": (state, event: { state: ToastState }) =>
-				Object.freeze({ ...state, toast: Object.freeze({ ...event.state }) }),
+				cloneAndFreeze({ ...state, toast: event.state }),
 			"persistence-error/changed": (state, event: { state: PersistenceErrorState }) =>
-				Object.freeze({ ...state, persistenceError: Object.freeze({ ...event.state }) }),
+				cloneAndFreeze({ ...state, persistenceError: event.state }),
 			"command/requested": state => state
 		}
 	});
