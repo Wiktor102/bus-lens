@@ -1,14 +1,12 @@
-import { publishFramingToolbarSnapshot } from "../features/capture/framing-toolbar-bridge.ts";
 import { deriveCaptureHeaderSnapshot } from "../features/capture/capture-header.ts";
 import { publishCaptureHeaderSnapshot } from "../features/capture/capture-header-bridge.ts";
 import { getViewStateSnapshot, subscribeToViewState } from "../shared/view-state-bridge.ts";
 import { deriveMessageStreamSnapshot } from "../features/message-stream/message-stream.ts";
-import { publishMessageStreamSnapshot } from "../features/message-stream/message-stream-bridge.ts";
 import { selectFramingToolbarSnapshot } from "../features/capture/framing-toolbar.ts";
 import type { Capture } from "../features/capture/capture-framing.ts";
 import type { SendController } from "../features/send/send-controller.ts";
 import type { SerialController } from "../features/transport/serial-controller.ts";
-import { applicationStore } from "../shared/application-store.ts";
+import { applicationStore, type ApplicationStore } from "../shared/application-store.ts";
 import type { ViewStateSnapshot } from "../shared/view-state.ts";
 
 export type SnapshotRuntimeDependencies = {
@@ -16,6 +14,7 @@ export type SnapshotRuntimeDependencies = {
 	getTransport: () => Pick<SerialController, "getPort" | "isRecording" | "getRecordingCaptureId" | "publishState">;
 	getSendController: () => Pick<SendController, "getStatus"> | undefined;
 	getViewStateSnapshot?: () => ViewStateSnapshot;
+	applicationStore?: Pick<ApplicationStore, "send">;
 };
 
 export type SnapshotRuntime = {
@@ -29,6 +28,7 @@ export type SnapshotRuntime = {
 
 export function createSnapshotRuntime(dependencies: SnapshotRuntimeDependencies): SnapshotRuntime {
 	const getViewState = dependencies.getViewStateSnapshot || getViewStateSnapshot;
+	const store = dependencies.applicationStore || applicationStore;
 
 	function publishCaptureHeaderState(capture = dependencies.capture()): void {
 		const recordingCaptureId = dependencies.getTransport().getRecordingCaptureId();
@@ -42,17 +42,23 @@ export function createSnapshotRuntime(dependencies: SnapshotRuntimeDependencies)
 			queueRunning: false,
 			stopQueueRequested: false
 		};
-		applicationStore.send({ type: "send/runtime-updated", runtime: sendStatus });
+		store.send({ type: "send/runtime-updated", runtime: sendStatus });
 	}
 
 	function publishFramingToolbarState(capture = dependencies.capture()): void {
-		publishFramingToolbarSnapshot(selectFramingToolbarSnapshot(capture));
+		store.send({
+			type: "framing-toolbar/changed",
+			state: selectFramingToolbarSnapshot(capture)
+		});
 	}
 
 	function renderMessages(): void {
 		const capture = dependencies.capture();
 		if (!capture) return;
-		publishMessageStreamSnapshot(deriveMessageStreamSnapshot(capture, getViewState()));
+		store.send({
+			type: "message-stream/changed",
+			state: deriveMessageStreamSnapshot(capture, getViewState())
+		});
 	}
 
 	function render(): void {
