@@ -1,0 +1,391 @@
+import { QueryClient } from "@tanstack/react-query";
+import {
+	archiveQueryKeys,
+	createArchiveMutationSuccessHandler,
+	createArchiveQueryOptions,
+	invalidateArchiveMutationCache,
+	normalizeArchiveSettings,
+	type ArchiveMutationName
+} from "./archive-queries.ts";
+import {
+	ArchiveClient,
+	type ArchiveIndex,
+	type CanonicalCaptureSummary,
+	type CanonicalNote,
+	type CaptureMetadataPatch,
+	type CaptureState,
+	type CreateCaptureRequest,
+	type LegacyBackupResponse,
+	type CanonicalizationJob,
+	type CanonicalizationPreflight,
+	type PatchMetadataRequest
+} from "../persistence/archive-client.ts";
+import type { Capture } from "../features/capture/capture-framing.ts";
+import {
+	loadState,
+	STORAGE_KEY,
+	type AppState,
+	type SendHistoryEntry,
+	type SendQueueEntry,
+	type SendSettings,
+	type StateStorage,
+	type StoredFolder
+} from "../shared/app-state.ts";
+
+export type ArchiveDataLayerStorage = StateStorage & {
+	removeItem?: (key: string) => void;
+};
+
+export type ArchiveCommandError = Error & {
+	command?: string;
+};
+
+export type ArchiveCommands = {
+	hydrate: () => Promise<ArchiveHydration>;
+	getArchiveIndex: () => Promise<ArchiveIndex>;
+	persistArchiveIndex: (index: ArchiveIndex) => Promise<void>;
+	getCapture: (captureId: string) => Promise<Capture>;
+	listCaptures: () => Promise<Capture[]>;
+	saveLegacyCapture: (capture: Capture) => Promise<void>;
+	createCapture: (request: CreateCaptureRequest) => Promise<CaptureState>;
+	patchMetadata: (request: PatchMetadataRequest) => Promise<CaptureState>;
+	deleteCapture: (captureId: string) => Promise<void>;
+	clearCaptureData: (captureId: string) => Promise<void>;
+	duplicateCapture: (captureId: string, duplicateCaptureId?: string) => Promise<void>;
+	saveFolder: (folder: StoredFolder) => Promise<void>;
+	deleteFolder: (folderId: string) => Promise<void>;
+	saveSettings: (settings: Partial<SendSettings>) => Promise<void>;
+	saveQueueItem: (item: SendQueueEntry, position: number) => Promise<void>;
+	deleteQueueItem: (queueItemId: string) => Promise<void>;
+	saveHistoryItem: (item: SendHistoryEntry) => Promise<void>;
+	deleteHistoryItem: (historyItemId: string) => Promise<void>;
+	createNote: (request: Parameters<ArchiveClient["createNote"]>[0]) => Promise<{ note: CanonicalNote; contentRevision: number }>;
+	updateNote: (request: Parameters<ArchiveClient["updateNote"]>[0]) => Promise<{ note: CanonicalNote; contentRevision: number }>;
+	deleteNote: (request: Parameters<ArchiveClient["deleteNote"]>[0]) => Promise<void>;
+	setByteVisibility: (request: Parameters<ArchiveClient["setByteVisibility"]>[0]) => Promise<Awaited<ReturnType<ArchiveClient["setByteVisibility"]>>>;
+	setFrameVisibility: (request: Parameters<ArchiveClient["setFrameVisibility"]>[0]) => Promise<Awaited<ReturnType<ArchiveClient["setFrameVisibility"]>>>;
+	startCanonicalization: (captureId: string) => Promise<CanonicalizationJob>;
+	getCanonicalizationPreflight: (captureId: string) => Promise<CanonicalizationPreflight>;
+	getCanonicalizationJob: (captureId: string, jobId: string) => Promise<CanonicalizationJob>;
+	getLegacyBackup: (captureId: string) => Promise<LegacyBackupResponse>;
+	/** Recording is deliberately exposed as an append command, outside Query cache updates. */
+	recordingWriter: ArchiveClient;
+};
+
+export type ArchiveHydration = {
+	index: ArchiveIndex;
+	captures: Capture[];
+	folders: StoredFolder[];
+	queue: SendQueueEntry[];
+	history: SendHistoryEntry[];
+	settings: SendSettings;
+	summaries: CanonicalCaptureSummary[];
+};
+
+export type ArchiveDataLayer = {
+	client: ArchiveClient;
+	queryClient: QueryClient;
+	queries: ReturnType<typeof createArchiveQueryOptions>;
+	commands: ArchiveCommands;
+	ready: Promise<void>;
+};
+
+function browserStorage(): ArchiveDataLayerStorage | undefined {
+	try {
+		const storage = globalThis.localStorage;
+		return storage && typeof storage.getItem === "function" ? storage : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function hasStoredState(state: AppState): boolean {
+	return Boolean(
+		state.captures.length ||
+		state.folders.length ||
+		state.sendQueue?.length ||
+		state.sendHistory?.length ||
+		Object.keys(state.sendSettings ?? {}).length
+	);
+}
+
+function readLegacyArchive(storage: ArchiveDataLayerStorage | undefined): AppState | null {
+	if (!storage) return null;
+	let raw: string | null = null;
+	try {
+		raw = storage.getItem(STORAGE_KEY);
+	} catch {
+		return null;
+	}
+	if (!raw) return null;
+	try {
+		const parsed = JSON.parse(raw) as AppState;
+		return Array.isArray(parsed?.captures)
+			? loadState({ storage: { getItem: key => key === STORAGE_KEY ? raw : null } })
+			: null;
+	} catch {
+		return null;
+	}
+}
+
+function cloneIndex(index: ArchiveIndex): ArchiveIndex {
+	return {
+		activeId: index.activeId ?? null,
+		unfiledCollapsed: Boolean(index.unfiledCollapsed),
+		captures: [...(index.captures ?? [])].map(capture => ({ ...capture, folderId: capture.folderId ?? null })),
+		folders: [...(index.folders ?? [])].map(folder => ({ ...folder }))
+	};
+}
+
+function commandError(name: string, error: unknown): ArchiveCommandError {
+	const wrapped = error instanceof Error ? error : new Error(String(error));
+	return Object.assign(wrapped, { command: name }) as ArchiveCommandError;
+}
+
+export function createArchiveDataLayer(
+	queryClient: QueryClient,
+	client = new ArchiveClient(),
+	storage?: ArchiveDataLayerStorage
+): ArchiveDataLayer {
+	const queries = createArchiveQueryOptions(client);
+	const mutationSuccess = <Name extends ArchiveMutationName>(
+		name: Name,
+		result: Parameters<ReturnType<typeof createArchiveMutationSuccessHandler<Name>>>[0],
+		variables: Parameters<ReturnType<typeof createArchiveMutationSuccessHandler<Name>>>[1]
+	) => invalidateArchiveMutationCache(queryClient, name, variables, result);
+
+	async function run<Name extends ArchiveMutationName>(
+		name: Name,
+		variables: Parameters<ReturnType<typeof createArchiveMutationSuccessHandler<Name>>>[1],
+		operation: () => Promise<Parameters<ReturnType<typeof createArchiveMutationSuccessHandler<Name>>>[0]>
+	): Promise<Parameters<ReturnType<typeof createArchiveMutationSuccessHandler<Name>>>[0]> {
+		try {
+			const result = await operation();
+			await mutationSuccess(name, result, variables);
+			return result;
+		} catch (error) {
+			throw commandError(name, error);
+		}
+	}
+
+	async function persistArchiveIndex(index: ArchiveIndex): Promise<void> {
+		const next = cloneIndex(index);
+		const previous = queryClient.getQueryData<ArchiveIndex>(archiveQueryKeys.index());
+		// Selection and ordering are the immediate-interaction slice. The rollback
+		// lives here so components never write Query cache data themselves.
+		queryClient.setQueryData(archiveQueryKeys.index(), next);
+		try {
+			await run("saveArchiveIndex", { index: next }, () => client.saveArchiveIndex(next));
+		} catch (error) {
+			rollbackQuery(archiveQueryKeys.index(), previous);
+			throw error;
+		}
+	}
+
+	function rollbackQuery<T>(queryKey: readonly unknown[], previous: T | undefined): void {
+		if (previous === undefined) queryClient.removeQueries({ queryKey, exact: true });
+		else queryClient.setQueryData(queryKey, previous);
+	}
+
+	async function saveFolder(folder: StoredFolder): Promise<void> {
+		const previous = queryClient.getQueryData<StoredFolder[]>(archiveQueryKeys.folders());
+		if (previous) {
+			const next = previous.some(item => item.id === folder.id)
+				? previous.map(item => item.id === folder.id ? { ...folder } : item)
+				: [...previous, { ...folder }];
+			queryClient.setQueryData(archiveQueryKeys.folders(), next);
+		}
+		try {
+			await run("saveFolder", folder, () => client.saveFolder(folder));
+		} catch (error) {
+			rollbackQuery(archiveQueryKeys.folders(), previous);
+			throw error;
+		}
+	}
+
+	async function deleteFolder(folderId: string): Promise<void> {
+		await run("deleteFolder", folderId, () => client.deleteFolder(folderId));
+	}
+
+	async function saveQueueItem(item: SendQueueEntry, position: number): Promise<void> {
+		const previous = queryClient.getQueryData<SendQueueEntry[]>(archiveQueryKeys.queue());
+		if (previous && item.id) {
+			const next = previous.some(candidate => candidate.id === item.id)
+				? previous.map(candidate => candidate.id === item.id ? { ...item } : candidate)
+				: [...previous, { ...item }];
+			queryClient.setQueryData(archiveQueryKeys.queue(), next);
+		}
+		try {
+			await run("saveQueueItem", { item, position }, () => client.saveQueueItem(item, position));
+		} catch (error) {
+			rollbackQuery(archiveQueryKeys.queue(), previous);
+			throw error;
+		}
+	}
+
+	async function deleteQueueItem(queueItemId: string): Promise<void> {
+		const previous = queryClient.getQueryData<SendQueueEntry[]>(archiveQueryKeys.queue());
+		if (previous) queryClient.setQueryData(archiveQueryKeys.queue(), previous.filter(item => item.id !== queueItemId));
+		try {
+			await run("deleteQueueItem", queueItemId, () => client.deleteQueueItem(queueItemId));
+		} catch (error) {
+			rollbackQuery(archiveQueryKeys.queue(), previous);
+			throw error;
+		}
+	}
+
+	async function saveHistoryItem(item: SendHistoryEntry): Promise<void> {
+		const previous = queryClient.getQueryData<SendHistoryEntry[]>(archiveQueryKeys.history());
+		if (previous && typeof item.id === "string") {
+			const next = previous.some(candidate => candidate.id === item.id)
+				? previous.map(candidate => candidate.id === item.id ? { ...item } : candidate)
+				: [item, ...previous];
+			queryClient.setQueryData(archiveQueryKeys.history(), next);
+		}
+		try {
+			await run("saveHistoryItem", { item }, () => client.saveHistoryItem(item));
+		} catch (error) {
+			rollbackQuery(archiveQueryKeys.history(), previous);
+			throw error;
+		}
+	}
+
+	async function deleteHistoryItem(historyItemId: string): Promise<void> {
+		const previous = queryClient.getQueryData<SendHistoryEntry[]>(archiveQueryKeys.history());
+		if (previous) queryClient.setQueryData(archiveQueryKeys.history(), previous.filter(item => item.id !== historyItemId));
+		try {
+			await run("deleteHistoryItem", historyItemId, () => client.deleteHistoryItem(historyItemId));
+		} catch (error) {
+			rollbackQuery(archiveQueryKeys.history(), previous);
+			throw error;
+		}
+	}
+
+	async function saveSettings(settings: Partial<SendSettings>): Promise<void> {
+		const previous = queryClient.getQueryData<SendSettings>(archiveQueryKeys.settings());
+		queryClient.setQueryData(archiveQueryKeys.settings(), normalizeArchiveSettings({ ...previous, ...settings }));
+		try {
+			await run("saveSettings", { settings }, () => client.saveSettings(settings));
+		} catch (error) {
+			rollbackQuery(archiveQueryKeys.settings(), previous);
+			throw error;
+		}
+	}
+
+	async function patchMetadata(request: PatchMetadataRequest): Promise<CaptureState> {
+		const previous = queryClient.getQueryData<Capture>(archiveQueryKeys.capture(request.captureId));
+		if (previous) {
+			const patch = request.patch;
+			queryClient.setQueryData(archiveQueryKeys.capture(request.captureId), {
+				...previous,
+				...(patch.name === undefined ? {} : { name: patch.name }),
+				...(patch.description === undefined ? {} : { description: patch.description }),
+				...(patch.controllerView === undefined ? {} : { view: patch.controllerView }),
+				...(patch.baudRate === undefined ? {} : { baudRate: patch.baudRate }),
+				...(patch.folderId === undefined ? {} : { folderId: patch.folderId }),
+				...(patch.parameters === undefined ? {} : { params: patch.parameters.map(parameter => ({ ...parameter })) })
+			});
+		}
+		try {
+			return await run("patchMetadata", request, () => client.patchMetadata(request));
+		} catch (error) {
+			rollbackQuery(archiveQueryKeys.capture(request.captureId), previous);
+			throw error;
+		}
+	}
+
+	const commands: ArchiveCommands = {
+		hydrate: async () => {
+			const [index, captures, folders, queue, history, settings, summaries] = await Promise.all([
+				queryClient.ensureQueryData(queries.index()),
+				queryClient.ensureQueryData(queries.captures()),
+				queryClient.ensureQueryData(queries.folders()),
+				queryClient.ensureQueryData(queries.queue()),
+				queryClient.ensureQueryData(queries.history()),
+				queryClient.ensureQueryData(queries.settings()),
+				queryClient.ensureQueryData(queries.captureSummaries())
+			]);
+			return { index, captures, folders, queue, history, settings, summaries };
+		},
+		getArchiveIndex: () => queryClient.ensureQueryData(queries.index()),
+		persistArchiveIndex,
+		getCapture: captureId => queryClient.ensureQueryData(queries.capture(captureId)),
+		listCaptures: () => queryClient.ensureQueryData(queries.captures()),
+		saveLegacyCapture: capture => run("saveLegacyCaptureDocument", capture, () => client.saveLegacyCaptureDocument(capture)),
+		createCapture: request => run("createCapture", request, () => client.createCapture(request)),
+		patchMetadata,
+		deleteCapture: captureId => run("deleteCapture", captureId, () => client.delete(captureId)),
+		clearCaptureData: async captureId => {
+			await client.clearData({ captureId });
+			await invalidateArchiveMutationCache(queryClient, "patchMetadata", { captureId, patch: {} }, {} as CaptureState);
+		},
+		duplicateCapture: async (captureId, duplicateCaptureId) => {
+			await client.duplicate({ captureId, duplicateCaptureId });
+			await invalidateArchiveMutationCache(queryClient, "createCapture", { captureId: duplicateCaptureId || "" } as CreateCaptureRequest, {} as CaptureState);
+		},
+		saveFolder,
+		deleteFolder,
+		saveSettings,
+		saveQueueItem,
+		deleteQueueItem,
+		saveHistoryItem,
+		deleteHistoryItem,
+		createNote: async request => {
+			const result = await client.createNote(request);
+			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.notes(request.captureId) });
+			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.capture(request.captureId) });
+			return result;
+		},
+		updateNote: async request => {
+			const result = await client.updateNote(request);
+			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.notes(request.captureId) });
+			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.capture(request.captureId) });
+			return result;
+		},
+		deleteNote: async request => {
+			await client.deleteNote(request);
+			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.notes(request.captureId) });
+			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.capture(request.captureId) });
+		},
+		setByteVisibility: async request => {
+			const result = await client.setByteVisibility(request);
+			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.capture(request.captureId) });
+			return result;
+		},
+		setFrameVisibility: async request => {
+			const result = await client.setFrameVisibility(request);
+			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.capture(request.captureId) });
+			return result;
+		},
+		startCanonicalization: captureId => run("startCanonicalization", captureId, () => client.startCanonicalization(captureId)),
+		getCanonicalizationPreflight: captureId => queryClient.fetchQuery(queries.canonicalizationPreflight(captureId)),
+		getCanonicalizationJob: (captureId, jobId) => queryClient.fetchQuery(queries.canonicalizationJob(captureId, jobId)),
+		getLegacyBackup: captureId => queryClient.fetchQuery(queries.legacyBackup(captureId)),
+		recordingWriter: client
+	};
+
+	const legacyStorage = storage || browserStorage();
+	const legacyArchive = readLegacyArchive(legacyStorage);
+	const ready = (async () => {
+		await client.health();
+		const serverState = await client.load();
+		if (legacyArchive && !hasStoredState(serverState)) {
+			await client.migrate(legacyArchive);
+			try { legacyStorage?.removeItem?.(STORAGE_KEY); } catch {}
+		}
+		await Promise.all([
+			queryClient.ensureQueryData(queries.index()),
+			queryClient.ensureQueryData(queries.captures()),
+			queryClient.ensureQueryData(queries.captureSummaries()),
+			queryClient.ensureQueryData(queries.folders()),
+			queryClient.ensureQueryData(queries.queue()),
+			queryClient.ensureQueryData(queries.history()),
+			queryClient.ensureQueryData(queries.settings())
+		]);
+	})().catch(error => {
+		console.error("Bus Lens archive data unavailable", error);
+		throw commandError("bootstrap", error);
+	});
+
+	return { client, queryClient, queries, commands, ready };
+}

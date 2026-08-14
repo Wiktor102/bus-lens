@@ -10,6 +10,7 @@ import {
 
 export type ApplicationState = Readonly<{
 	viewState: ViewStateSnapshot;
+	selectedCaptureId: string | null;
 }>;
 
 export type ApplicationEvent =
@@ -19,7 +20,8 @@ export type ApplicationEvent =
 	| { type: "view/display-mode-changed"; displayMode: DisplayMode }
 	| { type: "view/frame-changes-changed"; showFrameChanges: boolean }
 	| { type: "view/collapse-runs-changed"; collapseRuns: boolean }
-	| { type: "view/replaced"; viewState: ViewStateSnapshot };
+	| { type: "view/replaced"; viewState: ViewStateSnapshot }
+	| { type: "capture/selected-changed"; captureId: string | null };
 
 export type ApplicationSelector<Selected> = (state: ApplicationState) => Selected;
 
@@ -34,8 +36,8 @@ function cloneViewStateSnapshot(snapshot: ViewStateSnapshot): ViewStateSnapshot 
 	return Object.freeze({ ...snapshot });
 }
 
-function createApplicationState(viewState: ViewStateSnapshot): ApplicationState {
-	return Object.freeze({ viewState: cloneViewStateSnapshot(viewState) });
+function createApplicationState(viewState: ViewStateSnapshot, selectedCaptureId: string | null = null): ApplicationState {
+	return Object.freeze({ viewState: cloneViewStateSnapshot(viewState), selectedCaptureId });
 }
 
 function withViewState(state: ApplicationState, action: ViewStateAction): ApplicationState {
@@ -62,6 +64,7 @@ export function viewStateActionToApplicationEvent(action: ViewStateAction): Appl
 export const selectViewState: ApplicationSelector<ViewStateSnapshot> = state => state.viewState;
 export const selectActivePanel: ApplicationSelector<ViewPanel> = state => state.viewState.activePanel;
 export const selectDisplayMode: ApplicationSelector<DisplayMode> = state => state.viewState.displayMode;
+export const selectSelectedCaptureId: ApplicationSelector<string | null> = state => state.selectedCaptureId;
 
 export function createApplicationStore(
 	initialViewState: ViewStateSnapshot = EMPTY_VIEW_STATE_SNAPSHOT
@@ -82,7 +85,9 @@ export function createApplicationStore(
 			"view/collapse-runs-changed": (state, event: { collapseRuns: boolean }) =>
 				withViewState(state, { type: "set-collapse-runs", collapseRuns: event.collapseRuns }),
 			"view/replaced": (_state, event: { viewState: ViewStateSnapshot }) =>
-				createApplicationState(event.viewState)
+				createApplicationState(event.viewState, _state.selectedCaptureId),
+			"capture/selected-changed": (state, event: { captureId: string | null }) =>
+				Object.freeze({ ...state, selectedCaptureId: event.captureId })
 		}
 	});
 

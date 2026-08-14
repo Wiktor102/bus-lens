@@ -1,17 +1,23 @@
 import { mutationOptions, queryOptions, type QueryClient } from "@tanstack/react-query";
-import type { ArchiveClient, CanonicalizationJob, CanonicalizationPreflight, MigrationReport } from "../persistence/archive-client.ts";
+import type {
+	ArchiveClient,
+	ArchiveIndex,
+	CanonicalizationJob,
+	CanonicalizationPreflight,
+	CaptureState,
+	CanonicalNote,
+	CreateCaptureRequest,
+	MigrationReport,
+	PatchMetadataRequest
+} from "../persistence/archive-client.ts";
 import type {
 	AppState,
+	SendHistoryEntry,
+	SendQueueEntry,
 	SendSettings,
 	StoredFolder
 } from "../shared/app-state.ts";
 import type { Capture } from "../features/capture/capture-framing.ts";
-import type {
-	CanonicalNote,
-	CreateCaptureRequest,
-	PatchMetadataRequest,
-	CaptureState
-} from "../persistence/archive-client.ts";
 
 const archiveRoot = ["archive"] as const;
 
@@ -22,6 +28,7 @@ const archiveRoot = ["archive"] as const;
 export const archiveQueryKeys = {
 	all: archiveRoot,
 	snapshot: () => [...archiveRoot, "snapshot"] as const,
+	index: () => [...archiveRoot, "index"] as const,
 	captures: () => [...archiveRoot, "captures"] as const,
 	capture: (captureId: string) => [...archiveQueryKeys.captures(), captureId] as const,
 	captureSummaries: () => [...archiveQueryKeys.captures(), "summaries"] as const,
@@ -39,6 +46,7 @@ export const archiveQueryKeys = {
 export type ArchiveQueryKey =
 	| typeof archiveQueryKeys.all
 	| ReturnType<typeof archiveQueryKeys.snapshot>
+	| ReturnType<typeof archiveQueryKeys.index>
 	| ReturnType<typeof archiveQueryKeys.captures>
 	| ReturnType<typeof archiveQueryKeys.capture>
 	| ReturnType<typeof archiveQueryKeys.captureSummaries>
@@ -60,15 +68,17 @@ export type ArchiveQuerySource = Pick<
 	| "getCanonicalizationJob"
 	| "getLegacyBackup"
 	| "listNotes"
->;
+> & Partial<Pick<ArchiveClient, "loadArchiveIndex" | "listCaptures" | "listFolders" | "listQueue" | "listHistory" | "loadSettings">>;
 
 export type ArchiveMutationSource = Pick<
 	ArchiveClient,
 	| "migrate"
 	| "saveLegacyCaptureDocument"
 	| "saveFolder"
+	| "saveQueueItem"
 	| "deleteFolder"
 	| "deleteQueueItem"
+	| "saveHistoryItem"
 	| "deleteHistoryItem"
 	| "saveArchiveIndex"
 	| "saveSendState"
@@ -80,24 +90,35 @@ export type ArchiveMutationSource = Pick<
 >;
 
 export type SaveArchiveIndexCommand = Readonly<{
-	state: AppState;
-	activeId: string | null | undefined;
+	index: ArchiveIndex;
 }>;
 
 export type SaveSendStateCommand = Readonly<{
-	state: AppState;
+	queue: readonly SendQueueEntry[];
+	history: readonly SendHistoryEntry[];
 }>;
 
 export type SaveSettingsCommand = Readonly<{
 	settings: Partial<SendSettings> | undefined;
 }>;
 
+export type SaveQueueItemCommand = Readonly<{
+	item: SendQueueEntry;
+	position: number;
+}>;
+
+export type SaveHistoryItemCommand = Readonly<{
+	item: SendHistoryEntry;
+}>;
+
 type ArchiveMutationData = {
 	migrate: { variables: AppState; result: MigrationReport };
 	saveLegacyCaptureDocument: { variables: Capture; result: void };
 	saveFolder: { variables: StoredFolder; result: void };
+	saveQueueItem: { variables: SaveQueueItemCommand; result: void };
 	deleteFolder: { variables: string; result: void };
 	deleteQueueItem: { variables: string; result: void };
+	saveHistoryItem: { variables: SaveHistoryItemCommand; result: void };
 	deleteHistoryItem: { variables: string; result: void };
 	saveArchiveIndex: { variables: SaveArchiveIndexCommand; result: void };
 	saveSendState: { variables: SaveSendStateCommand; result: void };
@@ -115,6 +136,15 @@ export type ArchiveMutationResult<Name extends ArchiveMutationName> = ArchiveMut
 /** The only cache capability mutation policy code needs from TanStack Query. */
 export type ArchiveQueryCache = Pick<QueryClient, "invalidateQueries">;
 
+export function normalizeArchiveSettings(settings: Partial<SendSettings> | undefined): SendSettings {
+	const savedDelay = Number(settings?.delayMs);
+	return {
+		delayMs: Number.isFinite(savedDelay) ? Math.max(0, Math.min(600_000, savedDelay)) : 100,
+		draft: String(settings?.draft || ""),
+		baudRate: Math.max(300, +settings?.baudRate! || 115200)
+	};
+}
+
 export type ArchiveMutationCachePolicy = {
 	[Name in ArchiveMutationName]: (
 		variables: ArchiveMutationVariables<Name>,
@@ -129,13 +159,15 @@ export type ArchiveMutationCachePolicy = {
  */
 export const archiveMutationCachePolicy: ArchiveMutationCachePolicy = {
 	migrate: () => [archiveQueryKeys.all],
-	saveLegacyCaptureDocument: () => [
+	saveLegacyCaptureDocument: capture => [
 		archiveQueryKeys.snapshot(),
 		archiveQueryKeys.captures(),
+		archiveQueryKeys.capture(String(capture.id)),
 		archiveQueryKeys.captureSummaries()
 	],
 	saveFolder: () => [
 		archiveQueryKeys.snapshot(),
+		archiveQueryKeys.index(),
 		archiveQueryKeys.folders(),
 		archiveQueryKeys.captureSummaries()
 	],
@@ -144,10 +176,13 @@ export const archiveMutationCachePolicy: ArchiveMutationCachePolicy = {
 		archiveQueryKeys.folders(),
 		archiveQueryKeys.captureSummaries()
 	],
+	saveQueueItem: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.queue()],
 	deleteQueueItem: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.queue()],
+	saveHistoryItem: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.history()],
 	deleteHistoryItem: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.history()],
 	saveArchiveIndex: () => [
 		archiveQueryKeys.snapshot(),
+		archiveQueryKeys.index(),
 		archiveQueryKeys.captures(),
 		archiveQueryKeys.folders(),
 		archiveQueryKeys.captureSummaries()
@@ -213,6 +248,19 @@ export function createArchiveQueryOptions(client: ArchiveQuerySource) {
 			queryKey: archiveQueryKeys.snapshot(),
 			queryFn: () => client.load()
 		}),
+		index: () => queryOptions<ArchiveIndex, Error, ArchiveIndex, ReturnType<typeof archiveQueryKeys.index>>({
+			queryKey: archiveQueryKeys.index(),
+			queryFn: () => client.loadArchiveIndex ? client.loadArchiveIndex() : client.load().then(state => ({
+				activeId: state.activeId ?? null,
+				unfiledCollapsed: Boolean(state.unfiledCollapsed),
+				captures: state.captures.map((capture, position) => ({ id: String(capture.id), folderId: capture.folderId ?? null, position })),
+				folders: state.folders.map((folder, position) => ({ id: String(folder.id), position }))
+			}))
+		}),
+		captures: () => queryOptions<Capture[], Error, Capture[], ReturnType<typeof archiveQueryKeys.captures>>({
+			queryKey: archiveQueryKeys.captures(),
+			queryFn: () => client.listCaptures ? client.listCaptures() : client.load().then(state => state.captures)
+		}),
 		capture: (captureId: string) => queryOptions<Capture, Error, Capture, ReturnType<typeof archiveQueryKeys.capture>>({
 			queryKey: archiveQueryKeys.capture(captureId),
 			queryFn: () => client.loadCapture(captureId),
@@ -221,6 +269,24 @@ export function createArchiveQueryOptions(client: ArchiveQuerySource) {
 		captureSummaries: () => queryOptions({
 			queryKey: archiveQueryKeys.captureSummaries(),
 			queryFn: () => client.listCaptureSummaries()
+		}),
+		folders: () => queryOptions<StoredFolder[], Error, StoredFolder[], ReturnType<typeof archiveQueryKeys.folders>>({
+			queryKey: archiveQueryKeys.folders(),
+			queryFn: () => client.listFolders ? client.listFolders() : client.load().then(state => state.folders)
+		}),
+		queue: () => queryOptions<SendQueueEntry[], Error, SendQueueEntry[], ReturnType<typeof archiveQueryKeys.queue>>({
+			queryKey: archiveQueryKeys.queue(),
+			queryFn: () => client.listQueue ? client.listQueue() : client.load().then(state => state.sendQueue ?? [])
+		}),
+		history: () => queryOptions<SendHistoryEntry[], Error, SendHistoryEntry[], ReturnType<typeof archiveQueryKeys.history>>({
+			queryKey: archiveQueryKeys.history(),
+			queryFn: () => client.listHistory ? client.listHistory() : client.load().then(state => state.sendHistory ?? [])
+		}),
+		settings: () => queryOptions<SendSettings, Error, SendSettings, ReturnType<typeof archiveQueryKeys.settings>>({
+			queryKey: archiveQueryKeys.settings(),
+			queryFn: () => client.loadSettings
+				? client.loadSettings().then(normalizeArchiveSettings)
+				: client.load().then(state => normalizeArchiveSettings(state.sendSettings))
 		}),
 		canonicalizationPreflight: (captureId: string) => queryOptions<CanonicalizationPreflight>({
 			queryKey: archiveQueryKeys.canonicalization(captureId),
@@ -262,6 +328,11 @@ export function createArchiveMutationOptions(client: ArchiveMutationSource, quer
 			mutationFn: folder => client.saveFolder(folder),
 			onSuccess: queryClient ? createArchiveMutationSuccessHandler(queryClient, "saveFolder") : undefined
 		}),
+		saveQueueItem: () => mutationOptions<void, Error, SaveQueueItemCommand>({
+			mutationKey: [...archiveQueryKeys.queue(), "save"],
+			mutationFn: command => client.saveQueueItem(command.item, command.position),
+			onSuccess: queryClient ? createArchiveMutationSuccessHandler(queryClient, "saveQueueItem") : undefined
+		}),
 		deleteFolder: () => mutationOptions<void, Error, string>({
 			mutationKey: [...archiveQueryKeys.folders(), "delete"],
 			mutationFn: folderId => client.deleteFolder(folderId),
@@ -272,19 +343,29 @@ export function createArchiveMutationOptions(client: ArchiveMutationSource, quer
 			mutationFn: queueItemId => client.deleteQueueItem(queueItemId),
 			onSuccess: queryClient ? createArchiveMutationSuccessHandler(queryClient, "deleteQueueItem") : undefined
 		}),
+		saveHistoryItem: () => mutationOptions<void, Error, SaveHistoryItemCommand>({
+			mutationKey: [...archiveQueryKeys.history(), "save"],
+			mutationFn: command => client.saveHistoryItem(command.item),
+			onSuccess: queryClient ? createArchiveMutationSuccessHandler(queryClient, "saveHistoryItem") : undefined
+		}),
 		deleteHistoryItem: () => mutationOptions<void, Error, string>({
 			mutationKey: [...archiveQueryKeys.history(), "delete"],
 			mutationFn: historyItemId => client.deleteHistoryItem(historyItemId),
 			onSuccess: queryClient ? createArchiveMutationSuccessHandler(queryClient, "deleteHistoryItem") : undefined
 		}),
-		saveArchiveIndex: () => mutationOptions<void, Error, SaveArchiveIndexCommand>({
+	saveArchiveIndex: () => mutationOptions<void, Error, SaveArchiveIndexCommand>({
 			mutationKey: [...archiveRoot, "index", "save"],
-			mutationFn: command => client.saveArchiveIndex(command.state, command.activeId),
+			mutationFn: command => client.saveArchiveIndex(command.index),
 			onSuccess: queryClient ? createArchiveMutationSuccessHandler(queryClient, "saveArchiveIndex") : undefined
 		}),
 		saveSendState: () => mutationOptions<void, Error, SaveSendStateCommand>({
 			mutationKey: [...archiveRoot, "send-state", "save"],
-			mutationFn: command => client.saveSendState(command.state),
+			mutationFn: command => client.saveSendState({
+				captures: [],
+				folders: [],
+				sendQueue: [...command.queue],
+				sendHistory: [...command.history]
+			}),
 			onSuccess: queryClient ? createArchiveMutationSuccessHandler(queryClient, "saveSendState") : undefined
 		}),
 		saveSettings: () => mutationOptions<void, Error, SaveSettingsCommand>({

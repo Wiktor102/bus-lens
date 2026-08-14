@@ -1,4 +1,10 @@
-import type { AppState, SendSettings, StoredFolder } from "../shared/app-state.ts";
+import type {
+	AppState,
+	SendHistoryEntry,
+	SendQueueEntry,
+	SendSettings,
+	StoredFolder
+} from "../shared/app-state.ts";
 import type { Capture } from "../features/capture/capture-framing.ts";
 
 export type CanonicalStorageStatus = "canonical" | "converting" | "canonicalization-failed" | (string & {});
@@ -426,6 +432,25 @@ export type CanonicalCaptureSummary = Readonly<{
 	folderId: string | null;
 }>;
 
+export type ArchiveCaptureOrder = Readonly<{
+	id: string;
+	folderId: string | null;
+	position: number;
+}>;
+
+export type ArchiveFolderOrder = Readonly<{
+	id: string;
+	position: number;
+}>;
+
+/** The server-owned index that determines archive order, folders, and selection. */
+export type ArchiveIndex = Readonly<{
+	activeId: string | null;
+	unfiledCollapsed: boolean;
+	captures: readonly ArchiveCaptureOrder[];
+	folders: readonly ArchiveFolderOrder[];
+}>;
+
 /**
  * The browser-side command boundary. Whole capture documents are deliberately
  * absent: the only document save is the explicitly named legacy escape hatch.
@@ -542,6 +567,29 @@ export class ArchiveClient implements CaptureWriter {
 			sendSettings: archive.settings.send as AppState["sendSettings"]
 		};
 	}
+	async loadArchiveIndex(): Promise<ArchiveIndex> {
+		return request<ArchiveIndex>("/archive-index");
+	}
+	async listCaptures(): Promise<Capture[]> {
+		const records = await request<Array<{ id?: string; document: Capture }>>("/captures");
+		return records.map(documentWithId);
+	}
+	async listFolders(): Promise<StoredFolder[]> {
+		const records = await request<Array<{ id?: string; document: StoredFolder }>>("/folders");
+		return records.map(documentWithId);
+	}
+	async listQueue(): Promise<SendQueueEntry[]> {
+		const records = await request<Array<{ id?: string; document: Record<string, unknown> }>>("/queue");
+		return records.map(documentWithId) as SendQueueEntry[];
+	}
+	async listHistory(): Promise<SendHistoryEntry[]> {
+		const records = await request<Array<{ id?: string; document: Record<string, unknown> }>>("/history");
+		return records.map(documentWithId) as SendHistoryEntry[];
+	}
+	async loadSettings(): Promise<Partial<SendSettings>> {
+		const settings = await request<{ send?: Record<string, unknown> }>("/settings");
+		return (settings.send ?? {}) as Partial<SendSettings>;
+	}
 	async migrate(archive: AppState): Promise<MigrationReport> {
 		const fingerprint = await archiveFingerprint(archive);
 		const report = archiveReport(archive, fingerprint);
@@ -595,10 +643,19 @@ export class ArchiveClient implements CaptureWriter {
 	async saveFolder(folder: StoredFolder): Promise<void> { await request(`/folders/${encodeURIComponent(folder.id)}`, { method: "PUT", ...requestBody(folder) }); }
 	async deleteCapture(captureId: string): Promise<void> { await this.delete(captureId); }
 	async deleteFolder(folderId: string): Promise<void> { await request(`/folders/${encodeURIComponent(folderId)}`, { method: "DELETE" }); }
+	async saveQueueItem(item: SendQueueEntry, position?: number): Promise<void> {
+		if (!item.id) throw new Error("queue item id is required");
+		await request(`/queue/${encodeURIComponent(item.id)}`, { method: "PUT", ...requestBody({ ...item, ...(position === undefined ? {} : { position }) }) });
+	}
 	async deleteQueueItem(queueItemId: string): Promise<void> { await request(`/queue/${encodeURIComponent(queueItemId)}`, { method: "DELETE" }); }
+	async saveHistoryItem(item: SendHistoryEntry): Promise<void> {
+		const id = typeof item.id === "string" ? item.id : "";
+		if (!id) throw new Error("history item id is required");
+		await request(`/history/${encodeURIComponent(id)}`, { method: "PUT", ...requestBody(item) });
+	}
 	async deleteHistoryItem(historyItemId: string): Promise<void> { await request(`/history/${encodeURIComponent(historyItemId)}`, { method: "DELETE" }); }
-	async saveArchiveIndex(state: AppState, activeId: string | null | undefined): Promise<void> {
-		await request("/archive-index", { method: "PUT", ...requestBody({ activeId: activeId ?? null, unfiledCollapsed: Boolean(state.unfiledCollapsed), captures: state.captures.map((capture, position) => ({ id: capture.id, folderId: capture.folderId ?? null, position })), folders: state.folders.map((folder, position) => ({ id: folder.id, position })) }) });
+	async saveArchiveIndex(index: ArchiveIndex): Promise<void> {
+		await request("/archive-index", { method: "PUT", ...requestBody(index) });
 	}
 	async saveSendState(state: AppState): Promise<void> {
 		await Promise.all((state.sendQueue ?? []).map((item, index) => request(`/queue/${encodeURIComponent(String(item.id ?? `queue-${index}`))}`, { method: "PUT", ...requestBody(item) })));
