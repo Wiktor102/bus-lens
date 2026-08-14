@@ -661,6 +661,8 @@ type DifferentialFramePlan = Readonly<{
 }>;
 
 function differentialSectionKey(section: DifferentialSectionRow, rawOrigin: number | null): string {
+	// This value is comparison-local metadata. It intentionally does not enter
+	// canonical storage, identity allocation, joins, or foreign-key lookups.
 	return JSON.stringify({
 		position: section.position,
 		startOffset: section.start_offset - (rawOrigin ?? 0),

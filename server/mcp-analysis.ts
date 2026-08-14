@@ -138,6 +138,9 @@ const differentialScoreComponentsSchema = z.object({
 });
 const differentialCandidateSchema = z.object({
 	sectionId: z.string(),
+	baselineSectionId: z.string(),
+	changedSectionId: z.string(),
+	sectionFingerprint: z.string(),
 	frameFamily: z.string(),
 	changedFrameFamily: z.string(),
 	bytePosition: z.number().int().nonnegative(),
@@ -157,6 +160,9 @@ const differentialCandidateSchema = z.object({
 });
 const differentialPositionSummarySchema = z.object({
 	sectionId: z.string(),
+	baselineSectionId: z.string(),
+	changedSectionId: z.string(),
+	sectionFingerprint: z.string(),
 	frameFamily: z.string(),
 	bytePosition: z.number().int().nonnegative(),
 	pairedFrameCount: z.number().int().nonnegative(),
@@ -166,6 +172,9 @@ const differentialPositionSummarySchema = z.object({
 });
 const differentialLengthChangeSchema = z.object({
 	sectionId: z.string(),
+	baselineSectionId: z.string(),
+	changedSectionId: z.string(),
+	sectionFingerprint: z.string(),
 	frameFamily: z.string(),
 	changedFrameFamily: z.string(),
 	baselineLength: z.number().int().nonnegative(),
@@ -386,7 +395,7 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 	registerAnalysisTool(
 		server,
 		"analyze_capture_difference",
-		"Compare two explicitly pinned, labelled experiments with bounded ordinal, raw-relative, timestamp-nearest, or exact-signature sequence alignment. Returns ranked candidateFields with byte/bit evidence and score components only; it never names or persists inferred protocol fields. Both snapshots are subject to a total bounded byte/timestamp/raw-position/direction array budget before materialization. Sequence alignment is an exact-signature LCS, so substitutions are reported as one deletion plus one insertion. Raw-relative pairs only equal relative retained-raw starts; shifted boundaries remain explicit unpaired evidence. A shared scope.sectionId must exist in both snapshots; use side-specific filters for profile-local section IDs.",
+		"Compare two explicitly pinned, labelled experiments with bounded ordinal, raw-relative, timestamp-nearest, or structural-fingerprint-aware signature-sequence alignment. Returns ranked candidateFields with byte/bit evidence and score components only; it never names or persists inferred protocol fields. Both snapshots are subject to a total bounded byte/timestamp/raw-position/direction array budget before materialization. Signature substitutions pair only equal ordinals with equal comparison-local section fingerprints, while exact-signature LCS anchors retain priority; candidate results retain baselineSectionId, changedSectionId, and sectionFingerprint. The fingerprint may be shared by structurally equivalent sections and is not a database identity or lookup key without its snapshot. Raw-relative pairs only equal relative retained-raw starts; shifted boundaries remain explicit unpaired evidence. A shared scope.sectionId must exist in both snapshots; use side-specific filters for profile-local section IDs.",
 		differentialInputSchema,
 		input => queries.analyzeCaptureDifference(input as AgentCaptureDifferenceInput),
 		response => {

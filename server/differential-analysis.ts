@@ -98,8 +98,9 @@ export type NormalizedDifferentialScope = Readonly<{
 export type DifferentialFrame = Readonly<{
 	id: string;
 	ordinal: number;
+	/** Persistent canonical database identity; regenerated globally for each capture/profile. */
 	sectionId: string;
-	/** Stable framing-section identity; section IDs themselves are profile-local. */
+	/** Comparison-local structural fingerprint; never a persisted section identity. */
 	sectionKey?: string;
 	bytes: readonly number[];
 	timestamps: readonly number[];
@@ -143,7 +144,12 @@ export type AgentDifferentialScoreComponents = Readonly<{
 }>;
 
 export type AgentDifferentialCandidate = Readonly<{
+	/** Baseline canonical section ID; retained as the legacy sectionId alias. */
 	sectionId: string;
+	baselineSectionId: string;
+	changedSectionId: string;
+	/** Comparison-local structural fingerprint; only meaningful with both snapshots. */
+	sectionFingerprint: string;
 	frameFamily: string;
 	changedFrameFamily: string;
 	bytePosition: number;
@@ -163,7 +169,12 @@ export type AgentDifferentialCandidate = Readonly<{
 	}>;
 
 export type AgentDifferentialPositionSummary = Readonly<{
+	/** Baseline canonical section ID; retained as the legacy sectionId alias. */
 	sectionId: string;
+	baselineSectionId: string;
+	changedSectionId: string;
+	/** Comparison-local structural fingerprint; only meaningful with both snapshots. */
+	sectionFingerprint: string;
 	frameFamily: string;
 	bytePosition: number;
 	pairedFrameCount: number;
@@ -173,7 +184,12 @@ export type AgentDifferentialPositionSummary = Readonly<{
 }>;
 
 export type AgentDifferentialLengthChange = Readonly<{
+	/** Baseline canonical section ID; retained as the legacy sectionId alias. */
 	sectionId: string;
+	baselineSectionId: string;
+	changedSectionId: string;
+	/** Comparison-local structural fingerprint; only meaningful with both snapshots. */
+	sectionFingerprint: string;
 	frameFamily: string;
 	changedFrameFamily: string;
 	baselineLength: number;
@@ -733,7 +749,7 @@ export function alignSignatureSequence(
 			const deletion = scores[row - 1]![column]!;
 			const insertion = scores[row]![column - 1]!;
 			const compatibleSubstitution = baselineFrame.ordinal === changedFrame.ordinal
-				&& baselineFrame.sectionId === changedFrame.sectionId;
+				&& sectionKey(baselineFrame) === sectionKey(changedFrame);
 			// This is an exact-signature LCS, not an edit-distance substitution
 			// matcher. A substitution is therefore represented explicitly as one
 			// deleted baseline frame plus one inserted changed frame. That avoids
@@ -869,6 +885,9 @@ type PositionStats = {
 
 type FamilyStats = {
 	sectionId: string;
+	baselineSectionId: string;
+	changedSectionId: string;
+	sectionFingerprint: string;
 	sectionKey: string;
 	frameFamily: string;
 	changedFrameFamily: string;
@@ -879,6 +898,9 @@ type FamilyStats = {
 
 type LengthChangeStats = {
 	sectionId: string;
+	baselineSectionId: string;
+	changedSectionId: string;
+	sectionFingerprint: string;
 	frameFamily: string;
 	changedFrameFamily: string;
 	baselineLength: number;
@@ -979,6 +1001,9 @@ export function calculateDifferentialEvidence(
 				} else {
 					observedLengthChanges.set(key, {
 						sectionId: pair.baseline.sectionId,
+						baselineSectionId: pair.baseline.sectionId,
+						changedSectionId: pair.changed.sectionId,
+						sectionFingerprint: sectionKey(pair.baseline),
 						frameFamily: familyText(pair),
 						changedFrameFamily: changedFamilyText(pair),
 						baselineLength: pair.baseline.bytes.length,
@@ -998,6 +1023,9 @@ export function calculateDifferentialEvidence(
 		const key = `${structuralSectionKey}\u0000${frameFamily}\u0000${changedFrameFamily}`;
 		const family = families.get(key) ?? {
 			sectionId,
+			baselineSectionId: pair.baseline.sectionId,
+			changedSectionId: pair.changed.sectionId,
+			sectionFingerprint: structuralSectionKey,
 			sectionKey: structuralSectionKey,
 			frameFamily,
 			changedFrameFamily,
@@ -1041,6 +1069,9 @@ export function calculateDifferentialEvidence(
 			if (stats.presentCount !== family.pairs) continue;
 			const positionSummary: AgentDifferentialPositionSummary = {
 				sectionId: family.sectionId,
+				baselineSectionId: family.baselineSectionId,
+				changedSectionId: family.changedSectionId,
+				sectionFingerprint: family.sectionFingerprint,
 				frameFamily: family.frameFamily,
 				bytePosition: position,
 				pairedFrameCount: family.pairs,
@@ -1074,6 +1105,9 @@ export function calculateDifferentialEvidence(
 					* scoreComponents.alignmentQuality);
 				candidates.push({
 					sectionId: family.sectionId,
+					baselineSectionId: family.baselineSectionId,
+					changedSectionId: family.changedSectionId,
+					sectionFingerprint: family.sectionFingerprint,
 					frameFamily: family.frameFamily,
 					changedFrameFamily: family.changedFrameFamily,
 					bytePosition: position,

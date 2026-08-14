@@ -10,6 +10,7 @@ import { openDatabase } from "../server/database.ts";
 import {
 	MAX_DIFFERENTIAL_ANALYZED_ELEMENTS,
 	alignRawRelative,
+	alignSignatureSequence,
 	alignTimestampNearest,
 	calculateDifferentialEvidence,
 	makeDifferentialFrame
@@ -51,11 +52,19 @@ function differenceInput(baseline: AgentSnapshotReference, changed: AgentSnapsho
 	} as const;
 }
 
-function testFrame(id: string, ordinal: number, timestamp: number, rawOffset: number, bytes: number[] = [0], sectionKey = "section-a") {
+function testFrame(
+	id: string,
+	ordinal: number,
+	timestamp: number,
+	rawOffset: number,
+	bytes: number[] = [0],
+	sectionId = "section-a",
+	sectionKey = sectionId
+) {
 	return makeDifferentialFrame({
 		id,
 		ordinal,
-		sectionId: sectionKey,
+		sectionId,
 		sectionKey,
 		bytes,
 		timestamps: [timestamp],
@@ -65,6 +74,28 @@ function testFrame(id: string, ordinal: number, timestamp: number, rawOffset: nu
 		rawOffsets: [rawOffset]
 	});
 }
+
+test("signature substitutions use structural fingerprints instead of literal section IDs", () => {
+	const aligned = alignSignatureSequence(
+		[testFrame("baseline-frame", 0, 0, 0, [0], "baseline-section", "same-fingerprint")],
+		[testFrame("changed-frame", 0, 0, 0, [1], "changed-section", "same-fingerprint")]
+	);
+
+	assert.deepEqual(aligned.pairs.map(pair => [pair.baseline.id, pair.changed.id]), [["baseline-frame", "changed-frame"]]);
+	assert.deepEqual(aligned.baselineUnpaired, []);
+	assert.deepEqual(aligned.changedUnpaired, []);
+});
+
+test("signature substitutions reject reused IDs with different framing fingerprints", () => {
+	const aligned = alignSignatureSequence(
+		[testFrame("baseline-frame", 0, 0, 0, [0], "legacy-section", "length-section")],
+		[testFrame("changed-frame", 0, 0, 0, [1], "legacy-section", "marker-section")]
+	);
+
+	assert.deepEqual(aligned.pairs, []);
+	assert.deepEqual(aligned.baselineUnpaired.map(frame => frame.id), ["baseline-frame"]);
+	assert.deepEqual(aligned.changedUnpaired.map(frame => frame.id), ["changed-frame"]);
+});
 
 test("timestamp-nearest maximizes cardinality before minimizing total timestamp distance", () => {
 	const aligned = alignTimestampNearest(
@@ -128,6 +159,48 @@ test("controlled differential evidence reports byte values, bit direction, and c
 		const identical = query.analyzeCaptureDifference(differenceInput(baseline.snapshot, baseline.snapshot));
 		assert.deepEqual(identical.data.candidateFields, []);
 		assert.ok(identical.data.differenceSummary.invariantPositions.length > 0);
+	} finally {
+		database.close();
+	}
+});
+
+test("cross-capture signature substitutions retain evidence despite distinct canonical section IDs", () => {
+	const database = openDatabase(":memory:");
+	try {
+		const baseline = recordCapture(database, "signature-before", [0, 0]);
+		const changed = recordCapture(database, "signature-after", [1, 0]);
+		const sectionIds = [baseline.snapshot, changed.snapshot].map(snapshot =>
+			(database.prepare("SELECT section_id FROM materialized_frames WHERE profile_id = @profileId LIMIT 1").get({ profileId: snapshot.profileId }) as { section_id: string }).section_id
+		);
+		assert.notEqual(sectionIds[0], sectionIds[1]);
+
+		const response = new CanonicalQueryService(database).analyzeCaptureDifference(differenceInput(baseline.snapshot, changed.snapshot, "signature-sequence"));
+		assert.equal(response.data.alignment.pairedFrameCount, 1);
+		assert.equal(response.data.alignment.baselineUnpairedFrameCount, 0);
+		assert.equal(response.data.alignment.changedUnpairedFrameCount, 0);
+		assert.equal(response.data.alignment.pairCompatibility.compatiblePairCount, 1);
+		const candidate = response.data.candidateFields.find(field => field.bytePosition === 0 && field.bitMask === "0x01");
+		assert.ok(candidate);
+		assert.equal(candidate.sectionId, sectionIds[0]);
+		assert.equal(candidate.baselineSectionId, sectionIds[0]);
+		assert.equal(candidate.changedSectionId, sectionIds[1]);
+		assert.equal(candidate.sectionFingerprint, candidate.sectionFingerprint.trim());
+		assert.notEqual(candidate.sectionFingerprint, sectionIds[0]);
+		assert.deepEqual(response.data.baseline.snapshot, baseline.snapshot);
+		assert.deepEqual(response.data.changed.snapshot, changed.snapshot);
+
+		const framingSectionColumns = (database.prepare("PRAGMA table_info(framing_sections)").all() as Array<{ name: string }>).map(column => column.name);
+		assert.equal(framingSectionColumns.includes("section_fingerprint"), false);
+		const joinedSections = database.prepare(
+			`SELECT frames.section_id, sections.id
+			 FROM materialized_frames frames
+			 JOIN framing_sections sections ON sections.id = frames.section_id
+			 WHERE frames.profile_id IN (@baselineProfileId, @changedProfileId)
+			 ORDER BY frames.profile_id`
+		).all({ baselineProfileId: baseline.snapshot.profileId, changedProfileId: changed.snapshot.profileId }) as Array<{ section_id: string; id: string }>;
+		assert.equal(joinedSections.length, 2);
+		assert.deepEqual(joinedSections.map(row => row.section_id), joinedSections.map(row => row.id));
+		assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 	} finally {
 		database.close();
 	}
