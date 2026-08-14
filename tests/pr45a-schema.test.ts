@@ -246,6 +246,21 @@ test("empty databases receive the canonical command schema and enforce its invar
 	}
 });
 
+test("databases that recorded the published v13 migration remain supported", () => {
+	const database = new Database(":memory:");
+	try {
+		database.exec(`
+			CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL, applied_at TEXT NOT NULL);
+			INSERT INTO schema_migrations (version, applied_at) VALUES (13, '${now}');
+		`);
+
+		assert.doesNotThrow(() => runMigrations(database, () => now));
+		assert.equal(getSchemaVersion(database), 13);
+	} finally {
+		database.close();
+	}
+});
+
 test("v4 migration backfills explicit authority and preserves stable notes", () => {
 	const database = createV4Database();
 	try {
