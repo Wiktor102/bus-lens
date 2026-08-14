@@ -3,7 +3,7 @@ import test from "node:test";
 import { getCaptureHeaderSnapshot } from "../src/features/capture/capture-header-bridge.ts";
 import type { Capture } from "../src/features/capture/capture-framing.ts";
 import { createSnapshotRuntime } from "../src/app/snapshot-runtime.ts";
-import { selectFramingToolbar, selectMessageStream, createApplicationStore } from "../src/shared/application-store.ts";
+import { selectFramingToolbar, selectMessageStream, selectSendRuntime, createApplicationStore } from "../src/shared/application-store.ts";
 import { EMPTY_VIEW_STATE_SNAPSHOT } from "../src/shared/view-state.ts";
 
 function capture(id: string): Capture {
@@ -66,4 +66,24 @@ test("snapshot runtime publishes framing and message snapshots through the appli
 	});
 	assert.equal(selectMessageStream(store.getSnapshot()).captureId, "capture-1");
 	assert.equal(selectMessageStream(store.getSnapshot()).matchingRows.length, 0);
+});
+
+test("snapshot runtime publishes send status through its injected application store", () => {
+	const store = createApplicationStore();
+	const runtime = createSnapshotRuntime({
+		capture: () => undefined,
+		getTransport: () => ({
+			getPort: () => null,
+			isRecording: () => false,
+			publishState: () => {}
+		}),
+		getSendController: () => ({
+			getStatus: () => ({ sendInFlight: true, queueRunning: false, stopQueueRequested: false })
+		}),
+		applicationStore: store
+	});
+
+	runtime.publishSendState();
+
+	assert.equal(selectSendRuntime(store.getSnapshot()).sendInFlight, true);
 });
