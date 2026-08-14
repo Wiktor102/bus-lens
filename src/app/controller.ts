@@ -9,6 +9,7 @@ import { createBeforeUnloadHandler } from "./unload-lifecycle.ts";
 import { createSendController, type SendController } from "../features/send/send-controller.ts";
 import { createSerialController, type SerialController } from "../features/transport/serial-controller.ts";
 import { createLiveStateService } from "./live-state-service.ts";
+import { subscribeToApplicationCommands } from "./application-command-router.ts";
 import {
 	applicationStore,
 	EMPTY_CANONICALIZATION_STATE,
@@ -474,213 +475,21 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		setSectionCollapsed: captureController.setSectionCollapsed
 	};
 
-	applicationStore.subscribeToCommands(command => {
-		switch (command.type) {
-			case "transport/connect":
-				void transport.connect();
-				break;
-			case "transport/disconnect":
-				void transport.disconnect();
-				break;
-			case "transport/toggle-connection":
-				void transport.toggleConnection();
-				break;
-			case "recording/toggle":
-				void transport.toggleRecording();
-				break;
-			case "capture/set-title":
-				captureController.setCaptureTitle(command.value);
-				break;
-			case "capture/commit-title":
-				captureController.commitCaptureTitle(command.value);
-				break;
-			case "capture/set-description":
-				captureController.setCaptureDescription(command.value);
-				break;
-			case "capture/commit-description":
-				captureController.commitCaptureDescription(command.value);
-				break;
-			case "capture/open-context":
-				captureController.publishContextDialog();
-				break;
-			case "capture/duplicate":
-				captureController.duplicateActiveCapture();
-				break;
-			case "capture/clear-messages":
-				captureController.clearActiveCaptureMessages();
-				break;
-			case "capture/delete-active":
-				void captureController.deleteActiveCapture();
-				break;
-			case "capture/upgrade-active":
-				captureController.upgradeActiveCapture();
-				break;
-			case "capture/upgrade":
-				captureController.upgradeCapture(command.captureId);
-				break;
-			case "capture/delete":
-				void captureController.deleteArchiveCapture(command.captureId);
-				break;
-			case "archive/select":
-				captureController.selectArchiveCapture(command.captureId);
-				break;
-			case "archive/toggle-folder":
-				captureController.toggleArchiveFolder(command.folderId);
-				break;
-			case "archive/move-capture":
-				captureController.moveArchiveCapture(command.captureId, command.folderId);
-				break;
-			case "archive/open-new-capture":
-				captureController.publishContextDialog(true);
-				break;
-			case "archive/open-export":
-				publishDialogCommand({ type: "export" });
-				break;
-			case "archive/save-folder":
-				captureController.saveFolder(command.name, command.editingId);
-				break;
-			case "archive/delete-folder":
-				captureController.deleteFolder(command.folderId);
-				break;
-			case "archive/import-file":
-				void dataTransferController.importFile(command.file);
-				break;
-			case "storage/upgrade":
-				captureController.upgradeActiveCapture();
-				break;
-			case "dialog/save-context":
-				captureController.commitContextDraft(command.input);
-				break;
-			case "dialog/save-annotation":
-				captureController.commitAnnotationDraft(command.input);
-				break;
-			case "dialog/delete-annotation":
-				captureController.removeAnnotationDraft(command.input);
-				break;
-			case "dialog/save-pattern-remark":
-				captureController.commitPatternRemarkDraft(command.input);
-				break;
-			case "dialog/export":
-				dataTransferController.exportData(command.format);
-				break;
-			case "dialog/notify":
-				runtime.showToast(command.message);
-				break;
-			case "canonicalization/close":
-				closeCanonicalizationDialog();
-				break;
-			case "canonicalization/download":
-				void downloadLegacyBackup();
-				break;
-			case "canonicalization/start":
-				void startCanonicalization();
-				break;
-			case "canonicalization/retry":
-				void retryCanonicalization();
-				break;
-			case "send/set-draft":
-				sendController.setSendDraft(command.value);
-				break;
-			case "send/set-delay":
-				sendController.setQueueDelay(command.value);
-				break;
-			case "send/send":
-				void sendController.sendBytes(command.bytes).then(command.respond);
-				break;
-			case "send/add-to-queue":
-				sendController.addDraftToQueue(command.bytes);
-				break;
-			case "send/send-queue-item":
-				sendController.sendQueueItem(command.id);
-				break;
-			case "send/remove-queue-item":
-				sendController.removeQueueItem(command.id);
-				break;
-			case "send/replay-history":
-				sendController.replayHistoryItem(command.id);
-				break;
-			case "send/run-queue":
-				void sendController.runSendQueue();
-				break;
-			case "send/stop-queue":
-				sendController.stopSendQueue();
-				break;
-			case "send/clear-queue":
-				sendController.clearSendQueue();
-				break;
-			case "send/clear-history":
-				sendController.clearSendHistory();
-				break;
-			case "message/open-note":
-				messageActions.openMessageNote(command.messageId);
-				break;
-			case "message/open-byte-note":
-				messageActions.openByteNote(command.messageId, command.position);
-				break;
-			case "message/replay":
-				messageActions.replayMessage(command.messageId);
-				break;
-			case "message/open-pattern-remark":
-				messageActions.openPatternRemark(command.patternId);
-				break;
-			case "message/hide":
-				messageActions.hideMessage(command.messageId);
-				break;
-			case "message/hide-byte":
-				messageActions.hideByte(command.messageId, command.position);
-				break;
-			case "message/begin-section":
-				messageActions.beginSection(command.messageId, command.position);
-				break;
-			case "message/move-section":
-				messageActions.moveSection(command.sectionId, command.action);
-				break;
-			case "message/delete-section":
-				messageActions.deleteSection(command.sectionId);
-				break;
-			case "message/set-section-framing":
-				messageActions.setSectionFraming(command.sectionId, command.update);
-				break;
-			case "message/set-section-frame-size":
-				messageActions.setSectionFrameSize(command.sectionId, command.value);
-				break;
-			case "message/set-section-framing-mode":
-				messageActions.setSectionFramingMode(command.sectionId, command.value);
-				break;
-			case "message/set-section-frame-marker":
-				messageActions.setSectionFrameMarker(command.sectionId, command.value);
-				break;
-			case "message/set-section-marker-position":
-				messageActions.setSectionMarkerPosition(command.sectionId, command.value);
-				break;
-			case "message/set-section-frame-time-gap":
-				messageActions.setSectionFrameTimeGap(command.sectionId, command.value);
-				break;
-			case "message/set-section-collapse":
-				messageActions.setSectionCollapse(command.sectionId, command.collapseRuns);
-				break;
-			case "message/set-section-collapsed":
-				messageActions.setSectionCollapsed(command.sectionId, command.collapsed);
-				break;
-			case "notes/add-sequence":
-				captureController.addSequenceNote(command);
-				break;
-			case "persistence/retry":
-				if (getPersistenceErrorSnapshot().captureId === null && retrySendPersistence) retrySendPersistence();
-				else void transport.retryPersistence();
-				break;
-			case "persistence/export-recovery": {
-				const capture = transport.recoveryDocument();
-				if (capture) download(
-					JSON.stringify(capture, null, 2),
-					`bus-lens-${String(capture.id ?? "capture")}-recovery.json`,
-					"application/json"
-				);
-				break;
-			}
-			case "persistence/dismiss":
-				publishPersistenceError(EMPTY_PERSISTENCE_ERROR);
-				break;
+	subscribeToApplicationCommands({
+		store: applicationStore,
+		transport,
+		sendController,
+		captureController,
+		dataTransferController,
+		messageActions,
+		showToast: runtime.showToast,
+		openExportDialog: () => publishDialogCommand({ type: "export" }),
+		closeCanonicalizationDialog,
+		downloadLegacyBackup,
+		startCanonicalization,
+		retryCanonicalization,
+		retrySendPersistence: () => {
+			if (getPersistenceErrorSnapshot().captureId === null && retrySendPersistence) retrySendPersistence();
 		}
 	});
 
