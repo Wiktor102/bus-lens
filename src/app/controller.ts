@@ -26,6 +26,7 @@ import { applicationStore } from "../shared/application-store.ts";
 import type { ArchiveDataLayer } from "../data/archive-data-layer.ts";
 import {
 	EMPTY_PERSISTENCE_ERROR,
+	getPersistenceErrorSnapshot,
 	publishPersistenceError,
 	registerPersistenceErrorActions
 } from "../shared/persistence-error-bridge.ts";
@@ -42,6 +43,7 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 	const runtime = createAppRuntime({ archive: options.archive });
 	let transport!: SerialController;
 	let sendController!: SendController;
+	let retrySendPersistence: (() => void) | null = null;
 	let openCanonicalizationDialog = (_captureId: string): void => {};
 	const snapshots = createSnapshotRuntime({
 		capture: runtime.capture,
@@ -82,7 +84,10 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 	});
 
 	registerPersistenceErrorActions({
-		retry: () => { void transport.retryPersistence(); },
+		retry: () => {
+			if (getPersistenceErrorSnapshot().captureId === null && retrySendPersistence) retrySendPersistence();
+			else void transport.retryPersistence();
+		},
 		exportRecovery: () => {
 			const capture = transport.recoveryDocument();
 			if (!capture) return;
@@ -102,7 +107,22 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		archiveCommands: options.archive?.commands,
 		showToast: runtime.showToast,
 		confirm: message => confirm(message),
-		publishSendState: snapshots.publishSendState
+		publishSendState: snapshots.publishSendState,
+		publishPersistenceError: error => {
+			if (!error) {
+				retrySendPersistence = null;
+				publishPersistenceError(EMPTY_PERSISTENCE_ERROR);
+				return;
+			}
+			retrySendPersistence = () => { void sendController.retryPersistence(); };
+			publishPersistenceError({
+				visible: true,
+				captureId: null,
+				message: error.message,
+				canRetry: error.canRetry,
+				canExportRecovery: false
+			});
+		}
 	});
 
 	const captureController = createCaptureController({
@@ -412,7 +432,10 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 					frameId: messageId,
 					hidden: true
 					});
-				void operation.then(result => { capture.contentRevision = result.contentRevision; }).catch(error => {
+				void operation.then(async result => {
+					capture.contentRevision = result.contentRevision;
+					if (options.archive) Object.assign(capture, await runtime.refreshCapture(String(capture.id)));
+				}).catch(error => {
 					message.hidden = previousHidden;
 					publishPersistenceError({
 						visible: true,
@@ -460,7 +483,10 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 					rawOffset,
 					hidden: true
 					});
-				void operation.then(result => { capture.contentRevision = result.contentRevision; }).catch(error => {
+				void operation.then(async result => {
+					capture.contentRevision = result.contentRevision;
+					if (options.archive) Object.assign(capture, await runtime.refreshCapture(String(capture.id)));
+				}).catch(error => {
 					if (rawIndex >= 0 && capture.byteStream?.[rawIndex]) capture.byteStream[rawIndex].hidden = previousHidden;
 					rebuildPreview(capture);
 					publishPersistenceError({

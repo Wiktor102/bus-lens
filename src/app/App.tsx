@@ -1115,7 +1115,7 @@ function PersistenceErrorBanner() {
 	return (
 		<div className="persistence-error" role="alert">
 			<div>
-				<strong>Capture is not fully stored.</strong>
+				<strong>Archive persistence needs attention.</strong>
 				<span>{snapshot.message}</span>
 			</div>
 			<div className="persistence-error-actions">

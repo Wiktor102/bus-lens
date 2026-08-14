@@ -23,6 +23,7 @@ export type SendControllerDependencies = {
 	showToast: (message: string) => void;
 	confirm: (message: string) => boolean;
 	publishSendState: () => void;
+	publishPersistenceError?: (error: { message: string; canRetry: boolean } | null) => void;
 	generateId?: () => string;
 	now?: () => number;
 };
@@ -42,6 +43,31 @@ export function createSendController(dependencies: SendControllerDependencies) {
 	let stopQueueRequested = false;
 	let queueDelayTimer: ReturnType<typeof setTimeout> | null = null;
 	let queueDelayResolve: (() => void) | null = null;
+	let retryOperation: (() => Promise<void>) | null = null;
+
+	function reportPersistenceFailure(error: unknown, retry: () => Promise<void>): void {
+		retryOperation = retry;
+		const message = error instanceof Error ? error.message : String(error);
+		dependencies.publishPersistenceError?.({ message, canRetry: true });
+		dependencies.showToast(`Archive persistence failed: ${message}`);
+	}
+
+	function clearPersistenceFailure(): void {
+		retryOperation = null;
+		dependencies.publishPersistenceError?.(null);
+	}
+
+	async function retryPersistence(): Promise<void> {
+		const retry = retryOperation;
+		if (!retry) return;
+		retryOperation = null;
+		try {
+			await retry();
+			clearPersistenceFailure();
+		} catch (error) {
+			reportPersistenceFailure(error, retry);
+		}
+	}
 
 	function getStatus(): SendControllerStatus {
 		return {
@@ -51,50 +77,94 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		};
 	}
 
-	function persistSettings(): void {
-		if (dependencies.archiveCommands) {
-			void dependencies.archiveCommands.saveSettings(state.sendSettings).catch(error => {
-				dependencies.showToast(`Settings could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+	async function writeSettings(desired: SendSettings, previous: SendSettings): Promise<void> {
+		if (!dependencies.archiveCommands) return;
+		try {
+			await dependencies.archiveCommands.saveSettings(desired);
+			clearPersistenceFailure();
+		} catch (error) {
+			if (state.sendSettings.delayMs === desired.delayMs) state.sendSettings.delayMs = previous.delayMs;
+			if (state.sendSettings.draft === desired.draft) state.sendSettings.draft = previous.draft;
+			if (state.sendSettings.baudRate === desired.baudRate) state.sendSettings.baudRate = previous.baudRate;
+			dependencies.publishSendState();
+			reportPersistenceFailure(error, async () => {
+				Object.assign(state.sendSettings, desired);
+				dependencies.publishSendState();
+				await writeSettings(desired, previous);
 			});
+			throw error;
 		}
 	}
 
-	function persistQueueItem(item: SendQueueEntry, position: number): void {
-		if (dependencies.archiveCommands) {
-			void dependencies.archiveCommands.saveQueueItem(item, position).catch(error => {
-				dependencies.showToast(`Queue could not be saved: ${error instanceof Error ? error.message : String(error)}`);
-			});
-		}
+	function persistSettings(previous: SendSettings): void {
+		void writeSettings({ ...state.sendSettings }, previous).catch(() => {});
 	}
 
-	function persistHistoryItem(item: SendHistoryEntry): void {
-		if (dependencies.archiveCommands) {
-			void dependencies.archiveCommands.saveHistoryItem(item).catch(error => {
-				dependencies.showToast(`Send history could not be saved: ${error instanceof Error ? error.message : String(error)}`);
-			});
-		}
+	function persistQueueItem(item: SendQueueEntry, position: number): Promise<void> {
+		return dependencies.archiveCommands ? dependencies.archiveCommands.saveQueueItem(item, position) : Promise.resolve();
 	}
 
-	function deleteQueueItem(item: SendQueueEntry): void {
+	function persistHistoryItem(item: SendHistoryEntry, previous: SendHistoryEntry[]): void {
+		if (!dependencies.archiveCommands) return;
+		void dependencies.archiveCommands.saveHistoryItem(item).then(() => {
+			clearPersistenceFailure();
+		}).catch(error => {
+			state.sendHistory = previous;
+			dependencies.publishSendState();
+			reportPersistenceFailure(error, async () => {
+				if (!state.sendHistory.some(candidate => candidate.id === item.id)) {
+					state.sendHistory = [item, ...state.sendHistory].slice(0, MAX_SEND_HISTORY);
+					dependencies.publishSendState();
+				}
+				await dependencies.archiveCommands!.saveHistoryItem(item);
+				clearPersistenceFailure();
+			});
+		});
+	}
+
+	function deleteQueueItem(item: SendQueueEntry, restoreIndex = 0): void {
 		if (!item.id) return;
 		if (dependencies.archiveCommands) {
-			void dependencies.archiveCommands.deleteQueueItem(item.id).catch(error => {
-				dependencies.showToast(`Queue change failed: ${error instanceof Error ? error.message : String(error)}`);
+			void dependencies.archiveCommands.deleteQueueItem(item.id).then(() => {
+				clearPersistenceFailure();
+			}).catch(error => {
+				if (!state.sendQueue.some(candidate => candidate.id === item.id)) {
+					state.sendQueue.splice(Math.min(restoreIndex, state.sendQueue.length), 0, item);
+				}
+				dependencies.publishSendState();
+				reportPersistenceFailure(error, async () => {
+					state.sendQueue = state.sendQueue.filter(candidate => candidate.id !== item.id);
+					dependencies.publishSendState();
+					await dependencies.archiveCommands!.deleteQueueItem(item.id!);
+					clearPersistenceFailure();
+				});
 			});
 		}
 	}
 
-	function deleteHistoryItem(item: SendHistoryEntry): void {
+	function deleteHistoryItem(item: SendHistoryEntry, restoreIndex = 0): void {
 		const id = typeof item.id === "string" ? item.id : "";
 		if (!id) return;
 		if (dependencies.archiveCommands) {
-			void dependencies.archiveCommands.deleteHistoryItem(id).catch(error => {
-				dependencies.showToast(`History change failed: ${error instanceof Error ? error.message : String(error)}`);
+			void dependencies.archiveCommands.deleteHistoryItem(id).then(() => {
+				clearPersistenceFailure();
+			}).catch(error => {
+				if (!state.sendHistory.some(candidate => candidate.id === id)) {
+					state.sendHistory.splice(Math.min(restoreIndex, state.sendHistory.length), 0, item);
+				}
+				dependencies.publishSendState();
+				reportPersistenceFailure(error, async () => {
+					state.sendHistory = state.sendHistory.filter(candidate => candidate.id !== id);
+					dependencies.publishSendState();
+					await dependencies.archiveCommands!.deleteHistoryItem(id);
+					clearPersistenceFailure();
+				});
 			});
 		}
 	}
 
 	function recordSend(bytes: Iterable<number>, { origin, ok, error = "" }: { origin: string; ok: boolean; error?: string }) {
+		const previousHistory = [...state.sendHistory];
 		const entry = {
 			id: generateId(),
 			timestamp: now(),
@@ -106,7 +176,7 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		};
 		state.sendHistory.unshift(entry);
 		state.sendHistory = state.sendHistory.slice(0, MAX_SEND_HISTORY);
-		persistHistoryItem(entry);
+		persistHistoryItem(entry, previousHistory);
 	}
 
 	async function transmitBytes(bytes: Uint8Array, origin = "manual") {
@@ -150,36 +220,55 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		if (!bytes?.length) return false;
 		const sent = await transmitBytes(Uint8Array.from(bytes), "manual");
 		if (!sent) return false;
+		const previousSettings = { ...state.sendSettings };
 		state.sendSettings.draft = "";
-		persistSettings();
+		persistSettings(previousSettings);
 		dependencies.publishSendState();
 		return true;
 	}
 
 	function addDraftToQueue(bytes: readonly number[]) {
 		if (!bytes?.length) return false;
-		state.sendQueue.push({
+		const item: SendQueueEntry = {
 			id: generateId(),
 			bytes: [...bytes],
 			createdAt: now()
-		});
+		};
+		const position = state.sendQueue.length;
+		const previousSettings = { ...state.sendSettings };
+		state.sendQueue.push(item);
 		state.sendSettings.draft = "";
-		persistQueueItem(state.sendQueue.at(-1)!, state.sendQueue.length - 1);
-		persistSettings();
+		void persistQueueItem(item, position).then(() => {
+			clearPersistenceFailure();
+		}).catch(error => {
+			state.sendQueue = state.sendQueue.filter(candidate => candidate.id !== item.id);
+			dependencies.publishSendState();
+			reportPersistenceFailure(error, async () => {
+				if (!state.sendQueue.some(candidate => candidate.id === item.id)) {
+					state.sendQueue.splice(Math.min(position, state.sendQueue.length), 0, item);
+					dependencies.publishSendState();
+				}
+				await persistQueueItem(item, position);
+				clearPersistenceFailure();
+			});
+		});
+		persistSettings(previousSettings);
 		dependencies.publishSendState();
 		dependencies.showToast("Message added to transmit queue");
 		return true;
 	}
 
 	function setSendDraft(value: string) {
+		const previousSettings = { ...state.sendSettings };
 		state.sendSettings.draft = String(value);
-		persistSettings();
+		persistSettings(previousSettings);
 		dependencies.publishSendState();
 	}
 
 	function setQueueDelay(value: number) {
+		const previousSettings = { ...state.sendSettings };
 		state.sendSettings.delayMs = Math.max(0, Math.min(600_000, Number(value) || 0));
-		persistSettings();
+		persistSettings(previousSettings);
 		dependencies.publishSendState();
 	}
 
@@ -190,8 +279,9 @@ export function createSendController(dependencies: SendControllerDependencies) {
 
 	function removeQueueItem(id: string) {
 		const removed = state.sendQueue.find(item => item.id === id);
+		const restoreIndex = state.sendQueue.findIndex(item => item.id === id);
 		state.sendQueue = state.sendQueue.filter(item => item.id !== id);
-		if (removed) deleteQueueItem(removed);
+		if (removed) deleteQueueItem(removed, restoreIndex);
 		dependencies.publishSendState();
 	}
 
@@ -199,8 +289,9 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		const item = state.sendHistory.find(entry => entry.id === id);
 		if (!item) return null;
 		const draft = (item.bytes as number[]).map(hexByte).join(" ");
+		const previousSettings = { ...state.sendSettings };
 		state.sendSettings.draft = draft;
-		persistSettings();
+		persistSettings(previousSettings);
 		dependencies.publishSendState();
 		return draft;
 	}
@@ -221,7 +312,7 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		if (!dependencies.confirm("Clear every message from the transmit queue?")) return;
 		const removed = [...state.sendQueue];
 		state.sendQueue = [];
-		removed.forEach(deleteQueueItem);
+		removed.forEach((item, index) => deleteQueueItem(item, index));
 		dependencies.publishSendState();
 	}
 
@@ -230,7 +321,7 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		if (!dependencies.confirm("Clear the separate local send history? Captured TX bytes will remain in captures.")) return;
 		const removed = [...state.sendHistory];
 		state.sendHistory = [];
-		removed.forEach(deleteHistoryItem);
+		removed.forEach((item, index) => deleteHistoryItem(item, index));
 		dependencies.publishSendState();
 	}
 
@@ -262,7 +353,7 @@ export function createSendController(dependencies: SendControllerDependencies) {
 				completed++;
 				const removed = queued[index];
 				state.sendQueue = state.sendQueue.filter(item => item.id !== removed.id);
-				deleteQueueItem(removed);
+				deleteQueueItem(removed, index);
 				dependencies.publishSendState();
 				if (index < queued.length - 1 && !stopQueueRequested) {
 					await waitForQueueDelay(state.sendSettings.delayMs);
@@ -292,7 +383,8 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		stopSendQueue,
 		clearSendQueue,
 		clearSendHistory,
-		runSendQueue
+		runSendQueue,
+		retryPersistence
 	};
 }
 

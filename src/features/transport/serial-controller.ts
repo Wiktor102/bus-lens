@@ -78,6 +78,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	let pendingLiveBytes: PendingLiveByte[] = [];
 	let liveRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 	let persistenceError: { captureId: string; error: unknown } | null = null;
+	let legacyWrite: Promise<void> = Promise.resolve();
 	let stopPromise: Promise<void> | null = null;
 	let startPromise: Promise<void> | null = null;
 	const appendQueue = dependencies.recordingWriter
@@ -101,11 +102,15 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		};
 	}
 
-	function persistLiveCapture(capture: Capture | undefined): void {
-		if (!capture) return;
+	function persistLiveCapture(capture: Capture | undefined): Promise<void> {
+		if (!capture) return Promise.resolve();
 		if (dependencies.archiveCommands) {
-			void dependencies.archiveCommands.saveLegacyCapture(capture).catch(error => dependencies.showToast(`Capture persistence failed: ${error instanceof Error ? error.message : String(error)}`));
+			const write = dependencies.archiveCommands.saveLegacyCapture(capture);
+			legacyWrite = write.catch(() => {});
+			void write.catch(error => dependencies.showToast(`Capture persistence failed: ${error instanceof Error ? error.message : String(error)}`));
+			return write;
 		}
+		return Promise.resolve();
 	}
 
 	function persistArchiveIndex(): void {
@@ -351,17 +356,23 @@ export function createSerialController(dependencies: SerialControllerDependencie
 					const capture = captureById(captureId);
 					if (capture) Object.assign(capture, refreshed);
 				}
-			} else if (persist) {
-				const capture = captureById(captureId ?? undefined);
-				if (capture) capture.lifecycle = "finalized";
-				persistLiveCapture(capture);
-			}
+				} else if (persist) {
+					const capture = captureById(captureId ?? undefined);
+					if (capture) capture.lifecycle = "finalized";
+					await legacyWrite;
+					await persistLiveCapture(capture);
+					if (captureId && dependencies.recordingWriter?.refreshCapture) {
+						const refreshed = await dependencies.recordingWriter.refreshCapture(captureId);
+						const current = captureById(captureId);
+						if (current) Object.assign(current, refreshed);
+					}
+				}
 			recordingSessionId = null;
 			recordingCaptureId = null;
 			canonicalRecording = false;
-				persistenceError = null;
-				dependencies.publishPersistenceError?.(null);
-				publishState();
+			persistenceError = null;
+			dependencies.publishPersistenceError?.(null);
+			publishState();
 			if (notify) dependencies.showToast("Capture finalized and stored");
 		})().catch(error => {
 			if (captureId) handlePersistenceFailure(captureId, error);

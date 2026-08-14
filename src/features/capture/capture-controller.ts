@@ -261,6 +261,13 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			if (current) {
 				current.activeFramingProfileId = profile.profileId;
 			}
+			// Reframe is a durable raw-writer command.  Reload through the named
+			// data-layer path so the full capture query cannot remain stale.
+			if (dependencies.refreshCapture) {
+				const refreshed = await dependencies.refreshCapture(captureId);
+				const latest = captureById(captureId);
+				if (latest) Object.assign(latest, refreshed);
+			}
 		}
 	}
 
@@ -549,9 +556,19 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	function toggleArchiveFolder(folderId: string | null) {
 		if (folderId) {
 			const folder = state.folders.find(item => item.id === folderId);
-			if (folder) folder.collapsed = !folder.collapsed;
+			if (!folder) return;
+			const previousFolders = state.folders.map(item => ({ ...item }));
+			const nextFolder = { ...folder, collapsed: !folder.collapsed };
+			state.folders = state.folders.map(item => item.id === folderId ? nextFolder : item);
+			if (dependencies.archiveCommands) {
+				void dependencies.archiveCommands.saveFolder(nextFolder).catch(error => {
+					state.folders = previousFolders;
+					reportFailure(folderId, error);
+					dependencies.render();
+				});
+			} else persistArchiveIndex();
 		} else state.unfiledCollapsed = !state.unfiledCollapsed;
-		persistArchiveIndex();
+		if (!folderId) persistArchiveIndex();
 	}
 
 	function moveArchiveCapture(captureId: string, folderId: string | null) {
@@ -577,23 +594,31 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		);
 		if (!trimmedName || duplicate) return false;
 		const folder = state.folders.find(item => item.id === editingId);
+		const previousFolders = state.folders.map(item => ({ ...item }));
+		let savedFolder: typeof folder;
 		if (folder) {
-			folder.name = trimmedName;
+			savedFolder = { ...folder, name: trimmedName };
+			state.folders = state.folders.map(item => item.id === editingId ? savedFolder! : item);
 			dependencies.showToast("Folder renamed");
 		} else {
-			state.folders.push({
+			savedFolder = {
 				id: crypto.randomUUID(),
 				name: trimmedName,
 				collapsed: false,
 				createdAt: new Date().toISOString()
-			});
+			};
+			state.folders = [...state.folders, savedFolder];
 			dependencies.showToast("Folder created");
 		}
-		const savedFolder = folder || state.folders.at(-1);
 		if (savedFolder && dependencies.archiveCommands) {
-			void dependencies.archiveCommands.saveFolder(savedFolder).catch(error => reportFailure(savedFolder.id, error));
-		}
-		persistArchiveIndex();
+			void dependencies.archiveCommands.saveFolder({ ...savedFolder }).then(() => {
+				persistArchiveIndex();
+			}).catch(error => {
+				state.folders = previousFolders;
+				reportFailure(savedFolder!.id, error);
+				dependencies.render();
+			});
+		} else persistArchiveIndex();
 		return true;
 	}
 
