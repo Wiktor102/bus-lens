@@ -732,6 +732,8 @@ export function alignSignatureSequence(
 			const changedFrame = changed[column - 1]!;
 			const deletion = scores[row - 1]![column]!;
 			const insertion = scores[row]![column - 1]!;
+			const compatibleSubstitution = baselineFrame.ordinal === changedFrame.ordinal
+				&& baselineFrame.sectionId === changedFrame.sectionId;
 			// This is an exact-signature LCS, not an edit-distance substitution
 			// matcher. A substitution is therefore represented explicitly as one
 			// deleted baseline frame plus one inserted changed frame. That avoids
@@ -740,6 +742,13 @@ export function alignSignatureSequence(
 				&& scores[row - 1]![column - 1]! + 1 >= deletion
 				&& scores[row - 1]![column - 1]! + 1 >= insertion) {
 				scores[row]![column] = scores[row - 1]![column - 1]! + 1;
+				actions[row]![column] = "pair";
+			} else if (compatibleSubstitution && scores[row - 1]![column - 1]! >= deletion && scores[row - 1]![column - 1]! >= insertion) {
+				// Keep ordinally aligned replacements together so changed bytes can
+				// participate in candidate analysis instead of becoming delete/insert
+				// evidence only. Exact-signature matches still receive the stronger LCS
+				// score above, preserving insertion/deletion behavior around anchors.
+				scores[row]![column] = scores[row - 1]![column - 1]!;
 				actions[row]![column] = "pair";
 			} else if (deletion >= insertion) {
 				scores[row]![column] = deletion;
@@ -764,7 +773,7 @@ export function alignSignatureSequence(
 			pairs.push({
 				baseline: baselineFrame,
 				changed: changedFrame,
-				quality: 1,
+				quality: baselineFrame.signature === changedFrame.signature ? 1 : 0.5,
 				timestampDeltaMs: baselineFrame.timestamp !== null && changedFrame.timestamp !== null ? Math.abs(baselineFrame.timestamp - changedFrame.timestamp) : null
 			});
 			row -= 1;
