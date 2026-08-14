@@ -133,6 +133,72 @@ test("canonical storage state wins when the status lookup is stale during rename
 	assert.equal(capture.metadataRevision, 2);
 });
 
+test("reloads server-owned frame IDs after canonical reframing", async () => {
+	const capture: Capture = {
+		id: "reframe-frame-ids",
+		name: "Reframe IDs",
+		storageStatus: "canonical",
+		lifecycle: "finalized",
+		dataRevision: 1,
+		activeFramingProfileId: "profile-1",
+		byteStream: [
+			{ rawOffset: 0, value: 1, timestamp: 1, direction: "rx" },
+			{ rawOffset: 1, value: 2, timestamp: 2, direction: "rx" }
+		],
+		messages: [{ id: "browser-frame-1", timestamp: 1, bytes: [1, 2], rawOffsets: [0, 1], _rawPositions: [0, 1] }],
+		frameSections: [{ id: "section-1", start: 0, framingMode: "length", frameSize: 2 }],
+		params: [],
+		notes: [],
+		annotations: {},
+		patternRemarks: {}
+	};
+	const serverCapture: Capture = {
+		...capture,
+		activeFramingProfileId: "profile-2",
+		frameSections: [{ id: "server-section-2", start: 0, framingMode: "length", frameSize: 1 }],
+		messages: [
+			{ id: "server-frame-1", timestamp: 1, bytes: [1], rawOffsets: [0], _rawPositions: [0] },
+			{ id: "server-frame-2", timestamp: 2, bytes: [2], rawOffsets: [1], _rawPositions: [1] }
+		]
+	};
+	const state = { captures: [capture], folders: [], unfiledCollapsed: false } as unknown as AppState;
+	let refreshCount = 0;
+	const writer = {
+		reframe: async () => ({ captureId: capture.id!, profileId: "profile-2", version: 2, sourceDataRevision: 1, retainedStartOffset: 0, verified: true })
+	} as unknown as CaptureWriter;
+	const controller = createCaptureController({
+		state,
+		capture: () => state.captures[0],
+		getActiveId: () => capture.id,
+		setActiveId: () => {},
+		saveState: () => { throw new Error("canonical mutation used generic saveState"); },
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => false, stopRecording: async () => {} },
+		publishArchiveState: () => {},
+		publishCaptureHeaderState: () => {},
+		publishNotesState: () => {},
+		publishDialogCommand: () => {},
+		captureWriter: writer,
+		isCanonicalCapture: () => true,
+		refreshCapture: async () => {
+			refreshCount += 1;
+			state.captures[0] = serverCapture;
+			return serverCapture;
+		},
+		reportPersistenceFailure: (_captureId, error) => { throw error; }
+	});
+
+	controller.setSectionFrameSize("section-1", 1);
+	await new Promise(resolve => setTimeout(resolve, 0));
+
+	assert.equal(refreshCount, 1);
+	assert.equal(state.captures[0]?.activeFramingProfileId, "profile-2");
+	assert.deepEqual(state.captures[0]?.messages?.map(message => message.id), ["server-frame-1", "server-frame-2"]);
+});
+
 test("serializes metadata and framing revisions while coalescing the latest optimistic state", async () => {
 	const capture: Capture = {
 		id: "queued-capture",

@@ -219,6 +219,10 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				expectedActiveProfileId: item.activeFramingProfileId,
 				expectedDataRevision: Number(item.dataRevision ?? 0)
 			});
+			// Reframing materializes fresh server-owned frame IDs. Reload the
+			// canonical document before the next visibility or annotation write so
+			// the browser does not keep addressing the previous local frames.
+			if (dependencies.refreshCapture) await dependencies.refreshCapture(captureId);
 			const current = captureById(captureId);
 			if (current) {
 				current.activeFramingProfileId = profile.profileId;
