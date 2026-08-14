@@ -7,6 +7,7 @@ import {
 } from "../../shared/app-state.ts";
 import { hexByte, type Capture } from "../capture/capture-framing.ts";
 import type { SerialController } from "../transport/serial-controller.ts";
+import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
 
 export type SendControllerStatus = {
 	sendInFlight: boolean;
@@ -18,7 +19,7 @@ export type SendControllerDependencies = {
 	state: AppState;
 	capture: () => Capture | undefined;
 	transport: Pick<SerialController, "getPort" | "isRecording" | "queueLiveBytes">;
-	saveState: (options?: { immediate?: boolean }) => void;
+	archiveCommands?: ArchiveCommands;
 	showToast: (message: string) => void;
 	confirm: (message: string) => boolean;
 	publishSendState: () => void;
@@ -50,6 +51,49 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		};
 	}
 
+	function persistSettings(): void {
+		if (dependencies.archiveCommands) {
+			void dependencies.archiveCommands.saveSettings(state.sendSettings).catch(error => {
+				dependencies.showToast(`Settings could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+			});
+		}
+	}
+
+	function persistQueueItem(item: SendQueueEntry, position: number): void {
+		if (dependencies.archiveCommands) {
+			void dependencies.archiveCommands.saveQueueItem(item, position).catch(error => {
+				dependencies.showToast(`Queue could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+			});
+		}
+	}
+
+	function persistHistoryItem(item: SendHistoryEntry): void {
+		if (dependencies.archiveCommands) {
+			void dependencies.archiveCommands.saveHistoryItem(item).catch(error => {
+				dependencies.showToast(`Send history could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+			});
+		}
+	}
+
+	function deleteQueueItem(item: SendQueueEntry): void {
+		if (!item.id) return;
+		if (dependencies.archiveCommands) {
+			void dependencies.archiveCommands.deleteQueueItem(item.id).catch(error => {
+				dependencies.showToast(`Queue change failed: ${error instanceof Error ? error.message : String(error)}`);
+			});
+		}
+	}
+
+	function deleteHistoryItem(item: SendHistoryEntry): void {
+		const id = typeof item.id === "string" ? item.id : "";
+		if (!id) return;
+		if (dependencies.archiveCommands) {
+			void dependencies.archiveCommands.deleteHistoryItem(id).catch(error => {
+				dependencies.showToast(`History change failed: ${error instanceof Error ? error.message : String(error)}`);
+			});
+		}
+	}
+
 	function recordSend(bytes: Iterable<number>, { origin, ok, error = "" }: { origin: string; ok: boolean; error?: string }) {
 		const entry = {
 			id: generateId(),
@@ -62,7 +106,7 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		};
 		state.sendHistory.unshift(entry);
 		state.sendHistory = state.sendHistory.slice(0, MAX_SEND_HISTORY);
-		dependencies.saveState({ immediate: true });
+		persistHistoryItem(entry);
 	}
 
 	async function transmitBytes(bytes: Uint8Array, origin = "manual") {
@@ -107,7 +151,7 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		const sent = await transmitBytes(Uint8Array.from(bytes), "manual");
 		if (!sent) return false;
 		state.sendSettings.draft = "";
-		dependencies.saveState();
+		persistSettings();
 		dependencies.publishSendState();
 		return true;
 	}
@@ -120,7 +164,8 @@ export function createSendController(dependencies: SendControllerDependencies) {
 			createdAt: now()
 		});
 		state.sendSettings.draft = "";
-		dependencies.saveState();
+		persistQueueItem(state.sendQueue.at(-1)!, state.sendQueue.length - 1);
+		persistSettings();
 		dependencies.publishSendState();
 		dependencies.showToast("Message added to transmit queue");
 		return true;
@@ -128,13 +173,13 @@ export function createSendController(dependencies: SendControllerDependencies) {
 
 	function setSendDraft(value: string) {
 		state.sendSettings.draft = String(value);
-		dependencies.saveState();
+		persistSettings();
 		dependencies.publishSendState();
 	}
 
 	function setQueueDelay(value: number) {
 		state.sendSettings.delayMs = Math.max(0, Math.min(600_000, Number(value) || 0));
-		dependencies.saveState({ immediate: true });
+		persistSettings();
 		dependencies.publishSendState();
 	}
 
@@ -144,8 +189,9 @@ export function createSendController(dependencies: SendControllerDependencies) {
 	}
 
 	function removeQueueItem(id: string) {
+		const removed = state.sendQueue.find(item => item.id === id);
 		state.sendQueue = state.sendQueue.filter(item => item.id !== id);
-		dependencies.saveState();
+		if (removed) deleteQueueItem(removed);
 		dependencies.publishSendState();
 	}
 
@@ -154,7 +200,7 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		if (!item) return null;
 		const draft = (item.bytes as number[]).map(hexByte).join(" ");
 		state.sendSettings.draft = draft;
-		dependencies.saveState();
+		persistSettings();
 		dependencies.publishSendState();
 		return draft;
 	}
@@ -173,16 +219,18 @@ export function createSendController(dependencies: SendControllerDependencies) {
 	function clearSendQueue() {
 		if (!state.sendQueue.length || queueRunning) return;
 		if (!dependencies.confirm("Clear every message from the transmit queue?")) return;
+		const removed = [...state.sendQueue];
 		state.sendQueue = [];
-		dependencies.saveState({ immediate: true });
+		removed.forEach(deleteQueueItem);
 		dependencies.publishSendState();
 	}
 
 	function clearSendHistory() {
 		if (!state.sendHistory.length) return;
 		if (!dependencies.confirm("Clear the separate local send history? Captured TX bytes will remain in captures.")) return;
+		const removed = [...state.sendHistory];
 		state.sendHistory = [];
-		dependencies.saveState({ immediate: true });
+		removed.forEach(deleteHistoryItem);
 		dependencies.publishSendState();
 	}
 
@@ -212,8 +260,9 @@ export function createSendController(dependencies: SendControllerDependencies) {
 				const sent = await transmitBytes(Uint8Array.from(queued[index].bytes as number[]), "queue");
 				if (!sent) break;
 				completed++;
-				state.sendQueue = state.sendQueue.filter(item => item.id !== queued[index].id);
-				dependencies.saveState({ immediate: true });
+				const removed = queued[index];
+				state.sendQueue = state.sendQueue.filter(item => item.id !== removed.id);
+				deleteQueueItem(removed);
 				dependencies.publishSendState();
 				if (index < queued.length - 1 && !stopQueueRequested) {
 					await waitForQueueDelay(state.sendSettings.delayMs);

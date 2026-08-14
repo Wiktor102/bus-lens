@@ -198,7 +198,6 @@ test("new sections default to length framing while retaining useful preceding se
 
 test("deletes a non-initial section without deleting its captured bytes", () => {
 	const current = capture();
-	const saved: unknown[] = [];
 	let renders = 0;
 	const toasts: string[] = [];
 	const controller = createCaptureController({
@@ -206,7 +205,6 @@ test("deletes a non-initial section without deleting its captured bytes", () => 
 		capture: () => current,
 		getActiveId: () => current.id,
 		setActiveId: () => {},
-		saveState: options => saved.push(options),
 		render: () => { renders += 1; },
 		renderMessages: () => {},
 		showToast: message => toasts.push(message),
@@ -224,7 +222,6 @@ test("deletes a non-initial section without deleting its captured bytes", () => 
 	controller.deleteSection("payload");
 	assert.deepEqual(current.frameSections?.map(section => section.id), ["header", "tail"]);
 	assert.equal(current.messages.flatMap(message => message.bytes).length, 20);
-	assert.deepEqual(saved, [{ immediate: true }]);
 	assert.equal(renders, 1);
 	assert.deepEqual(toasts, []);
 });

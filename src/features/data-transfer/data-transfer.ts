@@ -13,6 +13,7 @@ import {
 } from "../capture/capture-framing.ts";
 import { recognizeMessagePatterns } from "../analysis/analysis.ts";
 import type { ExportFormat } from "../dialogs/dialog-model.ts";
+import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
 
 export type DataTransferFile = {
 	name: string;
@@ -40,7 +41,8 @@ export type DataTransferDependencies = DataTransferTimeDependencies & {
 	capture: () => Capture | undefined;
 	getActiveId: () => string | null | undefined;
 	setActiveId: (captureId: string | null | undefined) => void;
-	saveState: () => void;
+	setSelectedCaptureId?: (captureId: string | null) => void;
+	archiveCommands?: ArchiveCommands;
 	render: () => void;
 	showToast: (message: string) => void;
 	download: Download;
@@ -131,11 +133,13 @@ export function createDataTransferController(dependencies: DataTransferDependenc
 	async function importFile(file: DataTransferFile): Promise<void> {
 		try {
 			const text = await file.text();
+			let importedCaptures: Capture[] = [];
 			if (file.name.toLowerCase().endsWith(".json")) {
 				const imported: unknown = JSON.parse(text);
 				const importedArchive = isRecord(imported) ? imported : undefined;
 				const captures = (Array.isArray(imported) ? imported : importedArchive?.captures) as Capture[] | undefined;
 				if (!Array.isArray(captures)) throw new Error("No captures found");
+				importedCaptures = captures;
 				const importedFolders = Array.isArray(importedArchive?.folders) ? importedArchive.folders : [];
 				const folderIdMap = new Map<unknown, string>();
 				const existingFolderNames = new Map(state.folders.map(folder => [folder.name.toLowerCase(), folder.id]));
@@ -176,17 +180,34 @@ export function createDataTransferController(dependencies: DataTransferDependenc
 				}
 				normalizeSendState(state, { generateId, now });
 				dependencies.setActiveId(captures[0]?.id || dependencies.getActiveId());
+				dependencies.setSelectedCaptureId?.(captures[0]?.id ? String(captures[0].id) : null);
 			} else {
 				const captures = parseDump(text, { generateId, now, nowIso });
 				if (!captures.length) throw new Error("No timestamped hex messages found");
+				importedCaptures = captures;
 				captures.forEach(capture => {
 					normalizeCapture(capture, generateId);
 					rebuildPreview(capture, generateId);
 				});
 				state.captures.unshift(...captures);
 				dependencies.setActiveId(captures[0].id);
+				dependencies.setSelectedCaptureId?.(String(captures[0].id));
 			}
-			dependencies.saveState();
+			if (dependencies.archiveCommands) {
+				await Promise.all([
+					...importedCaptures.map(capture => dependencies.archiveCommands!.saveLegacyCapture(capture)),
+					...state.folders.map(folder => dependencies.archiveCommands!.saveFolder(folder)),
+					...state.sendQueue.map((item, position) => dependencies.archiveCommands!.saveQueueItem(item, position)),
+					...state.sendHistory.map(item => dependencies.archiveCommands!.saveHistoryItem(item)),
+					dependencies.archiveCommands.saveSettings(state.sendSettings),
+					dependencies.archiveCommands.persistArchiveIndex({
+						activeId: dependencies.getActiveId() ?? null,
+						unfiledCollapsed: Boolean(state.unfiledCollapsed),
+						captures: state.captures.map((capture, position) => ({ id: String(capture.id), folderId: capture.folderId ?? null, position })),
+						folders: state.folders.map((folder, position) => ({ id: String(folder.id), position }))
+					})
+				]);
+			}
 			dependencies.render();
 			dependencies.showToast(`Imported ${file.name}`);
 		} catch (error: unknown) {

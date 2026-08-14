@@ -1,7 +1,8 @@
 import { publishTransportSnapshot } from "./transport-bridge.ts";
 import type { AppState } from "../../shared/app-state.ts";
+import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
 import { recordReceivedByte } from "../capture/capture-summary.ts";
-import { appendLivePreview, rebuildPreview, type Capture } from "../capture/capture-framing.ts";
+import { rebuildPreview, type Capture } from "../capture/capture-framing.ts";
 import {
 	CaptureAppendQueue,
 	type AppendCaptureChunkRequest,
@@ -31,15 +32,10 @@ export type SerialProvider = {
 export type SerialControllerDependencies = {
 	capture: () => Capture | undefined;
 	state: AppState;
-	saveState: (options?: { immediate?: boolean }) => void;
+	archiveCommands?: ArchiveCommands;
 	showToast: (message: string) => void;
-	publishArchiveState?: () => void;
-	publishCaptureHeaderState: () => void;
 	publishFramingToolbarState: (capture?: Capture) => void;
-	publishAnalysisState: (capture?: Capture) => void;
-	publishNotesState: (capture?: Capture) => void;
-	renderMessages: (options?: { live?: boolean }) => void;
-	isPatternsPanelActive?: () => boolean;
+	renderMessages: () => void;
 	stopSendQueue: () => void;
 	publishSendState?: () => void;
 	serial?: SerialProvider;
@@ -54,9 +50,9 @@ export type SerialControllerDependencies = {
 	publishPersistenceError?: (error: { captureId: string; message: string } | null) => void;
 };
 
-type PendingLiveSegment = {
+type PendingLiveByte = {
 	captureId?: string;
-	values: number[];
+	value: number;
 	timestamp: number;
 	direction: string;
 	sessionId?: string;
@@ -79,7 +75,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	let recordingCaptureId: string | null = null;
 	let canonicalRecording = false;
 	let readAbort = false;
-	let pendingLiveSegments: PendingLiveSegment[] = [];
+	let pendingLiveBytes: PendingLiveByte[] = [];
 	let liveRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 	let persistenceError: { captureId: string; error: unknown } | null = null;
 	let stopPromise: Promise<void> | null = null;
@@ -96,6 +92,35 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			)
 		: null;
 
+	function archiveIndex() {
+		return {
+			activeId: dependencies.state.activeId ?? (dependencies.capture()?.id ? String(dependencies.capture()?.id) : null),
+			unfiledCollapsed: Boolean(dependencies.state.unfiledCollapsed),
+			captures: dependencies.state.captures.map((capture, position) => ({ id: String(capture.id), folderId: capture.folderId ?? null, position })),
+			folders: dependencies.state.folders.map((folder, position) => ({ id: String(folder.id), position }))
+		};
+	}
+
+	function persistLiveCapture(capture: Capture | undefined): void {
+		if (!capture) return;
+		if (dependencies.archiveCommands) {
+			void dependencies.archiveCommands.saveLegacyCapture(capture).catch(error => dependencies.showToast(`Capture persistence failed: ${error instanceof Error ? error.message : String(error)}`));
+		}
+	}
+
+	function persistArchiveIndex(): void {
+		if (dependencies.archiveCommands) {
+			void dependencies.archiveCommands.persistArchiveIndex(archiveIndex()).catch(error => dependencies.showToast(`Archive index could not be saved: ${error instanceof Error ? error.message : String(error)}`));
+		}
+	}
+
+	function persistSettings(): void {
+		const settings = dependencies.state.sendSettings || {};
+		if (dependencies.archiveCommands) {
+			void dependencies.archiveCommands.saveSettings(settings).catch(error => dependencies.showToast(`Settings could not be saved: ${error instanceof Error ? error.message : String(error)}`));
+		}
+	}
+
 	function captureById(captureId: string | undefined): Capture | undefined {
 		if (!captureId) return dependencies.capture();
 		return dependencies.state.captures.find(capture => String(capture.id) === captureId) as Capture | undefined;
@@ -107,8 +132,6 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		const message = error instanceof Error ? error.message : String(error);
 		dependencies.publishPersistenceError?.({ captureId, message });
 		dependencies.showToast("Capture persistence paused — retry or export JSON recovery");
-		dependencies.publishArchiveState?.();
-		dependencies.publishCaptureHeaderState();
 		publishState();
 	}
 
@@ -168,65 +191,57 @@ export function createSerialController(dependencies: SerialControllerDependencie
 
 	function flushLiveBytes() {
 		liveRefreshTimer = null;
-		if (!pendingLiveSegments.length) return;
-		const pendingSegments = pendingLiveSegments;
-		pendingLiveSegments = [];
-		const captureId = pendingSegments[0]?.captureId;
+		if (!pendingLiveBytes.length) return;
+		const captureId = pendingLiveBytes[0]?.captureId;
 		const capture = captureById(captureId);
-		if (!capture) return;
+		if (!capture) {
+			pendingLiveBytes = [];
+			return;
+		}
 		const sessionsById = new Map((capture.captureSessions || []).map(session => [session.id, session]));
 		let nextRawOffset = capture.nextRawOffset ?? Math.max(0, ...(capture.byteStream || []).map((record, index) => (record.rawOffset ?? index) + 1));
-		const previousByteStreamLength = capture.byteStream!.length;
-		for (const segment of pendingSegments) {
-			for (const value of segment.values) {
-				capture.byteStream!.push({
-					value,
-					timestamp: segment.timestamp,
-					direction: segment.direction,
-					sessionId: segment.sessionId,
-					rawOffset: nextRawOffset++
-				});
-				if (segment.direction !== "tx") {
-					recordReceivedByte(segment.sessionId ? sessionsById.get(segment.sessionId) : undefined, segment.timestamp);
-				}
+		for (const record of pendingLiveBytes) {
+			capture.byteStream!.push({ ...record, rawOffset: nextRawOffset++ });
+			if (record.direction !== "tx") {
+				recordReceivedByte(
+					record.sessionId ? sessionsById.get(record.sessionId) : undefined,
+					record.timestamp
+				);
 			}
 		}
 		capture.nextRawOffset = nextRawOffset;
 		if (canonicalRecording && captureId && appendQueue && recordingSessionId && captureId === recordingCaptureId) {
-			for (const segment of pendingSegments) {
+			for (const record of pendingLiveBytes) {
 				appendQueue.enqueue(captureId, {
-					timestamp: segment.timestamp,
-					direction: segment.direction === "tx" ? "tx" : "rx",
-					bytes: segment.values
+					timestamp: record.timestamp,
+					direction: record.direction === "tx" ? "tx" : "rx",
+					bytes: [record.value]
 				});
 			}
 			void appendQueue.flush(captureId).catch(() => {
 				// The queue retains the rejected batch and publishes a persistent error.
 			});
 		}
+		pendingLiveBytes = [];
 		const trimmed = trimCapture(capture);
-		const incrementallyRebuilt = !trimmed && appendLivePreview(capture, previousByteStreamLength);
-		if (!incrementallyRebuilt) rebuildPreview(capture);
-		if (!canonicalRecording) dependencies.saveState();
-		dependencies.publishCaptureHeaderState();
+		rebuildPreview(capture);
+		if (!canonicalRecording) persistLiveCapture(capture);
 		dependencies.publishFramingToolbarState(capture);
-		dependencies.renderMessages({ live: recording });
-		if (!recording && dependencies.isPatternsPanelActive?.()) dependencies.publishAnalysisState(capture);
-		if (trimmed) dependencies.publishNotesState(capture);
+		dependencies.renderMessages();
 		if (trimmed) dependencies.showToast(`Capture limit reached; keeping the newest ${MAX_CAPTURE_BYTES.toLocaleString()} bytes`);
 	}
 
 	function queueLiveBytes(bytes: Iterable<number>, direction: string) {
-		const values = [...bytes];
-		if (!values.length) return;
 		const timestamp = performance.timeOrigin + performance.now();
-		pendingLiveSegments.push({
-			captureId: recordingCaptureId ?? (dependencies.capture()?.id ? String(dependencies.capture()?.id) : undefined),
-			values,
-			timestamp,
-			direction,
-			sessionId: recordingSessionId || undefined
-		});
+		for (const value of bytes) {
+			pendingLiveBytes.push({
+				captureId: recordingCaptureId ?? (dependencies.capture()?.id ? String(dependencies.capture()?.id) : undefined),
+				value,
+				timestamp,
+				direction,
+				sessionId: recordingSessionId || undefined
+			});
+		}
 		if (!liveRefreshTimer) liveRefreshTimer = setTimeout(flushLiveBytes, LIVE_REFRESH_MS);
 	}
 
@@ -277,7 +292,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			await port.open({ baudRate });
 			dependencies.state.sendSettings ||= {};
 			dependencies.state.sendSettings.baudRate = baudRate;
-			dependencies.saveState();
+			persistSettings();
 			readAbort = false;
 			publishState();
 			void readSerialLoop();
@@ -303,7 +318,10 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		} else {
 			flushLiveBytes();
 		}
-		if (persist && !hadRecording) dependencies.saveState({ immediate: true });
+		if (persist && !hadRecording) {
+			persistArchiveIndex();
+			persistSettings();
+		}
 		readAbort = true;
 		dependencies.stopSendQueue();
 		try {
@@ -313,8 +331,6 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		} catch {}
 		reader = null;
 		port = null;
-		dependencies.publishCaptureHeaderState();
-		dependencies.publishArchiveState?.();
 		publishState();
 	}
 
@@ -324,7 +340,6 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		const captureId = recordingCaptureId;
 		const sessionId = recordingSessionId;
 		recording = false;
-		dependencies.publishArchiveState?.();
 		flushLiveBytes();
 		stopPromise = (async () => {
 			if (canonicalRecording && captureId && sessionId && appendQueue && dependencies.recordingWriter) {
@@ -339,16 +354,14 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			} else if (persist) {
 				const capture = captureById(captureId ?? undefined);
 				if (capture) capture.lifecycle = "finalized";
-				dependencies.saveState({ immediate: true });
+				persistLiveCapture(capture);
 			}
 			recordingSessionId = null;
 			recordingCaptureId = null;
 			canonicalRecording = false;
-			persistenceError = null;
-			dependencies.publishPersistenceError?.(null);
-			dependencies.publishCaptureHeaderState();
-			dependencies.publishArchiveState?.();
-			publishState();
+				persistenceError = null;
+				dependencies.publishPersistenceError?.(null);
+				publishState();
 			if (notify) dependencies.showToast("Capture finalized and stored");
 		})().catch(error => {
 			if (captureId) handlePersistenceFailure(captureId, error);
@@ -393,11 +406,9 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			recordingSessionId = session.id;
 			recording = true;
 			persistenceError = null;
-			dependencies.publishPersistenceError?.(null);
-			if (!canonicalRecording) dependencies.saveState();
-			dependencies.publishCaptureHeaderState();
-			dependencies.publishArchiveState?.();
-			publishState();
+				dependencies.publishPersistenceError?.(null);
+				if (!canonicalRecording) persistLiveCapture(capture);
+				publishState();
 			dependencies.showToast("Capture started");
 		})().catch(error => {
 			handlePersistenceFailure(captureId, error);
@@ -439,7 +450,6 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		getPort,
 		isConnected,
 		isRecording,
-		getRecordingCaptureId: () => recording ? recordingCaptureId : null,
 		hasUnacknowledgedBytes: () => appendQueue?.hasUnacknowledgedBytes() ?? false,
 		getPersistenceError: () => persistenceError?.error ?? null,
 		retryPersistence,

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createCaptureController } from "../src/features/capture/capture-controller.ts";
-import { createAppRuntime } from "../src/app/app-runtime.ts";
 import type { Capture } from "../src/features/capture/capture-framing.ts";
 import type { CaptureWriter } from "../src/persistence/archive-client.ts";
 import type { AppState } from "../src/shared/app-state.ts";
+import type { ArchiveCommands } from "../src/data/archive-data-layer.ts";
 
 test("canonical optimistic mutations route through dedicated commands", async () => {
 	const capture: Capture = {
@@ -605,138 +605,109 @@ test("keeps a canonical capture when recording shutdown fails", async () => {
 	assert.equal(activeId, capture.id);
 });
 
-test("new capture creation uses runtime bookkeeping and does not replay the create", async () => {
-	const originalFetch = globalThis.fetch;
-	const requests: Array<{ path: string; method: string; body?: unknown }> = [];
-	globalThis.fetch = async (input, init) => {
-		const path = String(input);
-		requests.push({
-			path,
-			method: init?.method || "GET",
-			body: init?.body ? JSON.parse(String(init.body)) : undefined
-		});
-		if (path.endsWith("/health")) return new Response(null, { status: 204 });
-		if (path.endsWith("/archive")) {
-			return new Response(JSON.stringify({ captures: [], folders: [], index: { activeId: null, unfiledCollapsed: false }, queue: [], history: [], settings: {} }), { status: 200 });
+test("new capture creation uses named commands and persists the index once", async () => {
+	const state = { captures: [], folders: [], unfiledCollapsed: false } as unknown as AppState;
+	let activeId: string | null = null;
+	const creates: unknown[] = [];
+	const indexes: Array<{ activeId: string | null; captures: unknown[] }> = [];
+	const archiveCommands = {
+		createCapture: async (request: { captureId?: string }) => {
+			creates.push(request);
+			return {};
+		},
+		persistArchiveIndex: async (index: { activeId: string | null; captures: unknown[] }) => {
+			indexes.push(index);
 		}
-		if (path.endsWith("/canonical/captures")) return new Response(JSON.stringify([]), { status: 200 });
-		if (path.endsWith("/captures") && (init?.method || "GET") === "POST") return new Response(JSON.stringify({}), { status: 201 });
-		return new Response(null, { status: 204 });
-	};
+	} as unknown as ArchiveCommands;
+	const controller = createCaptureController({
+		state,
+		capture: () => state.captures[0],
+		getActiveId: () => activeId,
+		setActiveId: id => { activeId = id ? String(id) : null; },
+		setSelectedCaptureId: id => { activeId = id; },
+		archiveCommands,
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => false, stopRecording: async () => {} },
+		publishArchiveState: () => {},
+		publishCaptureHeaderState: () => {},
+		publishNotesState: () => {},
+		publishDialogCommand: () => {},
+		isCanonicalCapture: () => true
+	});
 
-	try {
-		const runtime = createAppRuntime();
-		await runtime.ready;
-		runtime.state.captures = [];
-		runtime.setActiveId(null);
-		const controller = createCaptureController({
-			state: runtime.state,
-			capture: runtime.capture,
-			getActiveId: runtime.getActiveId,
-			setActiveId: runtime.setActiveId,
-			saveState: runtime.saveState,
-			render: () => {},
-			renderMessages: () => {},
-			showToast: () => {},
-			confirm: () => true,
-			transport: { isRecording: () => false, stopRecording: async () => {} },
-			publishArchiveState: () => {},
-			publishCaptureHeaderState: () => {},
-			publishNotesState: () => {},
-			publishDialogCommand: () => {},
-			captureWriter: runtime.captureWriter,
-			isCanonicalCapture: runtime.isCanonicalCapture
-		});
+	assert.equal(controller.commitContextDraft({
+		mode: "new",
+		captureId: null,
+		draft: { name: "Created", view: "Main", folderId: "", baudRate: "115200", parameters: [] }
+	}), true);
+	await new Promise(resolve => setTimeout(resolve, 0));
 
-		assert.equal(controller.commitContextDraft({
-			mode: "new",
-			captureId: null,
-			draft: { name: "Created", view: "Main", folderId: "", baudRate: "115200", parameters: [] }
-		}), true);
-
-		const captureId = String(runtime.state.captures[0]?.id);
-		await runtime.waitForCaptureWrite(captureId);
-		const initialCreates = requests.filter(request => request.path === "/api/captures" && request.method === "POST");
-		const initialIndexes = requests.filter(request => request.path === "/api/archive-index" && request.method === "PUT");
-		assert.equal(initialCreates.length, 1);
-		assert.equal(initialIndexes.length, 1);
-		assert.equal((initialIndexes[0]?.body as { activeId?: string } | undefined)?.activeId, captureId);
-		assert.deepEqual((initialIndexes[0]?.body as { activeId?: string; captures?: unknown[] } | undefined)?.captures, [{ id: captureId, folderId: null, position: 0 }]);
-
-		runtime.saveState({ immediate: true });
-		await runtime.waitForCaptureWrite(captureId);
-		assert.equal(requests.filter(request => request.path === "/api/captures" && request.method === "POST").length, 1);
-	} finally {
-		globalThis.fetch = originalFetch;
-	}
+	const captureId = String(state.captures[0]?.id);
+	assert.equal(creates.length, 1);
+	assert.equal((creates[0] as { captureId?: string }).captureId, captureId);
+	assert.equal(indexes.length, 1);
+	assert.deepEqual(indexes[0], {
+		activeId: captureId,
+		unfiledCollapsed: false,
+		captures: [{ id: captureId, folderId: null, position: 0 }],
+		folders: []
+	});
 });
 
-test("holds canonical metadata writes until a new capture is acknowledged", async () => {
-	const originalFetch = globalThis.fetch;
-	const requests: Array<{ path: string; method: string; body?: unknown }> = [];
-	let releaseCreate!: (response: Response) => void;
-	const createResponse = new Promise<Response>(resolve => { releaseCreate = resolve; });
-	globalThis.fetch = async (input, init) => {
-		const path = String(input);
-		requests.push({
-			path,
-			method: init?.method || "GET",
-			body: init?.body ? JSON.parse(String(init.body)) : undefined
-		});
-		if (path.endsWith("/health")) return new Response(null, { status: 204 });
-		if (path.endsWith("/archive")) {
-			return new Response(JSON.stringify({ captures: [], folders: [], index: { activeId: null, unfiledCollapsed: false }, queue: [], history: [], settings: {} }), { status: 200 });
-		}
-		if (path.endsWith("/canonical/captures")) return new Response(JSON.stringify([]), { status: 200 });
-		if (path.endsWith("/captures") && (init?.method || "GET") === "POST") return createResponse;
-		return new Response(null, { status: 204 });
-	};
+test("holds canonical metadata writes until a new capture command is acknowledged", async () => {
+	const state = { captures: [], folders: [], unfiledCollapsed: false } as unknown as AppState;
+	let activeId: string | null = null;
+	let releaseCreate!: () => void;
+	const createResult = new Promise<void>(resolve => { releaseCreate = resolve; });
+	const metadataRequests: Array<{ captureId: string; patch: { name?: string } }> = [];
+	const pendingCreates = new Map<string, Promise<unknown>>();
+	const archiveCommands = {
+		createCapture: async () => createResult,
+		patchMetadata: async (request: { captureId: string; patch: { name?: string } }) => {
+			metadataRequests.push(request);
+			return { metadataRevision: 1, updatedAt: "now" };
+		},
+		persistArchiveIndex: async () => {}
+	} as unknown as ArchiveCommands;
+	const controller = createCaptureController({
+		state,
+		capture: () => state.captures[0],
+		getActiveId: () => activeId,
+		setActiveId: id => { activeId = id ? String(id) : null; },
+		trackCaptureWrite: (id, write) => { pendingCreates.set(id, write); },
+		waitForCaptureWrite: async id => { await pendingCreates.get(id); },
+		archiveCommands,
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => false, stopRecording: async () => {} },
+		publishArchiveState: () => {},
+		publishCaptureHeaderState: () => {},
+		publishNotesState: () => {},
+		publishDialogCommand: () => {},
+		isCanonicalCapture: () => true
+	});
 
-	try {
-		const runtime = createAppRuntime();
-		await runtime.ready;
-		runtime.state.captures = [];
-		runtime.setActiveId(null);
-		const controller = createCaptureController({
-			state: runtime.state,
-			capture: runtime.capture,
-			getActiveId: runtime.getActiveId,
-			setActiveId: runtime.setActiveId,
-			saveState: runtime.saveState,
-			render: () => {},
-			renderMessages: () => {},
-			showToast: () => {},
-			confirm: () => true,
-			transport: { isRecording: () => false, stopRecording: async () => {} },
-			publishArchiveState: () => {},
-			publishCaptureHeaderState: () => {},
-			publishNotesState: () => {},
-			publishDialogCommand: () => {},
-			captureWriter: runtime.captureWriter,
-			isCanonicalCapture: runtime.isCanonicalCapture,
-			waitForCaptureWrite: runtime.waitForCaptureWrite
-		});
+	assert.equal(controller.commitContextDraft({
+		mode: "new",
+		captureId: null,
+		draft: { name: "Created", view: "Main", folderId: "", baudRate: "115200", parameters: [] }
+	}), true);
+	const captureId = String(state.captures[0]?.id);
+	controller.commitCaptureTitle("Edited before create acknowledgement");
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.equal(metadataRequests.length, 0);
 
-		assert.equal(controller.commitContextDraft({
-			mode: "new",
-			captureId: null,
-			draft: { name: "Created", view: "Main", folderId: "", baudRate: "115200", parameters: [] }
-		}), true);
-		const captureId = String(runtime.state.captures[0]?.id);
-		await new Promise(resolve => setTimeout(resolve, 0));
-		controller.commitCaptureTitle("Edited before create acknowledgement");
-		await new Promise(resolve => setTimeout(resolve, 0));
-		assert.equal(requests.filter(request => request.path.endsWith(`/captures/${captureId}/metadata`)).length, 0);
-
-		releaseCreate(new Response(JSON.stringify({}), { status: 201 }));
-		await runtime.waitForCaptureWrite(captureId);
-		await new Promise(resolve => setTimeout(resolve, 0));
-		const metadataRequest = requests.find(request => request.path.endsWith(`/captures/${captureId}/metadata`));
-		assert.equal(metadataRequest?.method, "PATCH");
-		assert.equal((metadataRequest?.body as { patch?: { name?: string } } | undefined)?.patch?.name, "Edited before create acknowledgement");
-	} finally {
-		globalThis.fetch = originalFetch;
-	}
+	releaseCreate();
+	await new Promise(resolve => setTimeout(resolve, 0));
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.equal(metadataRequests.length, 1);
+	assert.equal(metadataRequests[0]?.captureId, captureId);
+	assert.equal(metadataRequests[0]?.patch.name, "Edited before create acknowledgement");
 });
 
 test("does not reconcile a canonical delete twice after sidebar selection", async () => {

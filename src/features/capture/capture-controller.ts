@@ -32,28 +32,26 @@ import type {
 	CaptureWriter,
 	CanonicalNoteTarget,
 	CaptureMetadataPatch,
+	CreateCaptureRequest,
 	FramingSectionRequest
 } from "../../persistence/archive-client.ts";
+import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
 
 export type CaptureControllerDependencies = {
 	state: AppState;
 	capture: () => Capture | undefined;
 	getActiveId: () => string | null | undefined;
 	setActiveId: (captureId: string | null | undefined) => void;
-	saveState: (options?: { immediate?: boolean }) => void;
+	setSelectedCaptureId?: (captureId: string | null) => void;
+	trackCaptureWrite?: (captureId: string, write: Promise<unknown>) => void;
+	archiveCommands?: ArchiveCommands;
 	render: () => void;
 	renderMessages: () => void;
 	showToast: (message: string) => void;
 	confirm: (message: string) => boolean;
 	transport: Pick<SerialController, "isRecording" | "stopRecording">;
-	publishArchiveState: () => void;
-	publishCaptureHeaderState: () => void;
-	publishNotesState: (capture?: Capture) => void;
 	publishDialogCommand: typeof publishDialogCommand;
 	captureWriter?: CaptureWriter;
-	trackCaptureWrite?: (captureId: string, write: Promise<unknown>) => void;
-	markCapturePersisted?: (captureId: string) => void;
-	deleteCapture?: (captureId: string) => Promise<void>;
 	isCanonicalCapture?: (captureId: string) => boolean;
 	waitForCaptureWrite?: (captureId: string) => Promise<void>;
 	isCaptureConversionLocked?: (captureId: string) => boolean;
@@ -110,22 +108,17 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	const state = dependencies.state as ActiveAppState;
 	const captureWriteQueues = new Map<string, CaptureWriteQueue>();
 	const patternRemarkWriteQueues = new Map<string, Map<string, PatternRemarkWriteQueue>>();
-	const captureCommandWrites = new Map<string, Promise<void>>();
 
 	function capture(): ActiveCapture | undefined {
 		return dependencies.capture() as ActiveCapture | undefined;
 	}
 
 	function isCanonical(item: Capture | undefined): item is Capture & { id: string } {
-		if (!item?.id || !dependencies.captureWriter) return false;
-		if (item.storageStatus === "canonical") return true;
-		return item.storageStatus === undefined && Boolean(dependencies.isCanonicalCapture?.(String(item.id)));
+		return Boolean(item?.id && (dependencies.archiveCommands || dependencies.captureWriter) && dependencies.isCanonicalCapture?.(String(item.id)));
 	}
 
 	function isConversionLocked(item: Capture | undefined): boolean {
-		if (!item?.id) return false;
-		if (item.storageStatus === "converting") return true;
-		return item.storageStatus === undefined && Boolean(dependencies.isCaptureConversionLocked?.(String(item.id)));
+		return Boolean(item?.id && dependencies.isCaptureConversionLocked?.(String(item.id)));
 	}
 
 	function rejectLockedMutation(item: Capture | undefined): boolean {
@@ -136,6 +129,28 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function reportFailure(captureId: string, error: unknown): void {
 		dependencies.reportPersistenceFailure?.(captureId, error);
+	}
+
+	function archiveIndex() {
+		return {
+			activeId: dependencies.getActiveId() ?? null,
+			unfiledCollapsed: Boolean(state.unfiledCollapsed),
+			captures: state.captures.map((item, position) => ({ id: String(item.id), folderId: item.folderId ?? null, position })),
+			folders: state.folders.map((item, position) => ({ id: String(item.id), position }))
+		};
+	}
+
+	function persistArchiveIndex(): void {
+		if (dependencies.archiveCommands) {
+			void dependencies.archiveCommands.persistArchiveIndex(archiveIndex()).catch(error => reportFailure(String(dependencies.getActiveId() || "archive"), error));
+		}
+	}
+
+	function persistLegacyCapture(item: ActiveCapture | undefined = capture()): void {
+		if (!item) return;
+		if (dependencies.archiveCommands) {
+			void dependencies.archiveCommands.saveLegacyCapture(item).catch(error => reportFailure(String(item.id), error));
+		}
 	}
 
 	function reconcileFailure(captureId: string, error: unknown, fallback?: () => void): void {
@@ -190,11 +205,17 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (dependencies.waitForCaptureWrite) await dependencies.waitForCaptureWrite(captureId);
 		const item = captureById(captureId);
 		if (!item || !isCanonical(item)) return;
-		const result = await dependencies.captureWriter!.patchMetadata({
+		const result = dependencies.archiveCommands
+			? await dependencies.archiveCommands.patchMetadata({
+				captureId: item.id,
+				expectedMetadataRevision: item.metadataRevision,
+				patch
+			})
+			: await dependencies.captureWriter!.patchMetadata({
 			captureId: item.id,
 			expectedMetadataRevision: item.metadataRevision,
 			patch
-		});
+			});
 		const current = captureById(captureId);
 		if (current) {
 			current.metadataRevision = result.metadataRevision;
@@ -207,22 +228,35 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const item = captureById(captureId);
 		if (!item || !isCanonical(item)) return;
 		if (dependencies.transport.isRecording()) {
-			const draft = await dependencies.captureWriter!.updateFramingDraft({
+			const draft = await (dependencies.archiveCommands
+				? dependencies.archiveCommands.recordingWriter.updateFramingDraft({
+					captureId: item.id,
+					sections,
+					expectedRevision: item.framingDraftRevision
+				})
+				: dependencies.captureWriter!.updateFramingDraft({
 				captureId: item.id,
 				sections,
 				expectedRevision: item.framingDraftRevision
-			});
+				}));
 			const current = captureById(captureId);
 			if (current) {
 				current.framingDraftRevision = draft.revision;
 			}
 		} else {
-			const profile = await dependencies.captureWriter!.reframe({
+			const profile = await (dependencies.archiveCommands
+				? dependencies.archiveCommands.recordingWriter.reframe({
+					captureId: item.id,
+					sections,
+					expectedActiveProfileId: item.activeFramingProfileId,
+					expectedDataRevision: Number(item.dataRevision ?? 0)
+				})
+				: dependencies.captureWriter!.reframe({
 				captureId: item.id,
 				sections,
 				expectedActiveProfileId: item.activeFramingProfileId,
 				expectedDataRevision: Number(item.dataRevision ?? 0)
-			});
+				}));
 			const current = captureById(captureId);
 			if (current) {
 				current.activeFramingProfileId = profile.profileId;
@@ -309,8 +343,12 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const target: CanonicalNoteTarget = { kind: "pattern", sequenceKey: patternKey };
 		if (text) {
 			const result = queue.noteId
-				? await dependencies.captureWriter!.updateNote({ captureId: item.id, noteId: queue.noteId, text, target })
-				: await dependencies.captureWriter!.createNote({ captureId: item.id, text, target });
+				? await (dependencies.archiveCommands
+					? dependencies.archiveCommands.updateNote({ captureId: item.id, noteId: queue.noteId, text, target })
+					: dependencies.captureWriter!.updateNote({ captureId: item.id, noteId: queue.noteId, text, target }))
+				: await (dependencies.archiveCommands
+					? dependencies.archiveCommands.createNote({ captureId: item.id, text, target })
+					: dependencies.captureWriter!.createNote({ captureId: item.id, text, target }));
 			queue.noteId = result.note.id;
 			const current = captureById(captureId);
 			if (current) {
@@ -319,7 +357,9 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				current.contentRevision = result.contentRevision;
 			}
 		} else if (queue.noteId) {
-			await dependencies.captureWriter!.deleteNote({ captureId: item.id, noteId: queue.noteId });
+			await (dependencies.archiveCommands
+				? dependencies.archiveCommands.deleteNote({ captureId: item.id, noteId: queue.noteId })
+				: dependencies.captureWriter!.deleteNote({ captureId: item.id, noteId: queue.noteId }));
 			queue.noteId = undefined;
 		}
 	}
@@ -458,34 +498,18 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			const captureQueue = captureWriteQueues.get(captureId);
 			const patternQueues = patternRemarkWriteQueues.get(captureId);
 			const running = [
-				...(captureCommandWrites.get(captureId) ? [captureCommandWrites.get(captureId)!] : []),
 				...(captureQueue?.running ? [captureQueue.running] : []),
 				...(patternQueues ? [...patternQueues.values()].flatMap(queue => queue.running ? [queue.running] : []) : [])
 			];
-			if (running.length) {
-				await Promise.all(running);
-				continue;
-			}
-			if (dependencies.waitForCaptureWrite) await dependencies.waitForCaptureWrite(captureId);
-			return;
+			if (!running.length) return;
+			await Promise.all(running);
 		}
-	}
-
-	function trackCaptureCommand(captureId: string, write: Promise<unknown>): void {
-		const id = String(captureId);
-		const previous = captureCommandWrites.get(id);
-		const tracked = (previous ? Promise.all([previous, write]) : write).then(() => undefined, () => undefined);
-		captureCommandWrites.set(id, tracked);
-		dependencies.trackCaptureWrite?.(id, write);
-		void tracked.then(() => {
-			if (captureCommandWrites.get(id) === tracked) captureCommandWrites.delete(id);
-		});
 	}
 
 	function metadataPatch(item: ActiveCapture): void {
 		if (rejectLockedMutation(item)) return;
 		if (!isCanonical(item)) {
-			dependencies.saveState();
+			persistLegacyCapture(item);
 			return;
 		}
 		queueCaptureWrite(item.id, "metadata", metadataPatchValue(item));
@@ -509,7 +533,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	function persistFraming(item: ActiveCapture, immediate = false): void {
 		if (rejectLockedMutation(item)) return;
 		if (!isCanonical(item)) {
-			dependencies.saveState(immediate ? { immediate: true } : undefined);
+			persistLegacyCapture(item);
 			return;
 		}
 		queueCaptureWrite(item.id, "framing", framingRequest(item));
@@ -517,7 +541,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function selectArchiveCapture(captureId: string) {
 		dependencies.setActiveId(captureId);
-		dependencies.saveState();
+		dependencies.setSelectedCaptureId?.(captureId);
+		persistArchiveIndex();
 		dependencies.render();
 	}
 
@@ -526,8 +551,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			const folder = state.folders.find(item => item.id === folderId);
 			if (folder) folder.collapsed = !folder.collapsed;
 		} else state.unfiledCollapsed = !state.unfiledCollapsed;
-		dependencies.saveState();
-		dependencies.publishArchiveState();
+		persistArchiveIndex();
 	}
 
 	function moveArchiveCapture(captureId: string, folderId: string | null) {
@@ -537,7 +561,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const folderNameById = new Map(state.folders.map(folder => [folder.id, folder.name]));
 		item.folderId = folderId || null;
 		metadataPatch(item);
-		dependencies.publishArchiveState();
+		persistArchiveIndex();
 		dependencies.showToast(item.folderId ? `Moved to ${folderNameById.get(item.folderId)}` : "Moved to Unfiled");
 	}
 
@@ -565,8 +589,11 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			});
 			dependencies.showToast("Folder created");
 		}
-		dependencies.saveState();
-		dependencies.publishArchiveState();
+		const savedFolder = folder || state.folders.at(-1);
+		if (savedFolder && dependencies.archiveCommands) {
+			void dependencies.archiveCommands.saveFolder(savedFolder).catch(error => reportFailure(savedFolder.id, error));
+		}
+		persistArchiveIndex();
 		return true;
 	}
 
@@ -585,8 +612,10 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			}
 		});
 		state.folders = state.folders.filter(item => item.id !== folderId);
-		dependencies.saveState();
-		dependencies.publishArchiveState();
+		if (dependencies.archiveCommands) {
+			void dependencies.archiveCommands.deleteFolder(folderId).catch(error => reportFailure(folderId, error));
+		}
+		persistArchiveIndex();
 		dependencies.showToast(captureCount ? "Folder deleted; captures moved to Unfiled" : "Folder deleted");
 	}
 
@@ -610,7 +639,18 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		});
 		const optimistic = notes.at(-1)!;
 		if (isCanonical(c) && c.activeFramingProfileId) {
-			void dependencies.captureWriter!.createNote({
+			void (dependencies.archiveCommands
+				? dependencies.archiveCommands.createNote({
+					captureId: c.id,
+					text: noteText,
+					target: {
+						kind: "range",
+						profileId: c.activeFramingProfileId,
+						startOrdinal: start - 1,
+						endOrdinal: end - 1
+					}
+				})
+				: dependencies.captureWriter!.createNote({
 				captureId: c.id,
 				text: noteText,
 				target: {
@@ -619,15 +659,14 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 					startOrdinal: start - 1,
 					endOrdinal: end - 1
 				}
-			}).then(result => {
+				})).then(result => {
 				optimistic.id = result.note.id;
 				c.contentRevision = result.contentRevision;
 			}).catch(error => reconcileFailure(c.id, error, () => {
 				c.notes = notes.filter(note => note !== optimistic);
-				dependencies.publishNotesState(c);
+				dependencies.render();
 			}));
-		} else dependencies.saveState();
-		dependencies.publishNotesState(c);
+		} else persistLegacyCapture(c);
 		dependencies.renderMessages();
 		dependencies.showToast("Sequence observation added");
 		return true;
@@ -637,7 +676,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const c = capture();
 		if (!c || isConversionLocked(c)) return;
 		c.name = value;
-		dependencies.publishCaptureHeaderState();
 	}
 
 	function commitCaptureTitle(value: string) {
@@ -645,15 +683,13 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (!c || rejectLockedMutation(c)) return;
 		c.name = value;
 		metadataPatch(c);
-		dependencies.publishArchiveState();
-		dependencies.publishCaptureHeaderState();
+		dependencies.render();
 	}
 
 	function setCaptureDescription(value: string) {
 		const c = capture();
 		if (!c || isConversionLocked(c)) return;
 		c.description = value;
-		dependencies.publishCaptureHeaderState();
 	}
 
 	function commitCaptureDescription(value: string) {
@@ -661,10 +697,11 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (!c || rejectLockedMutation(c)) return;
 		c.description = value;
 		metadataPatch(c);
-		dependencies.publishCaptureHeaderState();
+		dependencies.render();
 	}
 
-	function duplicateCapture(source: ActiveCapture | undefined) {
+	function duplicateActiveCapture() {
+		const source = capture();
 		if (!source || rejectLockedMutation(source)) return;
 		const copy = structuredClone(source);
 		copy.id = crypto.randomUUID();
@@ -674,36 +711,26 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		copy.annotations = {};
 		state.captures.unshift(copy);
 		dependencies.setActiveId(copy.id);
+		dependencies.setSelectedCaptureId?.(String(copy.id));
 		if (isCanonical(source)) {
-			const copyId = String(copy.id);
-			const duplicateWrite = dependencies.captureWriter!.duplicate({ captureId: source.id, duplicateCaptureId: copyId })
-				.then(() => {
-					dependencies.markCapturePersisted?.(copyId);
-					return dependencies.refreshCapture?.(copyId);
-				})
+			void (dependencies.archiveCommands
+				? dependencies.archiveCommands.duplicateCapture(source.id, String(copy.id))
+				: dependencies.captureWriter!.duplicate({ captureId: source.id, duplicateCaptureId: String(copy.id) }))
+				.then(() => dependencies.refreshCapture?.(String(copy.id)))
 				.then(refreshed => {
-					if (!captureById(copyId)) return;
 					if (refreshed) Object.assign(copy, refreshed);
 					dependencies.render();
+				})
+				.catch(error => {
+					state.captures = state.captures.filter(item => item !== copy);
+					dependencies.setActiveId(source.id);
+					dependencies.setSelectedCaptureId?.(String(source.id));
+					reportFailure(source.id, error);
+					dependencies.render();
 				});
-			trackCaptureCommand(String(source.id), duplicateWrite);
-			trackCaptureCommand(copyId, duplicateWrite);
-			void duplicateWrite.catch(error => {
-				state.captures = state.captures.filter(item => item !== copy);
-				dependencies.setActiveId(source.id);
-				reportFailure(source.id, error);
-				dependencies.render();
-			});
-		} else dependencies.saveState();
+		} else persistLegacyCapture(copy);
+		persistArchiveIndex();
 		dependencies.render();
-	}
-
-	function duplicateArchiveCapture(captureId: string) {
-		duplicateCapture(captureById(captureId));
-	}
-
-	function duplicateActiveCapture() {
-		duplicateCapture(capture());
 	}
 
 	async function deleteArchiveCapture(captureId: string): Promise<void> {
@@ -725,31 +752,26 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		await waitForCaptureWrites(captureId);
 		item = state.captures.find(captureItem => captureItem.id === captureId);
 		if (!item) return;
-		const itemId = String(item.id);
-		const canonical = isCanonical(item);
-		let deleteWrite: Promise<void> | undefined;
-		if (canonical) {
-			try {
-				deleteWrite = dependencies.deleteCapture
-					? dependencies.deleteCapture(itemId)
-					: dependencies.captureWriter!.delete(itemId);
-			} catch (error) {
-				deleteWrite = Promise.reject(error);
-			}
-		}
 		state.captures = state.captures.filter(captureItem => captureItem.id !== captureId);
-		if (deletingActiveCapture) dependencies.setActiveId(state.captures[0]?.id || null);
-		if (deleteWrite) {
-			try {
-				await deleteWrite;
-			} catch (error) {
-				state.captures.unshift(item);
-				if (deletingActiveCapture) dependencies.setActiveId(itemId);
-				reportFailure(itemId, error);
-				dependencies.render();
-				return;
+		if (deletingActiveCapture) {
+			dependencies.setActiveId(state.captures[0]?.id || null);
+			dependencies.setSelectedCaptureId?.(state.captures[0]?.id ? String(state.captures[0].id) : null);
+		}
+		const itemId = String(item.id);
+		try {
+			if (dependencies.archiveCommands) await dependencies.archiveCommands.deleteCapture(itemId);
+			else if (isCanonical(item)) await dependencies.captureWriter!.delete(itemId);
+		} catch (error) {
+			state.captures.unshift(item);
+			if (deletingActiveCapture) {
+				dependencies.setActiveId(itemId);
+				dependencies.setSelectedCaptureId?.(itemId);
 			}
-		} else dependencies.saveState();
+			reportFailure(itemId, error);
+			dependencies.render();
+			return;
+		}
+		persistArchiveIndex();
 		dependencies.render();
 	}
 
@@ -761,12 +783,15 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			c.messages = [];
 			c.annotations = {};
 			c.patternRemarks = {};
-			if (isCanonical(c)) {
-				void dependencies.captureWriter!.clearData({ captureId: c.id }).then(result => {
-					c.dataRevision = result.dataRevision;
-					c.contentRevision = result.contentRevision;
-				}).catch(error => reconcileFailure(c.id, error));
-			} else dependencies.saveState();
+				if (isCanonical(c)) {
+					void (dependencies.archiveCommands
+						? dependencies.archiveCommands.clearCaptureData(c.id).then(() => undefined)
+						: dependencies.captureWriter!.clearData({ captureId: c.id })).then(result => {
+						if (!result) return;
+						c.dataRevision = result.dataRevision;
+						c.contentRevision = result.contentRevision;
+					}).catch(error => reconcileFailure(c.id, error));
+				} else persistLegacyCapture(c);
 			dependencies.render();
 		}
 	}
@@ -946,15 +971,54 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			dependencies.setCaptureStorageStatus?.(String(c.id), "canonical");
 			state.captures.unshift(c);
 			dependencies.setActiveId(c.id);
-			// The runtime owns create bookkeeping and the archive-index write.
-			dependencies.saveState({ immediate: true });
+			dependencies.setSelectedCaptureId?.(String(c.id));
+			const request: CreateCaptureRequest = {
+				captureId: String(c.id),
+				framing: framingRequest(c),
+				name: String(c.name ?? "Untitled capture"),
+				description: String(c.description ?? ""),
+				controllerView: String(c.view ?? ""),
+				baudRate: Number(c.baudRate ?? 115200),
+				inputFormat: "binary",
+				folderId: c.folderId ?? null,
+				parameters: c.params.flatMap(parameter => {
+					const key = String(parameter.key ?? "").trim();
+					return key ? [{ key, value: String(parameter.value ?? "") }] : [];
+					})
+				};
+				if (dependencies.archiveCommands) {
+					const createWrite = dependencies.archiveCommands.createCapture(request);
+					dependencies.trackCaptureWrite?.(String(c.id), createWrite);
+					void createWrite
+						.then(() => dependencies.refreshCapture?.(String(c.id)))
+					.then(refreshed => {
+						if (refreshed) Object.assign(c, refreshed);
+						persistArchiveIndex();
+						dependencies.render();
+					})
+					.catch(error => {
+						state.captures = state.captures.filter(item => item !== c);
+						dependencies.setActiveId(state.captures[0]?.id ?? null);
+						dependencies.setSelectedCaptureId?.(state.captures[0]?.id ?? null);
+						reportFailure(String(c.id), error);
+						dependencies.render();
+					});
+				} else if (dependencies.captureWriter) {
+					const createWrite = dependencies.captureWriter.createCapture(request);
+					dependencies.trackCaptureWrite?.(String(c.id), createWrite);
+					void createWrite.catch(error => {
+					state.captures = state.captures.filter(item => item !== c);
+					dependencies.setActiveId(state.captures[0]?.id ?? null);
+					reportFailure(String(c.id), error);
+				});
+				}
 		} else {
 			const c = state.captures.find(item => String(item.id) === String(input.captureId)) || capture();
 			if (!c || rejectLockedMutation(c)) return false;
 			Object.assign(c, values);
 			metadataPatch(c);
 		}
-		if (input.mode === "new" && !dependencies.captureWriter) dependencies.saveState();
+		if (input.mode === "new" && !dependencies.archiveCommands && !dependencies.captureWriter) persistLegacyCapture();
 		dependencies.render();
 		dependencies.showToast("Capture context saved");
 		return true;
@@ -1021,8 +1085,12 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				? { kind: "byte", rawOffset: rawOffset! }
 				: { kind: "frame", profileId: c.activeFramingProfileId, frameId: message.id, rawOffsets };
 			const operation = previous?.noteId
-				? dependencies.captureWriter!.updateNote({ captureId: c.id, noteId: previous.noteId, text: String(optimistic.text), target })
-				: dependencies.captureWriter!.createNote({ captureId: c.id, text: String(optimistic.text), target });
+				? (dependencies.archiveCommands
+					? dependencies.archiveCommands.updateNote({ captureId: c.id, noteId: previous.noteId, text: String(optimistic.text), target })
+					: dependencies.captureWriter!.updateNote({ captureId: c.id, noteId: previous.noteId, text: String(optimistic.text), target }))
+				: (dependencies.archiveCommands
+					? dependencies.archiveCommands.createNote({ captureId: c.id, text: String(optimistic.text), target })
+					: dependencies.captureWriter!.createNote({ captureId: c.id, text: String(optimistic.text), target }));
 			void operation.then(result => {
 				optimistic.noteId = result.note.id;
 				c.contentRevision = result.contentRevision;
@@ -1031,7 +1099,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				else delete c.annotations[details.targetKey];
 				dependencies.render();
 			}));
-		} else dependencies.saveState();
+		} else persistLegacyCapture(c);
 		dependencies.render();
 		dependencies.showToast("Annotation saved");
 		return true;
@@ -1045,12 +1113,14 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const previous = c.annotations[details.targetKey];
 		delete c.annotations[details.targetKey];
 		if (isCanonical(c) && previous?.noteId) {
-			void dependencies.captureWriter!.deleteNote({ captureId: c.id, noteId: previous.noteId })
+			void (dependencies.archiveCommands
+				? dependencies.archiveCommands.deleteNote({ captureId: c.id, noteId: previous.noteId })
+				: dependencies.captureWriter!.deleteNote({ captureId: c.id, noteId: previous.noteId }))
 				.catch(error => reconcileFailure(c.id, error, () => {
 					c.annotations[details.targetKey] = previous;
 					dependencies.render();
 				}));
-		} else dependencies.saveState();
+		} else persistLegacyCapture(c);
 		dependencies.render();
 		dependencies.showToast("Annotation removed");
 	}
@@ -1090,7 +1160,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		else delete c.patternRemarks[input.patternKey];
 		if (isCanonical(c)) {
 			queuePatternRemarkWrite(c.id, input.patternKey, text, previousNoteId);
-		} else dependencies.saveState();
+		} else persistLegacyCapture(c);
 		dependencies.renderMessages();
 		dependencies.showToast(text ? "Sequence note saved" : "Sequence note removed");
 		return true;
@@ -1105,7 +1175,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		selectArchiveCapture,
 		toggleArchiveFolder,
 		moveArchiveCapture,
-		duplicateArchiveCapture,
 		deleteArchiveCapture,
 		saveFolder,
 		deleteFolder,

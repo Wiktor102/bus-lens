@@ -22,6 +22,8 @@ import { createSnapshotRuntime } from "./snapshot-runtime.ts";
 import { registerSendActions } from "../features/send/send-bridge.ts";
 import { registerTransportActions } from "../features/transport/transport-bridge.ts";
 import { getViewStateSnapshot } from "../shared/view-state-bridge.ts";
+import { applicationStore } from "../shared/application-store.ts";
+import type { ArchiveDataLayer } from "../data/archive-data-layer.ts";
 import {
 	EMPTY_PERSISTENCE_ERROR,
 	publishPersistenceError,
@@ -34,17 +36,15 @@ export type ControllerLifecycle = {
 
 let initializedController: ControllerLifecycle | undefined;
 
-export function initializeController(): ControllerLifecycle {
+export function initializeController(options: { archive?: ArchiveDataLayer } = {}): ControllerLifecycle {
 	if (initializedController) return initializedController;
 
-	const runtime = createAppRuntime();
+	const runtime = createAppRuntime({ archive: options.archive });
 	let transport!: SerialController;
 	let sendController!: SendController;
 	let openCanonicalizationDialog = (_captureId: string): void => {};
 	const snapshots = createSnapshotRuntime({
-		state: runtime.state,
 		capture: runtime.capture,
-		getActiveId: runtime.getActiveId,
 		getTransport: () => transport,
 		getSendController: () => sendController,
 		getViewStateSnapshot
@@ -53,15 +53,10 @@ export function initializeController(): ControllerLifecycle {
 	transport = createSerialController({
 		capture: runtime.capture,
 		state: runtime.state,
-		saveState: runtime.saveState,
+		archiveCommands: options.archive?.commands,
 		showToast: runtime.showToast,
-		publishArchiveState: snapshots.publishArchiveState,
-		publishCaptureHeaderState: snapshots.publishCaptureHeaderState,
 		publishFramingToolbarState: snapshots.publishFramingToolbarState,
-		publishAnalysisState: snapshots.publishAnalysisState,
-		publishNotesState: snapshots.publishNotesState,
 		renderMessages: snapshots.renderMessages,
-		isPatternsPanelActive: () => getViewStateSnapshot().activePanel === "patterns",
 		stopSendQueue: () => sendController?.stopSendQueue(),
 		publishSendState: snapshots.publishSendState,
 		publishPersistenceError: error => publishPersistenceError(error ? {
@@ -104,7 +99,7 @@ export function initializeController(): ControllerLifecycle {
 		state: runtime.state,
 		capture: runtime.capture,
 		transport,
-		saveState: runtime.saveState,
+		archiveCommands: options.archive?.commands,
 		showToast: runtime.showToast,
 		confirm: message => confirm(message),
 		publishSendState: snapshots.publishSendState
@@ -115,20 +110,16 @@ export function initializeController(): ControllerLifecycle {
 		capture: runtime.capture,
 		getActiveId: runtime.getActiveId,
 		setActiveId: runtime.setActiveId,
-		saveState: runtime.saveState,
+		setSelectedCaptureId: captureId => applicationStore.send({ type: "capture/selected-changed", captureId }),
+		trackCaptureWrite: runtime.trackCaptureWrite,
+		archiveCommands: options.archive?.commands,
 		render: snapshots.render,
 		renderMessages: snapshots.renderMessages,
 		showToast: runtime.showToast,
 		confirm: message => confirm(message),
 		transport,
-		publishArchiveState: snapshots.publishArchiveState,
-		publishCaptureHeaderState: snapshots.publishCaptureHeaderState,
-		publishNotesState: snapshots.publishNotesState,
 		publishDialogCommand,
 		captureWriter: runtime.captureWriter,
-		trackCaptureWrite: runtime.trackCaptureWrite,
-		markCapturePersisted: runtime.markCapturePersisted,
-		deleteCapture: runtime.deleteCapture,
 		isCanonicalCapture: runtime.isCanonicalCapture,
 		waitForCaptureWrite: runtime.waitForCaptureWrite,
 		isCaptureConversionLocked: runtime.isCaptureConversionLocked,
@@ -313,7 +304,8 @@ export function initializeController(): ControllerLifecycle {
 		capture: runtime.capture,
 		getActiveId: runtime.getActiveId,
 		setActiveId: runtime.setActiveId,
-		saveState: () => runtime.saveState(),
+		setSelectedCaptureId: captureId => applicationStore.send({ type: "capture/selected-changed", captureId }),
+		archiveCommands: options.archive?.commands,
 		render: snapshots.render,
 		showToast: runtime.showToast,
 		download
@@ -353,7 +345,6 @@ export function initializeController(): ControllerLifecycle {
 		toggleFolder: captureController.toggleArchiveFolder,
 		moveCapture: captureController.moveArchiveCapture,
 		upgradeCapture: captureController.upgradeCapture,
-		duplicateCapture: captureController.duplicateArchiveCapture,
 		deleteCapture: captureController.deleteArchiveCapture,
 		openNewCapture: () => captureController.publishContextDialog(true),
 		openExport: () => publishDialogCommand({ type: "export" }),
@@ -402,19 +393,26 @@ export function initializeController(): ControllerLifecycle {
 		hideMessage: messageId => {
 			const capture = runtime.capture();
 			const message = capture?.messages?.find(item => item.id === messageId);
-			if (!message) return;
+			if (!capture || !message) return;
 			if (capture?.id && runtime.isCaptureConversionLocked(String(capture.id))) {
 				runtime.showToast("Capture conversion is in progress; editing is temporarily disabled");
 				return;
 			}
 			const previousHidden = Boolean(message.hidden);
 			message.hidden = true;
-			if (capture?.id && runtime.captureWriter && runtime.isCanonicalCapture(String(capture.id))) {
-				void runtime.captureWriter.setFrameVisibility({
+			if (capture?.id && runtime.isCanonicalCapture(String(capture.id))) {
+				const operation = options.archive
+					? options.archive.commands.setFrameVisibility({
+							captureId: String(capture.id),
+							frameId: messageId,
+							hidden: true
+						})
+					: runtime.captureWriter!.setFrameVisibility({
 					captureId: String(capture.id),
 					frameId: messageId,
 					hidden: true
-				}).then(result => { capture.contentRevision = result.contentRevision; }).catch(error => {
+					});
+				void operation.then(result => { capture.contentRevision = result.contentRevision; }).catch(error => {
 					message.hidden = previousHidden;
 					publishPersistenceError({
 						visible: true,
@@ -425,7 +423,13 @@ export function initializeController(): ControllerLifecycle {
 					});
 					snapshots.render();
 				});
-			} else runtime.saveState({ immediate: true });
+			} else if (options.archive) {
+				void options.archive.commands.saveLegacyCapture(capture).catch(error => {
+					message.hidden = previousHidden;
+					snapshots.render();
+					runtime.showToast(`Message could not be hidden: ${error instanceof Error ? error.message : String(error)}`);
+				});
+			} else runtime.showToast("Archive data layer is unavailable");
 			snapshots.render();
 			runtime.showToast("Message hidden; captured data was kept");
 		},
@@ -444,12 +448,19 @@ export function initializeController(): ControllerLifecycle {
 			const previousHidden = rawIndex >= 0 ? Boolean(capture.byteStream?.[rawIndex]?.hidden) : false;
 			if (rawIndex >= 0 && capture.byteStream?.[rawIndex]) capture.byteStream[rawIndex].hidden = true;
 			rebuildPreview(capture);
-			if (capture.id && rawOffset !== undefined && runtime.captureWriter && runtime.isCanonicalCapture(String(capture.id))) {
-				void runtime.captureWriter.setByteVisibility({
+			if (capture.id && rawOffset !== undefined && runtime.isCanonicalCapture(String(capture.id))) {
+				const operation = options.archive
+					? options.archive.commands.setByteVisibility({
+							captureId: String(capture.id),
+							rawOffset,
+							hidden: true
+						})
+					: runtime.captureWriter!.setByteVisibility({
 					captureId: String(capture.id),
 					rawOffset,
 					hidden: true
-				}).then(result => { capture.contentRevision = result.contentRevision; }).catch(error => {
+					});
+				void operation.then(result => { capture.contentRevision = result.contentRevision; }).catch(error => {
 					if (rawIndex >= 0 && capture.byteStream?.[rawIndex]) capture.byteStream[rawIndex].hidden = previousHidden;
 					rebuildPreview(capture);
 					publishPersistenceError({
@@ -461,7 +472,14 @@ export function initializeController(): ControllerLifecycle {
 					});
 					snapshots.render();
 				});
-			} else runtime.saveState({ immediate: true });
+			} else if (options.archive) {
+				void options.archive.commands.saveLegacyCapture(capture).catch(error => {
+					if (rawIndex >= 0 && capture.byteStream?.[rawIndex]) capture.byteStream[rawIndex].hidden = previousHidden;
+					rebuildPreview(capture);
+					snapshots.render();
+					runtime.showToast(`Byte could not be hidden: ${error instanceof Error ? error.message : String(error)}`);
+				});
+			} else runtime.showToast("Archive data layer is unavailable");
 			snapshots.render();
 			runtime.showToast("Byte hidden; captured data was kept");
 		},
