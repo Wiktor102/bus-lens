@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getCaptureHeaderSnapshot } from "../src/features/capture/capture-header-bridge.ts";
 import type { Capture } from "../src/features/capture/capture-framing.ts";
-import { createSnapshotRuntime } from "../src/app/snapshot-runtime.ts";
+import { createLiveStateService } from "../src/app/live-state-service.ts";
 import { selectFramingToolbar, selectMessageStream, selectSendRuntime, createApplicationStore } from "../src/shared/application-store.ts";
 import { EMPTY_VIEW_STATE_SNAPSHOT } from "../src/shared/view-state.ts";
 
@@ -19,7 +19,7 @@ test("publishes live header and projections for the selected capture", () => {
 		getRecordingCaptureId: () => selectedCapture.id,
 		publishState: () => {}
 	};
-	const snapshots = createSnapshotRuntime({
+	const snapshots = createLiveStateService({
 		capture: () => selectedCapture,
 		getTransport: () => transport,
 		getSendController: () => undefined,
@@ -43,7 +43,7 @@ test("snapshot runtime publishes framing and message snapshots through the appli
 		notes: [],
 		frameSections: [{ id: "section-1", start: 0, frameSize: 1 }]
 	} as Capture;
-	const runtime = createSnapshotRuntime({
+	const runtime = createLiveStateService({
 		capture: () => current,
 		getTransport: () => ({
 			getPort: () => null,
@@ -70,11 +70,12 @@ test("snapshot runtime publishes framing and message snapshots through the appli
 
 test("snapshot runtime publishes send status through its injected application store", () => {
 	const store = createApplicationStore();
-	const runtime = createSnapshotRuntime({
+	const runtime = createLiveStateService({
 		capture: () => undefined,
 		getTransport: () => ({
 			getPort: () => null,
 			isRecording: () => false,
+			getRecordingCaptureId: () => null,
 			publishState: () => {}
 		}),
 		getSendController: () => ({

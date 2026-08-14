@@ -9,7 +9,7 @@ import type { SerialController } from "../features/transport/serial-controller.t
 import { applicationStore, type ApplicationStore } from "../shared/application-store.ts";
 import type { ViewStateSnapshot } from "../shared/view-state.ts";
 
-export type SnapshotRuntimeDependencies = {
+export type LiveStateServiceDependencies = {
 	capture: () => Capture | undefined;
 	getTransport: () => Pick<SerialController, "getPort" | "isRecording" | "getRecordingCaptureId" | "publishState">;
 	getSendController: () => Pick<SendController, "getStatus"> | undefined;
@@ -17,7 +17,7 @@ export type SnapshotRuntimeDependencies = {
 	applicationStore?: Pick<ApplicationStore, "send">;
 };
 
-export type SnapshotRuntime = {
+export type LiveStateService = {
 	publishCaptureHeaderState: (capture?: Capture) => void;
 	publishSendState: () => void;
 	publishFramingToolbarState: (capture?: Capture) => void;
@@ -26,7 +26,11 @@ export type SnapshotRuntime = {
 	subscribeToViewStateChanges: () => () => void;
 };
 
-export function createSnapshotRuntime(dependencies: SnapshotRuntimeDependencies): SnapshotRuntime {
+/**
+ * Composes high-frequency live projections without making them persistence
+ * or Query state. Raw serial bytes remain owned by the recording pipeline.
+ */
+export function createLiveStateService(dependencies: LiveStateServiceDependencies): LiveStateService {
 	const getViewState = dependencies.getViewStateSnapshot || getViewStateSnapshot;
 	const store = dependencies.applicationStore || applicationStore;
 
@@ -65,9 +69,7 @@ export function createSnapshotRuntime(dependencies: SnapshotRuntimeDependencies)
 		dependencies.getTransport().publishState();
 		publishCaptureHeaderState();
 		publishFramingToolbarState();
-		if (!dependencies.capture()) {
-			return;
-		}
+		if (!dependencies.capture()) return;
 		renderMessages();
 	}
 

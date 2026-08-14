@@ -12,7 +12,7 @@ import { registerNotesActions } from "../features/notes/notes-bridge.ts";
 import { createBeforeUnloadHandler } from "./unload-lifecycle.ts";
 import { createSendController, type SendController } from "../features/send/send-controller.ts";
 import { createSerialController, type SerialController } from "../features/transport/serial-controller.ts";
-import { createSnapshotRuntime } from "./snapshot-runtime.ts";
+import { createLiveStateService } from "./live-state-service.ts";
 import { registerSendActions } from "../features/send/send-bridge.ts";
 import { registerTransportActions } from "../features/transport/transport-bridge.ts";
 import { getViewStateSnapshot } from "../shared/view-state-bridge.ts";
@@ -45,7 +45,7 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 	let sendController!: SendController;
 	let retrySendPersistence: (() => void) | null = null;
 	let openCanonicalizationDialog = (_captureId: string): void => {};
-	const snapshots = createSnapshotRuntime({
+	const snapshots = createLiveStateService({
 		capture: runtime.capture,
 		getTransport: () => transport,
 		getSendController: () => sendController,
