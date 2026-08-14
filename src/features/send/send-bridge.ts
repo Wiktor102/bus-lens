@@ -1,20 +1,9 @@
-import { createExternalStore } from "../../shared/external-store.ts";
-import type { SendSnapshot } from "./send.ts";
-
-/** Live transport state only; queue/history/settings are Query-owned. */
-export type SendRuntimeSnapshot = Pick<
-	SendSnapshot,
-	"connected" | "recording" | "sendInFlight" | "queueRunning" | "stopQueueRequested"
->;
-
-const EMPTY_SEND_RUNTIME_SNAPSHOT: SendRuntimeSnapshot = {
-	connected: false,
-	recording: false,
-	sendInFlight: false,
-	queueRunning: false,
-	stopQueueRequested: false
-};
-
+/**
+ * Compatibility action registry for the send controls.
+ *
+ * Live send and queue status is owned by the application store; queue/history
+ * data remains Query-owned.
+ */
 export type SendActions = {
 	setDraft: (value: string) => void;
 	setDelay: (value: number) => void;
@@ -45,10 +34,9 @@ const noopActions: SendActions = {
 	clearHistory: () => {}
 };
 
-const sendStore = createExternalStore<SendRuntimeSnapshot, SendActions>(EMPTY_SEND_RUNTIME_SNAPSHOT, noopActions);
+let actions: SendActions = noopActions;
 
-export const getSendSnapshot = sendStore.getSnapshot;
-export const subscribeToSend = sendStore.subscribe;
-export const publishSendRuntimeSnapshot = sendStore.publish;
-export const registerSendActions = sendStore.registerActions;
-export const getSendActions = sendStore.getActions;
+export const registerSendActions = (next: SendActions): void => {
+	actions = next;
+};
+export const getSendActions = (): SendActions => actions;

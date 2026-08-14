@@ -1,7 +1,6 @@
 import { publishFramingToolbarSnapshot } from "../features/capture/framing-toolbar-bridge.ts";
 import { deriveCaptureHeaderSnapshot } from "../features/capture/capture-header.ts";
 import { publishCaptureHeaderSnapshot } from "../features/capture/capture-header-bridge.ts";
-import { publishSendRuntimeSnapshot } from "../features/send/send-bridge.ts";
 import { getViewStateSnapshot, subscribeToViewState } from "../shared/view-state-bridge.ts";
 import { deriveMessageStreamSnapshot } from "../features/message-stream/message-stream.ts";
 import { publishMessageStreamSnapshot } from "../features/message-stream/message-stream-bridge.ts";
@@ -9,6 +8,7 @@ import { selectFramingToolbarSnapshot } from "../features/capture/framing-toolba
 import type { Capture } from "../features/capture/capture-framing.ts";
 import type { SendController } from "../features/send/send-controller.ts";
 import type { SerialController } from "../features/transport/serial-controller.ts";
+import { applicationStore } from "../shared/application-store.ts";
 import type { ViewStateSnapshot } from "../shared/view-state.ts";
 
 export type SnapshotRuntimeDependencies = {
@@ -42,14 +42,7 @@ export function createSnapshotRuntime(dependencies: SnapshotRuntimeDependencies)
 			queueRunning: false,
 			stopQueueRequested: false
 		};
-		const transport = dependencies.getTransport();
-		publishSendRuntimeSnapshot({
-			connected: Boolean(transport.getPort()?.writable),
-			recording: transport.isRecording(),
-			sendInFlight: sendStatus.sendInFlight,
-			queueRunning: sendStatus.queueRunning,
-			stopQueueRequested: sendStatus.stopQueueRequested
-		});
+		applicationStore.send({ type: "send/runtime-updated", runtime: sendStatus });
 	}
 
 	function publishFramingToolbarState(capture = dependencies.capture()): void {

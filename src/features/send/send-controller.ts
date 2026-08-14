@@ -8,12 +8,18 @@ import {
 import { hexByte, type Capture } from "../capture/capture-framing.ts";
 import type { SerialController } from "../transport/serial-controller.ts";
 import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
+import type { ApplicationEvent } from "../../shared/application-store.ts";
 
 export type SendControllerStatus = {
 	sendInFlight: boolean;
 	queueRunning: boolean;
 	stopQueueRequested: boolean;
 };
+
+type SendWorkflowEvent = Extract<
+	ApplicationEvent,
+	{ type: "send/started" | "send/succeeded" | "send/failed" | "queue/started" | "queue/succeeded" | "queue/failed" }
+>;
 
 export type SendControllerDependencies = {
 	state: AppState;
@@ -23,6 +29,7 @@ export type SendControllerDependencies = {
 	showToast: (message: string) => void;
 	confirm: (message: string) => boolean;
 	publishSendState: () => void;
+	publishSendWorkflow?: (event: SendWorkflowEvent) => void;
 	publishPersistenceError?: (error: { message: string; canRetry: boolean } | null) => void;
 	generateId?: () => string;
 	now?: () => number;
@@ -227,6 +234,7 @@ export function createSendController(dependencies: SendControllerDependencies) {
 			dependencies.showToast("A message is already being sent");
 			return false;
 		}
+		dependencies.publishSendWorkflow?.({ type: "send/started", startedAt: now() });
 		sendInFlight = true;
 		dependencies.publishSendState();
 		try {
@@ -241,10 +249,12 @@ export function createSendController(dependencies: SendControllerDependencies) {
 			}
 			recordSend(bytes, { origin, ok: true });
 			dependencies.showToast(`${bytes.length} byte${bytes.length === 1 ? "" : "s"} sent to RS-485`);
+			dependencies.publishSendWorkflow?.({ type: "send/succeeded", completedAt: now() });
 			return true;
 		} catch (error) {
-			const message = (error as { message: string }).message;
+			const message = error instanceof Error ? error.message : String(error);
 			recordSend(bytes, { origin, ok: false, error: message });
+			dependencies.publishSendWorkflow?.({ type: "send/failed", error: message, canRetry: false });
 			dependencies.showToast(`Send failed: ${message}`);
 			return false;
 		} finally {
@@ -379,14 +389,19 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		if (queueRunning || sendInFlight || !dependencies.transport.getPort()?.writable || !state.sendQueue.length) return;
 		queueRunning = true;
 		stopQueueRequested = false;
+		dependencies.publishSendWorkflow?.({ type: "queue/started", startedAt: now() });
 		dependencies.publishSendState();
 		const queued = [...state.sendQueue];
 		let completed = 0;
+		let queueFailure: string | null = null;
 		try {
 			for (let index = 0; index < queued.length; index++) {
 				if (stopQueueRequested || !dependencies.transport.getPort()?.writable) break;
 				const sent = await transmitBytes(Uint8Array.from(queued[index].bytes as number[]), "queue");
-				if (!sent) break;
+				if (!sent) {
+					queueFailure = "A queued message could not be sent";
+					break;
+				}
 				completed++;
 				const removed = queued[index];
 				state.sendQueue = state.sendQueue.filter(item => item.id !== removed.id);
@@ -396,10 +411,18 @@ export function createSendController(dependencies: SendControllerDependencies) {
 					await waitForQueueDelay(state.sendSettings.delayMs);
 				}
 			}
+		} catch (error) {
+			queueFailure = error instanceof Error ? error.message : String(error);
+			throw error;
 		} finally {
 			queueRunning = false;
 			stopQueueRequested = false;
 			dependencies.publishSendState();
+			if (queueFailure) {
+				dependencies.publishSendWorkflow?.({ type: "queue/failed", error: queueFailure, canRetry: false });
+			} else {
+				dependencies.publishSendWorkflow?.({ type: "queue/succeeded", completedAt: now() });
+			}
 			if (completed) {
 				dependencies.showToast(`Queue sent ${completed} message${completed === 1 ? "" : "s"}`);
 			}

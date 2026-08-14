@@ -243,3 +243,58 @@ test("append failure keeps recovery bytes and retry resumes from the acknowledge
 	assert.deepEqual(requests[1], requests[0]);
 	assert.ok(persistentErrors.includes("network unavailable"));
 });
+
+test("transport controller publishes application-owned view and workflow transitions", async () => {
+	const capture: Capture = {
+		id: "transport-lifecycle",
+		baudRate: 115200,
+		byteStream: [],
+		frameSections: [{ id: "section", start: 0, framingMode: "length", frameSize: 2 }],
+		messages: [],
+		notes: [],
+		annotations: {}
+	};
+	const views: Array<{ connected: boolean; recording: boolean }> = [];
+	const workflows: string[] = [];
+	let closed = false;
+	const port = {
+		readable: null,
+		writable: null,
+		open: async () => {},
+		close: async () => { closed = true; }
+	};
+	const controller = createSerialController({
+		capture: () => capture,
+		state: { captures: [capture], folders: [], sendSettings: {}, activeId: capture.id } as AppState,
+		showToast: () => {},
+		publishFramingToolbarState: () => {},
+		publishTransportState: view => views.push({ connected: view.connected, recording: view.recording }),
+		publishTransportWorkflow: event => workflows.push(event.type),
+		renderMessages: () => {},
+		stopSendQueue: () => {},
+		serial: { requestPort: async () => port }
+	});
+
+	await controller.connect();
+	await controller.toggleRecording();
+	await controller.stopRecording();
+	await controller.disconnect();
+
+	assert.deepEqual(workflows, [
+		"transport/connection-started",
+		"transport/connection-succeeded",
+		"transport/recording-started",
+		"transport/recording-succeeded",
+		"transport/recording-started",
+		"transport/recording-succeeded",
+		"transport/connection-started",
+		"transport/connection-succeeded"
+	]);
+	assert.deepEqual(views, [
+		{ connected: true, recording: false },
+		{ connected: true, recording: true },
+		{ connected: true, recording: false },
+		{ connected: false, recording: false }
+	]);
+	assert.equal(closed, true);
+});

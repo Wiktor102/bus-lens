@@ -26,15 +26,11 @@ import {
 	normalizeCaptureDescription,
 	normalizeCaptureTitle
 } from "../features/capture/capture-header";
-import {
-	getFramingToolbarSnapshot,
-	subscribeToFramingToolbar
-} from "../features/capture/framing-toolbar-bridge";
-import { getSendActions, getSendSnapshot, subscribeToSend } from "../features/send/send-bridge";
+import { getSendActions } from "../features/send/send-bridge";
 import { deriveSendViewModel, formatSendTime, parseTransmitHex, type SendHistoryItem, type SendQueueItem, type SendSnapshot } from "../features/send/send";
 import { deriveNotesSnapshot } from "../features/notes/notes.ts";
 import { deriveAnalysisSnapshot } from "../features/analysis/analysis.ts";
-import { getTransportActions, getTransportSnapshot, subscribeToTransport } from "../features/transport/transport-bridge";
+import { getTransportActions } from "../features/transport/transport-bridge";
 import { getNotesActions } from "../features/notes/notes-bridge";
 import { getToastSnapshot, subscribeToToast } from "../shared/toast-bridge";
 import {
@@ -50,10 +46,16 @@ import {
 	PatternRemarkDialog
 } from "../features/dialogs/dialogs";
 import { deriveMessageStreamSnapshot } from "../features/message-stream/message-stream";
-import { getMessageStreamSnapshot, subscribeToMessageStream } from "../features/message-stream/message-stream-bridge";
 import { MessageStream } from "../features/message-stream/message-stream-view";
 import { useApplicationSelector, useApplicationSend } from "./application-store-provider";
-import { selectViewState, viewStateActionToApplicationEvent } from "../shared/application-store";
+import {
+	selectFramingToolbar,
+	selectMessageStream,
+	selectSendRuntime,
+	selectTransport,
+	selectViewState,
+	viewStateActionToApplicationEvent
+} from "../shared/application-store";
 import {
 	ArrowUp,
 	Copy,
@@ -89,11 +91,7 @@ function ConnectionIcon({ connected }: { connected: boolean }) {
 }
 
 function TopBar() {
-	const snapshot = useSyncExternalStore(
-		subscribeToTransport,
-		getTransportSnapshot,
-		getTransportSnapshot
-	);
+	const snapshot = useApplicationSelector(selectTransport);
 	const actions = getTransportActions();
 	const [mcpStatus, setMcpStatus] = useState<AgentAccessStatus["status"] | "checking" | "unavailable">("checking");
 
@@ -173,7 +171,7 @@ function TopBar() {
 
 function CaptureHeader() {
 	const activeCapture = useSelectedArchiveCapture();
-	const transport = useSyncExternalStore(subscribeToTransport, getTransportSnapshot, getTransportSnapshot);
+	const transport = useApplicationSelector(selectTransport);
 	const liveHeader = useSyncExternalStore(
 		subscribeToCaptureHeader,
 		getCaptureHeaderSnapshot,
@@ -376,11 +374,7 @@ type ToolbarProps = ViewStateProps & {
 };
 
 function Toolbar({ viewState, dispatchViewState, messageFilterRef, messageFilterToggleRef }: ToolbarProps) {
-	const snapshot = useSyncExternalStore(
-		subscribeToFramingToolbar,
-		getFramingToolbarSnapshot,
-		getFramingToolbarSnapshot
-	);
+	const snapshot = useApplicationSelector(selectFramingToolbar);
 	const activeCapture = useSelectedArchiveCapture();
 	const notesQuery = useArchiveNotes(activeCapture.captureId);
 	const notes = deriveNotesSnapshot(
@@ -461,18 +455,10 @@ function Toolbar({ viewState, dispatchViewState, messageFilterRef, messageFilter
 }
 
 function StreamPanel({ viewState, dispatchViewState, messageFilterRef, messageFilterToggleRef }: ToolbarProps) {
-	const framing = useSyncExternalStore(
-		subscribeToFramingToolbar,
-		getFramingToolbarSnapshot,
-		getFramingToolbarSnapshot
-	);
-	const transport = useSyncExternalStore(subscribeToTransport, getTransportSnapshot, getTransportSnapshot);
+	const framing = useApplicationSelector(selectFramingToolbar);
+	const transport = useApplicationSelector(selectTransport);
 	const activeCapture = useSelectedArchiveCapture();
-	const liveMessageStream = useSyncExternalStore(
-		subscribeToMessageStream,
-		getMessageStreamSnapshot,
-		getMessageStreamSnapshot
-	);
+	const liveMessageStream = useApplicationSelector(selectMessageStream);
 	const messageStream = transport.recording && liveMessageStream.captureId === activeCapture.captureId
 		? liveMessageStream
 		: deriveMessageStreamSnapshot(activeCapture.data, viewState);
@@ -528,8 +514,8 @@ type SendPanelProps = {
 };
 
 function SendPanel({ open, onOpenChange }: SendPanelProps) {
-	const sendStatus = useSyncExternalStore(subscribeToSend, getSendSnapshot, getSendSnapshot);
-	const transport = useSyncExternalStore(subscribeToTransport, getTransportSnapshot, getTransportSnapshot);
+	const sendStatus = useApplicationSelector(selectSendRuntime);
+	const transport = useApplicationSelector(selectTransport);
 	const sendQuery = useSendQueryState();
 	const actions = getSendActions();
 	const inputRef = useRef<HTMLInputElement>(null);

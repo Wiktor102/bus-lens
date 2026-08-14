@@ -59,6 +59,8 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		showToast: runtime.showToast,
 		publishCaptureHeaderState: snapshots.publishCaptureHeaderState,
 		publishFramingToolbarState: snapshots.publishFramingToolbarState,
+		publishTransportState: view => applicationStore.send({ type: "transport/view-updated", view }),
+		publishTransportWorkflow: event => applicationStore.send(event),
 		renderMessages: snapshots.renderMessages,
 		stopSendQueue: () => sendController?.stopSendQueue(),
 		publishSendState: snapshots.publishSendState,
@@ -109,6 +111,7 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		showToast: runtime.showToast,
 		confirm: message => confirm(message),
 		publishSendState: snapshots.publishSendState,
+		publishSendWorkflow: event => applicationStore.send(event),
 		publishPersistenceError: error => {
 			if (!error) {
 				retrySendPersistence = null;

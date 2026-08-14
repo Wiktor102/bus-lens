@@ -32,6 +32,7 @@ export const IDLE_WORKFLOW: WorkflowState = Object.freeze({ status: "idle" });
 export type TransportViewState = {
 	connected: boolean;
 	recording: boolean;
+	recordingCaptureId: string | null;
 	connectionLabel: "Disconnected" | "Port connected";
 	connectLabel: "Connect port" | "Disconnect";
 	recordLabel: "Start capture" | "Stop capture";
@@ -46,6 +47,7 @@ export type TransportState = TransportViewState & {
 export const EMPTY_TRANSPORT_STATE: TransportState = {
 	connected: false,
 	recording: false,
+	recordingCaptureId: null,
 	connectionLabel: "Disconnected",
 	connectLabel: "Connect port",
 	recordLabel: "Start capture",
@@ -305,8 +307,13 @@ export const selectDisplayMode: ApplicationSelector<DisplayMode> = state => stat
 export const selectSelectedCaptureId: ApplicationSelector<string | null> = state => state.selectedCaptureId;
 export const selectDialog: ApplicationSelector<DialogCommand | null> = state => state.dialog;
 export const selectCanonicalization: ApplicationSelector<CanonicalizationState> = state => state.canonicalization;
+export const selectCanonicalizationWorkflow: ApplicationSelector<WorkflowState> = state => state.canonicalization.workflow;
 export const selectTransport: ApplicationSelector<TransportState> = state => state.transport;
+export const selectConnectionWorkflow: ApplicationSelector<WorkflowState> = state => state.transport.connection;
+export const selectRecordingWorkflow: ApplicationSelector<WorkflowState> = state => state.transport.recordingWorkflow;
 export const selectSendRuntime: ApplicationSelector<SendRuntimeState> = state => state.send;
+export const selectSendWorkflow: ApplicationSelector<WorkflowState> = state => state.send.sendWorkflow;
+export const selectQueueWorkflow: ApplicationSelector<WorkflowState> = state => state.send.queueWorkflow;
 export const selectFramingToolbar: ApplicationSelector<FramingToolbarState> = state => state.framingToolbar;
 export const selectMessageStream: ApplicationSelector<MessageStreamSnapshot> = state => state.messageStream;
 export const selectToast: ApplicationSelector<ToastState> = state => state.toast;
