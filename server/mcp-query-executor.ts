@@ -24,6 +24,7 @@ import type {
 	CaptureDiscoveryFiltersInput
 } from "./canonical-query.ts";
 import type { AgentSnapshotReference } from "./agent-contracts.ts";
+import type { AgentProtocolReportInput, AgentProtocolReportResult } from "./protocol-report.ts";
 import type { McpQueryRequest, McpQueryWorkerResponse } from "./mcp-query-worker.ts";
 
 export const MCP_TOOL_TIMEOUT_MS = 5_000;
@@ -170,6 +171,10 @@ export class McpQueryExecutor {
 
 	analyzeCaptureDifference(input: AgentCaptureDifferenceInput): Promise<AgentResponse<AgentCaptureDifferenceResult>> {
 		return this.run<AgentResponse<AgentCaptureDifferenceResult>>({ operation: "capture-difference", input });
+	}
+
+	getProtocolReport(input: AgentProtocolReportInput): Promise<AgentResponse<AgentProtocolReportResult>> {
+		return this.run<AgentResponse<AgentProtocolReportResult>>({ operation: "protocol-report", input });
 	}
 
 	readRawBytes(input: AgentRawReadInput): Promise<AgentResponse<AgentRawRead>> {

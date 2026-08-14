@@ -5,6 +5,8 @@ export type TransitionPositionFrame = Readonly<{
 	sectionId: string;
 	signature: string;
 	bytes: readonly number[];
+	/** When false, adjacent pairs touching this frame are outside a report scope. */
+	eligible?: boolean;
 }>;
 
 export type TransitionPositionAggregate = Readonly<{
@@ -43,6 +45,7 @@ export function deriveTransitionPositionAggregates(
 		const from = frames[index - 1];
 		const to = frames[index];
 		if (!from || !to) continue;
+		if (from.eligible === false || to.eligible === false) continue;
 		const width = Math.max(from.bytes.length, to.bytes.length);
 		const changedCounts = new Map<number, number>();
 		for (let position = 0; position < width; position += 1) {

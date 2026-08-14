@@ -30,12 +30,14 @@ import {
 	type AgentTransitionsResult,
 	type CaptureDiscoveryFiltersInput
 } from "./canonical-query.ts";
+import type { AgentProtocolReportInput, AgentProtocolReportResult } from "./protocol-report.ts";
 
 export type McpQueryRequest =
 	| { operation: "capture-discovery"; input: CaptureDiscoveryFiltersInput }
 	| { operation: "capture-overview"; captureId: string; snapshot?: Partial<AgentSnapshotReference> }
 	| { operation: "comparison"; input: AgentCompareCapturesInput }
 	| { operation: "capture-difference"; input: AgentCaptureDifferenceInput }
+	| { operation: "protocol-report"; input: AgentProtocolReportInput }
 	| { operation: "messages"; input: AgentMessageQueryInput }
 	| { operation: "message-context"; input: AgentMessageContextInput }
 	| { operation: "sequence-groups"; input: AgentSequenceGroupsInput }
@@ -81,6 +83,7 @@ try {
 			| AgentResponse<AgentCaptureOverview>
 			| AgentResponse<AgentComparisonResult>
 			| AgentResponse<AgentCaptureDifferenceResult>
+			| AgentResponse<AgentProtocolReportResult>
 			| AgentResponse<AgentMessageQueryResult>
 		| AgentResponse<AgentMessageContext>
 		| AgentResponse<AgentSequenceGroupsResult>
@@ -97,6 +100,8 @@ try {
 				return queries.compareCaptures(request.input);
 			case "capture-difference":
 				return queries.analyzeCaptureDifference(request.input);
+			case "protocol-report":
+				return queries.getProtocolReport(request.input);
 			case "messages":
 				return queries.queryMessages(request.input);
 			case "message-context":

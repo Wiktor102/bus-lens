@@ -37,6 +37,22 @@ import {
 	type NormalizedDifferentialMessageFilters,
 	type NormalizedDifferentialScope
 } from "./differential-analysis.ts";
+import { deriveTransitionPositionAggregates } from "./transition-positions.ts";
+import type {
+	AgentEvidenceClassification,
+	AgentHiddenPolicy,
+	AgentProtocolFrameFamily,
+	AgentProtocolInvariantBit,
+	AgentProtocolInvariantByte,
+	AgentProtocolReportInput,
+	AgentProtocolReportResult,
+	AgentProtocolReportScope,
+	AgentProtocolReportSection,
+	AgentProtocolSequence,
+	AgentProtocolTransition,
+	AgentProtocolVariableBit,
+	AgentProtocolVariableByte
+} from "./protocol-report.ts";
 
 export type {
 	AgentCaptureDifferenceInput,
@@ -56,6 +72,24 @@ export type {
 	AgentMaskCount,
 	AgentValueCount
 } from "./differential-analysis.ts";
+export type {
+	AgentEvidenceClassification,
+	AgentHiddenPolicy,
+	AgentProtocolFrameFamily,
+	AgentProtocolInvariantBit,
+	AgentProtocolInvariantByte,
+	AgentProtocolInvariantSummary,
+	AgentProtocolReportDifferentialInput,
+	AgentProtocolReportDetail,
+	AgentProtocolReportInput,
+	AgentProtocolReportResult,
+	AgentProtocolReportScope,
+	AgentProtocolSequence,
+	AgentProtocolTransition,
+	AgentProtocolVariableBit,
+	AgentProtocolVariableByte,
+	AgentProtocolVariableBitSummary
+} from "./protocol-report.ts";
 
 export const DEFAULT_FRAME_WINDOW_LIMIT = 50;
 export const MAX_FRAME_WINDOW_LIMIT = 200;
@@ -64,6 +98,13 @@ export const MAX_CAPTURE_DISCOVERY_LIMIT = 100;
 export const MAX_CONTEXT_PARAMETER_FILTERS = 64;
 const MAX_BYTE_STATISTICS_COMPARISON_POSITIONS = 1;
 const MAX_TRANSITION_CHANGED_POSITION_SET = 128;
+const MAX_PROTOCOL_REPORT_FRAMES = 4_000;
+const MAX_PROTOCOL_REPORT_FAMILIES = 64;
+const MAX_PROTOCOL_REPORT_INVARIANTS = 96;
+const MAX_PROTOCOL_REPORT_VARIABLES = 96;
+const MAX_PROTOCOL_REPORT_TRANSITIONS = 64;
+const MAX_PROTOCOL_REPORT_SEQUENCES = 32;
+const MAX_PROTOCOL_REPORT_CANDIDATES = 24;
 
 export type CanonicalCaptureStatus = "canonical" | "legacy-not-canonicalized" | "converting" | "canonicalization-failed";
 
@@ -539,6 +580,24 @@ type FrameRow = {
 	signature: string;
 };
 
+type ProtocolReportFrameRow = FrameRow & {
+	capture_id: string;
+	profile_id: string;
+};
+
+type ProtocolReportPositionStats = {
+	applicableFrameCount: number;
+	values: Map<number, number>;
+	oneCounts: number[];
+};
+
+type ProtocolReportFrameBucket = {
+	sectionId: string;
+	frameLength: number;
+	frameCount: number;
+	positions: Map<number, ProtocolReportPositionStats>;
+};
+
 type DiscoveryRow = {
 	id: string;
 	name: unknown;
@@ -969,6 +1028,69 @@ function normalizeByteStatisticsScope(input: AgentByteStatisticsInput["scope"]):
 	};
 	if (!Object.keys(scope).length) throw new AgentQueryError("invalid-input", "scope must contain at least one filter");
 	return { scope, ...(wildcard ? { wildcardTokens: wildcard.tokens } : {}) };
+}
+
+function normalizedProtocolReportScope(input: AgentProtocolReportInput["scope"]): NormalizedDifferentialScope {
+	return normalizeDifferentialScope(input);
+}
+
+function publicProtocolReportScope(scope: NormalizedDifferentialScope): AgentProtocolReportScope {
+	return {
+		...(scope.sectionId === undefined ? {} : { sectionId: scope.sectionId }),
+		...(scope.frameLength === undefined ? {} : { frameLength: scope.frameLength }),
+		...(scope.exactSignature === undefined ? {} : { exactSignature: scope.exactSignature }),
+		...(scope.wildcardHexPattern === undefined ? {} : { wildcardHexPattern: scope.wildcardHexPattern }),
+		...(scope.direction === undefined ? {} : { direction: scope.direction })
+	};
+}
+
+function protocolReportSections(input: AgentProtocolReportInput["include"]): readonly AgentProtocolReportSection[] {
+	const sections = input === undefined
+		? ["frame-families", "invariants", "variable-bits", "transitions", "sequences", "differential-candidates"] as const
+		: [...new Set(input)];
+	const allowed = new Set(["frame-families", "invariants", "variable-bits", "transitions", "sequences", "differential-candidates"]);
+	if (!sections.length) throw new AgentQueryError("invalid-input", "include must contain at least one report section");
+	if (sections.some(section => !allowed.has(section))) {
+		throw new AgentQueryError("invalid-input", "include contains an unsupported report section", { include: sections });
+	}
+	if (sections.length > 6) throw new AgentQueryError("invalid-input", "include contains too many report sections", { maximum: 6 });
+	return sections as readonly AgentProtocolReportSection[];
+}
+
+function reportFrameMatches(row: Pick<ProtocolReportFrameRow, "section_id" | "bytes_json" | "directions_json" | "signature">, scope: NormalizedDifferentialScope): boolean {
+	if (scope.sectionId !== undefined && row.section_id !== scope.sectionId) return false;
+	const bytes = jsonArray<number>(row.bytes_json).map(Number);
+	if (scope.frameLength !== undefined && bytes.length !== scope.frameLength) return false;
+	if (scope.exactSignature !== undefined && row.signature !== scope.exactSignature) return false;
+	if (scope.wildcardTokens && !wildcardMatches(bytes, scope.wildcardTokens)) return false;
+	if (scope.direction !== undefined && !jsonArray<string>(row.directions_json).some(direction => String(direction).trim().toLowerCase() === scope.direction)) return false;
+	return true;
+}
+
+function reportFrameHiddenMatches(hidden: boolean, policy: AgentHiddenPolicy): boolean {
+	if (policy === "visible-only") return !hidden;
+	if (policy === "hidden-only") return hidden;
+	return true;
+}
+
+function reportValueCounts(values: Map<number, number>): Array<{ value: number; count: number }> {
+	return [...values.entries()]
+		.sort((left, right) => right[1] - left[1] || left[0] - right[0])
+		.map(([value, count]) => ({ value, count }));
+}
+
+function reportClassificationText(): Readonly<Record<AgentEvidenceClassification, string>> {
+	return {
+		observed: "Directly counted from the pinned snapshot evidence.",
+		stable: "Unchanged across all applicable sampled frames with sufficient support.",
+		variable: "Multiple observed values or bit states were counted in the applicable evidence.",
+		candidate: "A differential correlation only; no semantic field claim is made.",
+		"insufficient-evidence": "The applicable support is below the report threshold or the bounded sample was truncated."
+	};
+}
+
+function reportPercentage(count: number, total: number): number {
+	return total ? Math.round((count / total) * 100) : 0;
 }
 
 function byteStatisticsFramePredicate(
@@ -2086,6 +2208,409 @@ export class CanonicalQueryService {
 				suggestedOperations: firstStartingFrameId ? [{ tool: "get_message_context", reason: "Inspect a frame near this occurrence", arguments: { frameId: firstStartingFrameId } }] : []
 			});
 		});
+	}
+
+	private readProtocolReportFrames(
+		profileId: string,
+		scope: NormalizedDifferentialScope,
+		hiddenPolicy: AgentHiddenPolicy
+	): {
+		totalFrameCount: number;
+		scopeMatchedFrameCount: number;
+		applicableFrameCount: number;
+		hiddenExcludedFrameCount: number;
+		rows: ProtocolReportFrameRow[];
+		truncated: boolean;
+	} {
+		const predicate = differentialFramePredicate(scope, "protocolReport", "frames");
+		const baseParameters = { profileId, ...predicate.params };
+		const totalFrameCount = (this.database.prepare(
+			"SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId"
+		).get({ profileId }) as { count: number }).count;
+		const scopeMatchedFrameCount = (this.database.prepare(
+			`SELECT COUNT(*) AS count FROM materialized_frames AS frames
+			 WHERE frames.profile_id = @profileId${predicate.sql}`
+		).get(baseParameters) as { count: number }).count;
+		const hiddenPredicate = hiddenPolicy === "visible-only"
+			? " AND frames.hidden = 0"
+			: hiddenPolicy === "hidden-only"
+				? " AND frames.hidden = 1"
+				: "";
+		const applicableFrameCount = (this.database.prepare(
+			`SELECT COUNT(*) AS count FROM materialized_frames AS frames
+			 WHERE frames.profile_id = @profileId${predicate.sql}${hiddenPredicate}`
+		).get(baseParameters) as { count: number }).count;
+		const rows = this.database.prepare(
+			`SELECT id, capture_id, profile_id, ordinal, section_id, raw_offsets_json, bytes_json,
+			        timestamps_json, directions_json, hidden, signature
+			 FROM materialized_frames
+			 WHERE profile_id = @profileId
+			 ORDER BY ordinal ASC, id ASC
+			 LIMIT @limit`
+		).all({ profileId, limit: MAX_PROTOCOL_REPORT_FRAMES + 1 }) as ProtocolReportFrameRow[];
+		return {
+			totalFrameCount,
+			scopeMatchedFrameCount,
+			applicableFrameCount,
+			hiddenExcludedFrameCount: scopeMatchedFrameCount - applicableFrameCount,
+			rows: rows.slice(0, MAX_PROTOCOL_REPORT_FRAMES),
+			truncated: rows.length > MAX_PROTOCOL_REPORT_FRAMES
+		};
+	}
+
+	private readProtocolReportSequences(
+		profileId: string,
+		scope: NormalizedDifferentialScope,
+		hiddenPolicy: AgentHiddenPolicy,
+		minimumSupport: number,
+		limit: number
+	): { sequences: AgentProtocolSequence[]; truncated: boolean } {
+		const predicate = differentialFramePredicate(scope, "protocolSequence", "frames");
+		const hiddenPredicate = hiddenPolicy === "visible-only"
+			? " AND frames.hidden = 0"
+			: hiddenPolicy === "hidden-only"
+				? " AND frames.hidden = 1"
+				: "";
+		const occurrenceCountSql = `(
+			SELECT COUNT(DISTINCT occurrences.occurrence_index)
+			 FROM sequence_occurrences occurrences
+			 WHERE occurrences.group_id = groups.id
+			   AND EXISTS (
+				   SELECT 1 FROM materialized_frames frames
+				   WHERE frames.profile_id = @profileId
+				     AND frames.ordinal >= occurrences.start_frame_ordinal
+				     AND frames.ordinal < occurrences.start_frame_ordinal + occurrences.length
+				     ${predicate.sql}${hiddenPredicate}
+			   )
+		)`;
+		const rows = this.database.prepare(
+			`SELECT groups.id, groups.key_text, groups.signatures_json, groups.length,
+			        ${occurrenceCountSql} AS occurrence_count, groups.score
+			 FROM sequence_groups groups
+			 WHERE groups.profile_id = @profileId
+			   AND ${occurrenceCountSql} > 0
+			 ORDER BY occurrence_count DESC, groups.score DESC, groups.id ASC
+			 LIMIT @limit`
+		).all({ profileId, ...predicate.params, limit: limit + 1 }) as Array<{
+			id: string;
+			key_text: string;
+			signatures_json: string;
+			length: number;
+			occurrence_count: number;
+			score: number;
+		}>;
+		const pageRows = rows.slice(0, limit);
+		const sequences: AgentProtocolSequence[] = pageRows.map(row => {
+			const occurrenceCount = row.occurrence_count;
+			const sections = this.database.prepare(
+				`SELECT DISTINCT frames.section_id
+				 FROM sequence_occurrences occurrences
+				 JOIN materialized_frames frames
+				   ON frames.profile_id = @profileId
+				  AND frames.ordinal >= occurrences.start_frame_ordinal
+				  AND frames.ordinal < occurrences.start_frame_ordinal + occurrences.length
+				 WHERE occurrences.group_id = @groupId
+				   AND frames.profile_id = @profileId${predicate.sql}${hiddenPredicate}
+				 ORDER BY frames.section_id`
+			).all({ profileId, groupId: row.id, ...predicate.params }) as Array<{ section_id: string }>;
+			return {
+				id: row.id,
+				key: row.key_text,
+				signatures: jsonArray<string>(row.signatures_json),
+				length: row.length,
+				occurrenceCount,
+				sections: sections.map(section => section.section_id),
+				classification: occurrenceCount >= minimumSupport ? "observed" : "insufficient-evidence"
+			};
+		});
+		return { sequences, truncated: rows.length > pageRows.length };
+	}
+
+	getProtocolReport(input: AgentProtocolReportInput): AgentResponse<AgentProtocolReportResult> {
+		const snapshot = this.resolveDifferentialSnapshot(input?.snapshot);
+		const normalizedScope = normalizedProtocolReportScope(input.scope);
+		const scope = publicProtocolReportScope(normalizedScope);
+		const include = protocolReportSections(input.include);
+		const detail = input.detail ?? "standard";
+		if (detail !== "compact" && detail !== "standard") {
+			throw new AgentQueryError("invalid-input", "detail must be compact or standard", { detail });
+		}
+		const hiddenPolicy = input.hidden ?? "include";
+		if (hiddenPolicy !== "include" && hiddenPolicy !== "visible-only" && hiddenPolicy !== "hidden-only") {
+			throw new AgentQueryError("invalid-input", "hidden must be include, visible-only, or hidden-only", { hidden: hiddenPolicy });
+		}
+		const minimumSupport = boundedLimit(input.minimumSupport, 2, 1_000, "minimumSupport");
+		const caps = detail === "compact"
+			? { families: 32, positions: 48, transitions: 24, sequences: 16, candidates: 8 }
+			: { families: MAX_PROTOCOL_REPORT_FAMILIES, positions: MAX_PROTOCOL_REPORT_INVARIANTS, transitions: MAX_PROTOCOL_REPORT_TRANSITIONS, sequences: MAX_PROTOCOL_REPORT_SEQUENCES, candidates: MAX_PROTOCOL_REPORT_CANDIDATES };
+		const read = this.readProtocolReportFrames(snapshot.profileId, normalizedScope, hiddenPolicy);
+		const sampledFrames = read.rows.map(row => ({
+			row,
+			bytes: jsonArray<number>(row.bytes_json).map(Number),
+			eligible: reportFrameMatches(row, normalizedScope) && reportFrameHiddenMatches(Boolean(row.hidden), hiddenPolicy)
+		}));
+		const applicableFrames = sampledFrames.filter(frame => frame.eligible);
+
+		const buckets = new Map<string, ProtocolReportFrameBucket>();
+		for (const frame of applicableFrames) {
+			const sectionId = frame.row.section_id;
+			const frameLength = frame.bytes.length;
+			const key = `${sectionId}\u0000${frameLength}`;
+			const bucket = buckets.get(key) ?? { sectionId, frameLength, frameCount: 0, positions: new Map() };
+			bucket.frameCount += 1;
+			for (let position = 0; position < frame.bytes.length; position += 1) {
+				const value = frame.bytes[position];
+				if (value === undefined) continue;
+				const stats = bucket.positions.get(position) ?? { applicableFrameCount: 0, values: new Map(), oneCounts: Array<number>(8).fill(0) };
+				stats.applicableFrameCount += 1;
+				stats.values.set(value, (stats.values.get(value) ?? 0) + 1);
+				for (let bit = 0; bit < 8; bit += 1) {
+					if (((value >> bit) & 1) === 1) stats.oneCounts[bit] = (stats.oneCounts[bit] ?? 0) + 1;
+				}
+				bucket.positions.set(position, stats);
+			}
+			buckets.set(key, bucket);
+		}
+
+		const orderedBuckets = [...buckets.values()].sort((left, right) => left.sectionId.localeCompare(right.sectionId) || left.frameLength - right.frameLength);
+		const bucketHasSufficientEvidence = (bucket: ProtocolReportFrameBucket): boolean => !read.truncated && bucket.frameCount >= minimumSupport;
+		const frameFamilies: AgentProtocolFrameFamily[] = [];
+		const invariantBytes: AgentProtocolInvariantByte[] = [];
+		const invariantBits: AgentProtocolInvariantBit[] = [];
+		const variableBytes: AgentProtocolVariableByte[] = [];
+		const variableBits: AgentProtocolVariableBit[] = [];
+
+		for (const bucket of orderedBuckets) {
+			const signatures = new Map<string, number>();
+			for (const frame of applicableFrames) {
+				if (frame.row.section_id !== bucket.sectionId || frame.bytes.length !== bucket.frameLength) continue;
+				signatures.set(frame.row.signature, (signatures.get(frame.row.signature) ?? 0) + 1);
+			}
+			for (const [signature, count] of [...signatures.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))) {
+				frameFamilies.push({
+					sectionId: bucket.sectionId,
+					frameLength: bucket.frameLength,
+					signature,
+					count,
+					percentage: reportPercentage(count, bucket.frameCount),
+					classification: bucketHasSufficientEvidence(bucket) ? "observed" : "insufficient-evidence"
+				});
+			}
+			for (const [position, stats] of bucket.positions) {
+				const sufficient = bucketHasSufficientEvidence(bucket) && stats.applicableFrameCount >= minimumSupport;
+				const values = reportValueCounts(stats.values);
+				if (values.length === 1 && sufficient) {
+					invariantBytes.push({
+						sectionId: bucket.sectionId,
+						frameLength: bucket.frameLength,
+						position,
+						value: values[0]!.value,
+						count: values[0]!.count,
+						applicableFrameCount: stats.applicableFrameCount,
+						classification: "stable"
+					});
+				} else if (values.length > 1 || !sufficient) {
+					variableBytes.push({
+						sectionId: bucket.sectionId,
+						frameLength: bucket.frameLength,
+						position,
+						values,
+						applicableFrameCount: stats.applicableFrameCount,
+						classification: values.length > 1 && sufficient ? "variable" : "insufficient-evidence"
+					});
+				}
+				for (let bit = 0; bit < 8; bit += 1) {
+					const onePercentage = reportPercentage(stats.oneCounts[bit] ?? 0, stats.applicableFrameCount);
+					if ((onePercentage === 0 || onePercentage === 100) && sufficient) {
+						invariantBits.push({
+							sectionId: bucket.sectionId,
+							frameLength: bucket.frameLength,
+							position,
+							bit,
+							onePercentage,
+							applicableFrameCount: stats.applicableFrameCount,
+							classification: "stable"
+						});
+					} else if ((onePercentage > 0 && onePercentage < 100) || !sufficient) {
+						variableBits.push({
+							sectionId: bucket.sectionId,
+							frameLength: bucket.frameLength,
+							position,
+							bit,
+							onePercentage,
+							applicableFrameCount: stats.applicableFrameCount,
+							classification: onePercentage > 0 && onePercentage < 100 && sufficient ? "variable" : "insufficient-evidence"
+						});
+					}
+				}
+			}
+		}
+
+		frameFamilies.sort((left, right) => right.count - left.count || left.sectionId.localeCompare(right.sectionId) || left.frameLength - right.frameLength || left.signature.localeCompare(right.signature));
+		const positionSort = (left: { sectionId: string; frameLength: number; position: number }, right: { sectionId: string; frameLength: number; position: number }): number => left.sectionId.localeCompare(right.sectionId) || left.frameLength - right.frameLength || left.position - right.position;
+		invariantBytes.sort(positionSort);
+		invariantBits.sort((left, right) => positionSort(left, right) || left.bit - right.bit);
+		variableBytes.sort(positionSort);
+		variableBits.sort((left, right) => positionSort(left, right) || left.bit - right.bit);
+
+		let transitions: AgentProtocolTransition[] | undefined;
+		let transitionTruncated = false;
+		if (include.includes("transitions")) {
+			const transitionRows = deriveTransitionPositionAggregates(sampledFrames.map(frame => ({
+				ordinal: frame.row.ordinal,
+				sectionId: frame.row.section_id,
+				signature: frame.row.signature,
+				bytes: frame.bytes,
+				eligible: frame.eligible
+			})));
+			const transitionGroups = new Map<string, { sectionId: string; fromSignature: string; toSignature: string; transitionCount: number; positions: Map<number, number> }>();
+			for (const row of transitionRows) {
+				const key = `${row.sectionId}\u0000${row.fromSignature}\u0000${row.toSignature}`;
+				const group = transitionGroups.get(key) ?? { sectionId: row.sectionId, fromSignature: row.fromSignature, toSignature: row.toSignature, transitionCount: row.transitionCount, positions: new Map() };
+				group.transitionCount = row.transitionCount;
+				group.positions.set(row.position, row.changedCount);
+				transitionGroups.set(key, group);
+			}
+			const allTransitionGroups = [...transitionGroups.values()].sort((left, right) => right.transitionCount - left.transitionCount || left.fromSignature.localeCompare(right.fromSignature) || left.toSignature.localeCompare(right.toSignature) || left.sectionId.localeCompare(right.sectionId));
+			transitionTruncated = allTransitionGroups.length > caps.transitions;
+			transitions = allTransitionGroups.slice(0, caps.transitions).map(group => {
+				const positions = [...group.positions.entries()].sort((left, right) => left[0] - right[0]);
+				const boundedPositions = positions.slice(0, MAX_TRANSITION_CHANGED_POSITION_SET);
+				return {
+					sectionId: group.sectionId,
+					fromSignature: group.fromSignature,
+					toSignature: group.toSignature,
+					count: group.transitionCount,
+					transitionCount: group.transitionCount,
+					changedPositionCounts: boundedPositions.map(([position, changedCount]) => ({ position, changedCount })),
+					changedPercentages: boundedPositions.map(([position, changedCount]) => ({ position, percentage: reportPercentage(changedCount, group.transitionCount) })),
+					changedPositions: boundedPositions.map(([position]) => position),
+					changedPositionCount: positions.length,
+					...(positions.length > boundedPositions.length ? { changedPositionSetTruncated: true } : {}),
+					classification: group.transitionCount >= minimumSupport && !read.truncated ? "observed" : "insufficient-evidence"
+				};
+			});
+		}
+
+		let sequences: AgentProtocolSequence[] | undefined;
+		let sequenceTruncated = false;
+		if (include.includes("sequences")) {
+			const sequenceResult = this.readProtocolReportSequences(snapshot.profileId, normalizedScope, hiddenPolicy, minimumSupport, caps.sequences);
+			sequences = sequenceResult.sequences;
+			sequenceTruncated = sequenceResult.truncated;
+		}
+
+		let differentialCandidates: AgentProtocolReportResult["differentialCandidates"];
+		let differential: AgentProtocolReportResult["differential"];
+		let differentialTruncated = false;
+		const differentialInput = input.differentialAnalysis;
+		if (include.includes("differential-candidates")) {
+			differentialCandidates = [];
+			if (differentialInput) {
+				const normalizeDifferentialSide = (side: NonNullable<AgentProtocolReportInput["differentialAnalysis"]>["baseline"]): AgentCaptureDifferenceInput["baseline"] => {
+					const sideHidden = side.filters?.hidden;
+					if (sideHidden !== undefined && sideHidden !== hiddenPolicy) {
+						throw new AgentQueryError("invalid-input", "Differential hidden policy must match the report hidden policy", { reportHidden: hiddenPolicy, differentialHidden: sideHidden });
+					}
+					return { ...side, filters: { ...(side.filters ?? {}), hidden: hiddenPolicy } };
+				};
+				const differentialResponse = this.analyzeCaptureDifference({
+					baseline: normalizeDifferentialSide(differentialInput.baseline),
+					changed: normalizeDifferentialSide(differentialInput.changed),
+					alignment: differentialInput.alignment,
+					scope: differentialInput.scope ?? scope,
+					minimumSupport: differentialInput.minimumSupport ?? minimumSupport,
+					limit: caps.candidates
+				});
+				differentialCandidates = differentialResponse.data.candidateFields.slice(0, caps.candidates);
+				differential = {
+					baseline: differentialResponse.data.baseline,
+					changed: differentialResponse.data.changed,
+					pairedFrameCount: differentialResponse.data.alignment.pairedFrameCount,
+					baselineUnpairedFrameCount: differentialResponse.data.alignment.baselineUnpairedFrameCount,
+					changedUnpairedFrameCount: differentialResponse.data.alignment.changedUnpairedFrameCount,
+					insertedFrameCount: differentialResponse.data.alignment.insertedFrameCount,
+					deletedFrameCount: differentialResponse.data.alignment.deletedFrameCount,
+					minimumSupport: differentialInput.minimumSupport ?? minimumSupport,
+					truncated: differentialResponse.meta.truncated || differentialResponse.data.differenceSummary.truncated
+				};
+				differentialTruncated = differential.truncated;
+			}
+		}
+
+		const evidenceTruncated = read.truncated || transitionTruncated || sequenceTruncated || differentialTruncated
+			|| frameFamilies.length > caps.families || invariantBytes.length > caps.positions || invariantBits.length > caps.positions
+			|| variableBytes.length > caps.positions || variableBits.length > caps.positions;
+		const evidenceQuality = {
+			totalFrameCount: read.totalFrameCount,
+			scopeMatchedFrameCount: read.scopeMatchedFrameCount,
+			applicableFrameCount: read.applicableFrameCount,
+			excludedFrameCount: Math.max(0, read.totalFrameCount - read.applicableFrameCount),
+			hiddenExcludedFrameCount: read.hiddenExcludedFrameCount,
+			sampledFrameCount: applicableFrames.length,
+			minimumSupport,
+			sampleSufficiency: read.truncated ? "truncated" : read.applicableFrameCount >= minimumSupport ? "sufficient" : "insufficient-evidence",
+			hiddenPolicy,
+			truncated: evidenceTruncated,
+			classifications: reportClassificationText()
+		} as const;
+		const snapshotArguments = {
+			captureId: snapshot.captureId,
+			profileId: snapshot.profileId,
+			profileVersion: snapshot.profileVersion,
+			sourceDataRevision: snapshot.sourceDataRevision
+		};
+		const scopeArguments = scope as Record<string, unknown>;
+		const followUpOperations = [
+			{ tool: "query_messages", reason: "Inspect bounded frames that produced this snapshot report", arguments: { ...snapshotArguments, ...scopeArguments, hidden: hiddenPolicy, limit: 50 } },
+			...(include.includes("transitions") ? [{ tool: "get_transitions", reason: "Inspect common adjacent transitions from the pinned profile", arguments: { ...snapshotArguments, ...(scope.sectionId ? { sectionId: scope.sectionId } : {}), limit: 50 } }] : []),
+			...(include.includes("variable-bits") && variableBytes.length ? [{ tool: "get_byte_statistics", reason: "Inspect exact vocabulary and bit percentages for the bounded variable positions", arguments: { ...snapshotArguments, positions: [...new Set(variableBytes.slice(0, 32).map(item => item.position))], scope } }] : []),
+			...(include.includes("sequences") && sequences?.length ? [{ tool: "get_sequence_occurrences", reason: "Inspect occurrences of the first repeated sequence summary", arguments: { ...snapshotArguments, groupId: sequences[0]!.id, limit: 50 } }] : []),
+			...(differentialInput ? [{ tool: "analyze_capture_difference", reason: "Inspect the bounded differential candidate page with the same labelled snapshots", arguments: { ...differentialInput, scope: differentialInput.scope ?? scope, limit: caps.candidates } }] : [])
+		].slice(0, 6) as AgentProtocolReportResult["followUpOperations"];
+		const baseData: AgentProtocolReportResult = {
+			snapshot,
+			scope,
+			detail,
+			hiddenPolicy,
+			include,
+			...(include.includes("frame-families") ? { frameFamilies: frameFamilies.slice(0, caps.families) } : {}),
+			...(include.includes("invariants") ? { invariants: { bytes: invariantBytes.slice(0, caps.positions), bits: invariantBits.slice(0, caps.positions) } } : {}),
+			...(include.includes("variable-bits") ? { variableBits: { bytes: variableBytes.slice(0, caps.positions), bits: variableBits.slice(0, caps.positions) } } : {}),
+			...(transitions ? { transitions } : {}),
+			...(sequences ? { sequences } : {}),
+			...(differentialCandidates ? { differentialCandidates } : {}),
+			...(differential ? { differential } : {}),
+			evidenceQuality,
+			followUpOperations
+		};
+		const appliedFilters = { snapshot, scope, include, detail, hidden: hiddenPolicy, minimumSupport };
+		const renderResponse = (data: AgentProtocolReportResult): AgentResponse<AgentProtocolReportResult> => makeAgentResponse({
+			data,
+			appliedFilters,
+			snapshot,
+			truncated: data.evidenceQuality.truncated,
+			suggestedOperations: [...data.followUpOperations]
+		});
+		let response = renderResponse(baseData);
+		for (let attempt = 0; attempt < 7 && !responseFitsNormalLimit(response); attempt += 1) {
+			const factor = Math.pow(0.5, attempt + 1);
+			const trim = <T,>(values: readonly T[] | undefined, maximum: number): readonly T[] | undefined => values ? values.slice(0, Math.max(1, Math.floor(maximum * factor))) : undefined;
+			const trimmedData: AgentProtocolReportResult = {
+				...baseData,
+				...(baseData.frameFamilies ? { frameFamilies: trim(baseData.frameFamilies, caps.families) } : {}),
+				...(baseData.invariants ? { invariants: { bytes: trim(baseData.invariants.bytes, caps.positions) ?? [], bits: trim(baseData.invariants.bits, caps.positions) ?? [] } } : {}),
+				...(baseData.variableBits ? { variableBits: { bytes: trim(baseData.variableBits.bytes, caps.positions) ?? [], bits: trim(baseData.variableBits.bits, caps.positions) ?? [] } } : {}),
+				...(baseData.transitions ? { transitions: trim(baseData.transitions, caps.transitions) } : {}),
+				...(baseData.sequences ? { sequences: trim(baseData.sequences, caps.sequences) } : {}),
+				...(baseData.differentialCandidates ? { differentialCandidates: trim(baseData.differentialCandidates, caps.candidates) } : {}),
+				evidenceQuality: { ...baseData.evidenceQuality, truncated: true, sampleSufficiency: baseData.evidenceQuality.sampleSufficiency === "sufficient" ? "truncated" : baseData.evidenceQuality.sampleSufficiency },
+				followUpOperations: baseData.followUpOperations.slice(0, 4)
+			};
+			response = renderResponse(trimmedData);
+		}
+		assertEncodedResponseSize(response);
+		return response;
 	}
 
 	getByteStatistics(input: AgentByteStatisticsInput): AgentResponse<AgentByteStatisticsResult> {

@@ -13,6 +13,8 @@ import type {
 	AgentMessageQueryResult,
 	AgentRawRead,
 	AgentRawReadInput,
+	AgentProtocolReportInput,
+	AgentProtocolReportResult,
 	AgentSequenceGroupsInput,
 	AgentSequenceGroupsResult,
 	AgentSequenceOccurrencesInput,
@@ -228,6 +230,42 @@ const differentialResultSchema = z.object({
 });
 const differentialOutputSchema = agentResponseSchema.extend({ data: differentialResultSchema });
 
+const protocolReportSectionSchema = z.enum([
+	"frame-families",
+	"invariants",
+	"variable-bits",
+	"transitions",
+	"sequences",
+	"differential-candidates"
+]);
+const protocolReportDifferentialSchema = z.object({
+	baseline: z.object({
+		snapshot: differentialSnapshotSchema,
+		label: z.string().min(1),
+		filters: differentialMessageFiltersSchema.optional()
+	}),
+	changed: z.object({
+		snapshot: differentialSnapshotSchema,
+		label: z.string().min(1),
+		filters: differentialMessageFiltersSchema.optional()
+	}),
+	alignment: z.object({
+		mode: z.enum(["ordinal", "raw-relative", "timestamp-nearest", "signature-sequence"]),
+		maximumTimestampDeltaMs: z.number().finite().nonnegative().max(60_000).optional()
+	}),
+	scope: differentialScopeSchema.optional(),
+	minimumSupport: z.number().int().positive().max(1_000).optional()
+});
+const protocolReportInputSchema = z.object({
+	snapshot: differentialSnapshotSchema,
+	scope: differentialScopeSchema.optional(),
+	include: z.array(protocolReportSectionSchema).min(1).max(6).optional(),
+	differentialAnalysis: protocolReportDifferentialSchema.optional(),
+	detail: z.enum(["compact", "standard"]).optional(),
+	hidden: z.enum(["include", "visible-only", "hidden-only"]).optional(),
+	minimumSupport: z.number().int().positive().max(1_000).optional()
+});
+
 function errorResult(error: unknown): { isError: true; structuredContent: AgentResponse<unknown>; content: [{ type: "text"; text: string }] } {
 	const normalized = error instanceof AgentQueryError
 		? error
@@ -404,6 +442,19 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 		},
 		recordClient,
 		differentialOutputSchema
+	);
+
+	registerAnalysisTool(
+		server,
+		"get_protocol_report",
+		"Return a compact, non-pageable evidence report for one explicit profile snapshot. Results separate frame families by section and length, classify stable and variable bytes/bits, summarize common transitions and repeated sequences, and optionally include labelled differential candidate fields. Scope, hidden policy, detail, and differential alignment are bounded and returned in the report; no semantic field names or inferred-field persistence are performed.",
+		protocolReportInputSchema,
+		input => queries.getProtocolReport(input as AgentProtocolReportInput),
+		response => {
+			const result = response as AgentResponse<AgentProtocolReportResult>;
+			return `Returned a bounded protocol report for ${result.data.evidenceQuality.applicableFrameCount} applicable frame${result.data.evidenceQuality.applicableFrameCount === 1 ? "" : "s"}${result.data.evidenceQuality.truncated ? " with truncation" : ""}.`;
+		},
+		recordClient
 	);
 
 	registerAnalysisTool(
