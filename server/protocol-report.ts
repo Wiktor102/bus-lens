@@ -62,6 +62,9 @@ export type AgentProtocolFrameFamily = Readonly<{
 	sectionId: string;
 	frameLength: number;
 	signature: string;
+	signatureLength?: number;
+	signatureDigest?: string;
+	signatureTruncated?: boolean;
 	count: number;
 	percentage: number;
 	classification: AgentEvidenceClassification;
@@ -119,7 +122,13 @@ export type AgentProtocolVariableBitSummary = Readonly<{
 export type AgentProtocolTransition = Readonly<{
 	sectionId: string;
 	fromSignature: string;
+	fromSignatureLength?: number;
+	fromSignatureDigest?: string;
+	fromSignatureTruncated?: boolean;
 	toSignature: string;
+	toSignatureLength?: number;
+	toSignatureDigest?: string;
+	toSignatureTruncated?: boolean;
 	count: number;
 	transitionCount: number;
 	changedPositionCounts: readonly Readonly<{ position: number; changedCount: number }>[];
@@ -133,7 +142,11 @@ export type AgentProtocolTransition = Readonly<{
 export type AgentProtocolSequence = Readonly<{
 	id: string;
 	key: string;
+	keyLength?: number;
+	keyDigest?: string;
 	signatures: readonly string[];
+	signatureCount?: number;
+	signaturesTruncated?: boolean;
 	length: number;
 	occurrenceCount: number;
 	sections: readonly string[];

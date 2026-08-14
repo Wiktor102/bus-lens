@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import type { SqliteDatabase } from "./database.ts";
 import {
 	AGENT_NORMAL_RESPONSE_BYTES,
@@ -32,6 +33,7 @@ import {
 	type AgentCaptureDifferenceInput,
 	type AgentCaptureDifferenceResult,
 	type AgentDifferentialAlignmentMode,
+	type AgentDifferentialScope,
 	type DifferentialAlignedPair,
 	type DifferentialFrame,
 	type NormalizedDifferentialMessageFilters,
@@ -107,6 +109,10 @@ const MAX_PROTOCOL_REPORT_VARIABLES = 96;
 const MAX_PROTOCOL_REPORT_TRANSITIONS = 64;
 const MAX_PROTOCOL_REPORT_SEQUENCES = 32;
 const MAX_PROTOCOL_REPORT_CANDIDATES = 24;
+const MAX_PROTOCOL_REPORT_COMPACT_TEXT = 96;
+const MAX_PROTOCOL_REPORT_STANDARD_TEXT = 256;
+const MAX_PROTOCOL_REPORT_COMPACT_SEQUENCE_SIGNATURES = 16;
+const MAX_PROTOCOL_REPORT_STANDARD_SEQUENCE_SIGNATURES = 64;
 
 export type CanonicalCaptureStatus = "canonical" | "legacy-not-canonicalized" | "converting" | "canonicalization-failed";
 
@@ -288,6 +294,7 @@ export type AgentMessageQueryInput = Readonly<{
 	timestampFrom?: number;
 	timestampTo?: number;
 	sectionId?: string;
+	frameLength?: number;
 	direction?: string;
 	exactSignature?: string;
 	signature?: string;
@@ -295,6 +302,7 @@ export type AgentMessageQueryInput = Readonly<{
 	hidden?: "include" | "visible-only" | "hidden-only";
 	notePresence?: "any" | "with-note" | "without-note";
 	sequenceGroupId?: string;
+	scope?: AgentDifferentialScope;
 	cursor?: string;
 	limit?: number;
 }>;
@@ -353,6 +361,8 @@ export type AgentSequenceOccurrencesInput = Readonly<{
 	profileId?: string;
 	profileVersion?: number;
 	sourceDataRevision?: number;
+	scope?: AgentDifferentialScope;
+	hidden?: AgentHiddenPolicy;
 	cursor?: string;
 	limit?: number;
 	includeContext?: boolean;
@@ -380,6 +390,7 @@ export type AgentByteStatisticsInput = Readonly<{
 	sourceDataRevision?: number;
 	positions: readonly number[];
 	scope?: AgentByteStatisticsScope;
+	hidden?: AgentHiddenPolicy;
 }>;
 
 export type AgentByteStatisticsScope = Readonly<{
@@ -655,6 +666,7 @@ type NormalizedMessageFilters = Readonly<{
 	timestampFrom?: number;
 	timestampTo?: number;
 	sectionId?: string;
+	frameLength?: number;
 	direction?: string;
 	exactSignature?: string;
 	wildcardHexPattern?: string;
@@ -971,6 +983,7 @@ function assertWildcardPatternIsBounded(
 }
 
 function normalizeMessageFilters(input: AgentMessageQueryInput): NormalizedMessageFilters {
+	const reportScope = normalizeDifferentialScope(input.scope);
 	const ordinalFrom = optionalNonNegativeInteger(input.ordinalFrom ?? input.frameOrdinalFrom, "ordinalFrom");
 	const ordinalTo = optionalNonNegativeInteger(input.ordinalTo ?? input.frameOrdinalTo, "ordinalTo");
 	const requestedRawOffsetFrom = optionalNonNegativeInteger(input.rawOffsetFrom, "rawOffsetFrom");
@@ -990,6 +1003,28 @@ function normalizeMessageFilters(input: AgentMessageQueryInput): NormalizedMessa
 	}
 	const wildcard = parseWildcardPattern(input.wildcardHexPattern);
 	assertWildcardPatternIsBounded(wildcard, ordinalFrom !== undefined && ordinalTo !== undefined || timestampFrom !== undefined && timestampTo !== undefined);
+	const directSectionId = input.sectionId === undefined ? undefined : requiredText(input.sectionId, "sectionId");
+	const directFrameLength = input.frameLength === undefined ? undefined : optionalNonNegativeInteger(input.frameLength, "frameLength");
+	if (directFrameLength === 0) throw new AgentQueryError("invalid-input", "frameLength must be a positive integer", { label: "frameLength" });
+	const directDirection = input.direction === undefined ? undefined : requiredText(input.direction, "direction").toLowerCase();
+	const directSignature = normalizedSignature(input.exactSignature ?? input.signature, "exactSignature");
+	const mergeScopedValue = <T>(direct: T | undefined, scoped: T | undefined, label: string): T | undefined => {
+		if (direct !== undefined && scoped !== undefined && direct !== scoped) {
+			throw new AgentQueryError("invalid-input", `${label} conflicts with scope.${label}`, { [label]: direct, [`scope.${label}`]: scoped });
+		}
+		return direct ?? scoped;
+	};
+	if (wildcard && reportScope.wildcardHexPattern !== undefined && wildcard.pattern !== reportScope.wildcardHexPattern) {
+		throw new AgentQueryError("invalid-input", "wildcardHexPattern conflicts with scope.wildcardHexPattern");
+	}
+	const sectionId = mergeScopedValue(directSectionId, reportScope.sectionId, "sectionId");
+	const frameLength = mergeScopedValue(directFrameLength, reportScope.frameLength, "frameLength");
+	const direction = mergeScopedValue(directDirection, reportScope.direction, "direction");
+	const exactSignature = mergeScopedValue(directSignature, reportScope.exactSignature, "exactSignature");
+	const effectiveWildcard = wildcard ?? (reportScope.wildcardHexPattern === undefined ? undefined : {
+		pattern: reportScope.wildcardHexPattern,
+		tokens: reportScope.wildcardTokens ?? []
+	});
 	const hidden = input.hidden ?? "include";
 	const notePresence = input.notePresence ?? "any";
 	return {
@@ -999,10 +1034,11 @@ function normalizeMessageFilters(input: AgentMessageQueryInput): NormalizedMessa
 		...(rawOffsetTo === undefined ? {} : { rawOffsetTo }),
 		...(timestampFrom === undefined ? {} : { timestampFrom }),
 		...(timestampTo === undefined ? {} : { timestampTo }),
-		...(input.sectionId ? { sectionId: requiredText(input.sectionId, "sectionId") } : {}),
-		...(input.direction ? { direction: requiredText(input.direction, "direction").toLowerCase() } : {}),
-		...(normalizedSignature(input.exactSignature ?? input.signature, "exactSignature") ? { exactSignature: normalizedSignature(input.exactSignature ?? input.signature, "exactSignature") } : {}),
-		...(wildcard ? { wildcardHexPattern: wildcard.pattern, wildcardTokens: wildcard.tokens } : {}),
+		...(sectionId === undefined ? {} : { sectionId }),
+		...(frameLength === undefined ? {} : { frameLength }),
+		...(direction === undefined ? {} : { direction }),
+		...(exactSignature === undefined ? {} : { exactSignature }),
+		...(effectiveWildcard ? { wildcardHexPattern: effectiveWildcard.pattern, wildcardTokens: effectiveWildcard.tokens } : {}),
 		hidden,
 		notePresence,
 		...(input.sequenceGroupId ? { sequenceGroupId: requiredText(input.sequenceGroupId, "sequenceGroupId") } : {})
@@ -1046,15 +1082,19 @@ function publicProtocolReportScope(scope: NormalizedDifferentialScope): AgentPro
 	};
 }
 
-function protocolReportSections(input: AgentProtocolReportInput["include"]): readonly AgentProtocolReportSection[] {
-	const sections = input === undefined
-		? ["frame-families", "invariants", "variable-bits", "transitions", "sequences", "differential-candidates"] as const
-		: [...new Set(input)];
+function protocolReportSections(
+	input: AgentProtocolReportInput["include"],
+	hasDifferentialAnalysis = false
+): readonly AgentProtocolReportSection[] {
+	const sections = (input === undefined
+		? ["frame-families", "invariants", "variable-bits", "transitions", "sequences", "differential-candidates"]
+		: [...new Set(input)]) as AgentProtocolReportSection[];
 	const allowed = new Set(["frame-families", "invariants", "variable-bits", "transitions", "sequences", "differential-candidates"]);
 	if (!sections.length) throw new AgentQueryError("invalid-input", "include must contain at least one report section");
 	if (sections.some(section => !allowed.has(section))) {
 		throw new AgentQueryError("invalid-input", "include contains an unsupported report section", { include: sections });
 	}
+	if (hasDifferentialAnalysis && !sections.includes("differential-candidates")) sections.push("differential-candidates");
 	if (sections.length > 6) throw new AgentQueryError("invalid-input", "include contains too many report sections", { maximum: 6 });
 	return sections as readonly AgentProtocolReportSection[];
 }
@@ -1095,9 +1135,32 @@ function reportPercentage(count: number, total: number): number {
 	return total ? Math.round((count / total) * 100) : 0;
 }
 
+function boundedProtocolReportText(value: string, maximum: number): { value: string; length: number; digest?: string; truncated: boolean } {
+	if (value.length <= maximum) return { value, length: value.length, truncated: false };
+	const digest = createHash("sha256").update(value, "utf8").digest("hex").slice(0, 16);
+	return { value: `[sha256:${digest};length:${value.length}]`, length: value.length, digest, truncated: true };
+}
+
+function protocolReportScopeArguments(scope: AgentProtocolReportScope): Record<string, unknown> {
+	return Object.keys(scope).length ? { scope } : {};
+}
+
+function protocolReportFollowUpContext(
+	snapshotArguments: Readonly<Record<string, unknown>>,
+	scope: AgentProtocolReportScope,
+	hiddenPolicy: AgentHiddenPolicy
+): Record<string, unknown> {
+	return {
+		...snapshotArguments,
+		...protocolReportScopeArguments(scope),
+		hidden: hiddenPolicy
+	};
+}
+
 function byteStatisticsFramePredicate(
 	normalizedScope: NormalizedByteStatisticsScope,
-	alias = "frames"
+	alias = "frames",
+	hiddenPolicy: AgentHiddenPolicy = "include"
 ): { sql: string; params: Record<string, unknown> } {
 	const clauses: string[] = [];
 	const params: Record<string, unknown> = {};
@@ -1127,6 +1190,8 @@ function byteStatisticsFramePredicate(
 			params[`scopeWildcard${index}`] = token;
 		});
 	}
+	if (hiddenPolicy === "visible-only") clauses.push(`${alias}.hidden = 0`);
+	if (hiddenPolicy === "hidden-only") clauses.push(`${alias}.hidden = 1`);
 	return { sql: clauses.length ? ` AND ${clauses.join(" AND ")}` : "", params };
 }
 
@@ -1885,6 +1950,7 @@ export class CanonicalQueryService {
 			params.rawOffsetTo = filters.rawOffsetTo;
 		}
 		if (filters.sectionId) { clauses.push("section_id = @sectionId"); params.sectionId = filters.sectionId; }
+		if (filters.frameLength !== undefined) { clauses.push("json_array_length(bytes_json) = @frameLength"); params.frameLength = filters.frameLength; }
 		if (filters.exactSignature) { clauses.push("signature = @exactSignature"); params.exactSignature = filters.exactSignature; }
 		if (filters.hidden === "visible-only") clauses.push("hidden = 0");
 		if (filters.hidden === "hidden-only") clauses.push("hidden = 1");
@@ -2138,6 +2204,12 @@ export class CanonicalQueryService {
 		if (!group) throw new AgentQueryError("evidence-missing", "The requested sequence group is no longer available", { groupId });
 		if (input.captureId && input.captureId !== group.capture_id) throw new AgentQueryError("snapshot-mismatch", "The sequence group does not belong to the requested capture", { groupId, captureId: input.captureId });
 		const captureId = group.capture_id;
+		const normalizedScope = normalizeDifferentialScope(input.scope);
+		const publicScope = publicProtocolReportScope(normalizedScope);
+		const hiddenPolicy = input.hidden ?? "include";
+		if (hiddenPolicy !== "include" && hiddenPolicy !== "visible-only" && hiddenPolicy !== "hidden-only") {
+			throw new AgentQueryError("invalid-input", "hidden must be include, visible-only, or hidden-only", { hidden: hiddenPolicy });
+		}
 		const requestedSnapshot: Partial<AgentSnapshotReference> = {
 			profileId: input.profileId ?? group.profile_id,
 			...(input.profileVersion === undefined ? {} : { profileVersion: optionalNonNegativeInteger(input.profileVersion, "profileVersion") }),
@@ -2146,7 +2218,7 @@ export class CanonicalQueryService {
 		const includeContext = Boolean(input.includeContext);
 		const contextBefore = includeContext ? boundedLimit(input.contextBefore, 3, 10, "contextBefore") : 0;
 		const contextAfter = includeContext ? boundedLimit(input.contextAfter, 3, 10, "contextAfter") : 0;
-		const filterScope = { captureId, groupId, includeContext, contextBefore, contextAfter, requestedSnapshot };
+		const filterScope = { captureId, groupId, scope: publicScope, hidden: hiddenPolicy, includeContext, contextBefore, contextAfter, requestedSnapshot };
 		const cursorPayload = input.cursor ? decodeAgentCursor(input.cursor, "sequence-occurrences", ["occurrenceNumber", "id"]) : undefined;
 		if (cursorPayload) assertCursorFilters(cursorPayload, filterScope, cursorPayload.snapshot);
 		const requested = cursorPayload?.snapshot ? { ...cursorPayload.snapshot, ...requestedSnapshot } : requestedSnapshot;
@@ -2154,7 +2226,25 @@ export class CanonicalQueryService {
 		if (profile.id !== group.profile_id) throw new AgentQueryError("snapshot-mismatch", "The sequence group belongs to a different profile revision", { groupId, profileId: group.profile_id });
 		if (cursorPayload && stableJson(cursorPayload.snapshot) !== stableJson(snapshot)) throw new AgentQueryError("invalid-cursor", "The pagination cursor is bound to a different profile revision", { reason: "snapshot-mismatch" });
 		const limit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT);
-		const params: Record<string, unknown> = { groupId, limit: limit + 1 };
+		const scopePredicate = differentialFramePredicate(normalizedScope, "sequenceOccurrenceScope", "frames");
+		const hiddenPredicate = hiddenPolicy === "visible-only"
+			? " AND frames.hidden = 0"
+			: hiddenPolicy === "hidden-only"
+				? " AND frames.hidden = 1"
+				: "";
+		const occurrenceFrameCount = `(SELECT COUNT(*)
+			FROM materialized_frames frames
+			WHERE frames.profile_id = @profileId
+			  AND frames.ordinal >= sequence_occurrences.start_frame_ordinal
+			  AND frames.ordinal < sequence_occurrences.start_frame_ordinal + sequence_occurrences.length)`;
+		const matchingOccurrenceFrameCount = `(SELECT COUNT(*)
+			FROM materialized_frames frames
+			WHERE frames.profile_id = @profileId
+			  AND frames.ordinal >= sequence_occurrences.start_frame_ordinal
+			  AND frames.ordinal < sequence_occurrences.start_frame_ordinal + sequence_occurrences.length
+			  ${scopePredicate.sql}${hiddenPredicate})`;
+		const safeOccurrence = `${occurrenceFrameCount} = sequence_occurrences.length AND ${matchingOccurrenceFrameCount} = sequence_occurrences.length`;
+		const params: Record<string, unknown> = { groupId, profileId: profile.id, ...scopePredicate.params, limit: limit + 1 };
 		const cursorSql = cursorPayload ? " AND occurrence_index > @cursorOccurrenceNumber" : "";
 		if (cursorPayload) params.cursorOccurrenceNumber = cursorPayload.key.occurrenceNumber;
 		const rows = this.database.prepare(
@@ -2164,6 +2254,7 @@ export class CanonicalQueryService {
 			        MAX(end_raw_offset) AS end_raw_offset
 			 FROM sequence_occurrences
 			 WHERE group_id = @groupId${cursorSql}
+			   AND ${safeOccurrence}
 			 GROUP BY occurrence_index
 			 ORDER BY occurrence_index ASC
 			 LIMIT @limit`
@@ -2175,13 +2266,26 @@ export class CanonicalQueryService {
 				if (firstStartingFrameId === undefined && frame) firstStartingFrameId = frame.id;
 				let context: readonly AgentMessage[] | undefined;
 				if (input.includeContext) {
+					const contextPredicate = differentialFramePredicate(normalizedScope, "sequenceContext", "frames");
+					const contextHiddenPredicate = hiddenPolicy === "visible-only"
+						? " AND frames.hidden = 0"
+						: hiddenPolicy === "hidden-only"
+							? " AND frames.hidden = 1"
+							: "";
 					const contextRows = this.database.prepare(
 						`SELECT id, capture_id, profile_id, ordinal, section_id, raw_offsets_json, bytes_json,
 						        timestamps_json, directions_json, hidden, signature
-						 FROM materialized_frames
-						 WHERE profile_id = @profileId AND ordinal BETWEEN @startOrdinal AND @endOrdinal
+						 FROM materialized_frames AS frames
+						 WHERE frames.profile_id = @profileId AND frames.ordinal BETWEEN @startOrdinal AND @endOrdinal
+						   ${contextPredicate.sql}${contextHiddenPredicate}
 						 ORDER BY ordinal ASC, id ASC LIMIT @limit`
-					).all({ profileId: profile.id, startOrdinal: Math.max(0, row.starting_ordinal - contextBefore), endOrdinal: row.starting_ordinal + contextAfter, limit: contextBefore + contextAfter + 1 }) as AnalysisFrameRow[];
+					).all({
+						profileId: profile.id,
+						startOrdinal: Math.max(0, row.starting_ordinal - contextBefore),
+						endOrdinal: row.starting_ordinal + contextAfter,
+						limit: contextBefore + contextAfter + 1,
+						...contextPredicate.params
+					}) as AnalysisFrameRow[];
 					context = this.mapAnalysisMessages(contextRows, contextRows.length ? this.previousFrameTimestamp(profile.id, contextRows[0].ordinal) : null);
 				}
 				return {
@@ -2207,7 +2311,9 @@ export class CanonicalQueryService {
 				nextCursor,
 				truncationReason: page.truncationReason,
 				truncated: hasMore,
-				suggestedOperations: firstStartingFrameId ? [{ tool: "get_message_context", reason: "Inspect a frame near this occurrence", arguments: { frameId: firstStartingFrameId } }] : []
+				suggestedOperations: firstStartingFrameId && hiddenPolicy === "include" && Object.keys(publicScope).length === 0
+					? [{ tool: "get_message_context", reason: "Inspect a frame near this occurrence", arguments: { frameId: firstStartingFrameId } }]
+					: []
 			});
 		});
 	}
@@ -2245,11 +2351,11 @@ export class CanonicalQueryService {
 		const rows = this.database.prepare(
 			`SELECT id, capture_id, profile_id, ordinal, section_id, raw_offsets_json, bytes_json,
 			        timestamps_json, directions_json, hidden, signature
-			 FROM materialized_frames
-			 WHERE profile_id = @profileId
+			 FROM materialized_frames AS frames
+			 WHERE frames.profile_id = @profileId${predicate.sql}${hiddenPredicate}
 			 ORDER BY ordinal ASC, id ASC
 			 LIMIT @limit`
-		).all({ profileId, limit: MAX_PROTOCOL_REPORT_FRAMES + 1 }) as ProtocolReportFrameRow[];
+		).all({ ...baseParameters, limit: MAX_PROTOCOL_REPORT_FRAMES + 1 }) as ProtocolReportFrameRow[];
 		return {
 			totalFrameCount,
 			scopeMatchedFrameCount,
@@ -2265,7 +2371,9 @@ export class CanonicalQueryService {
 		scope: NormalizedDifferentialScope,
 		hiddenPolicy: AgentHiddenPolicy,
 		minimumSupport: number,
-		limit: number
+		limit: number,
+		textMaximum: number,
+		signatureMaximum: number
 	): { sequences: AgentProtocolSequence[]; truncated: boolean } {
 		const predicate = differentialFramePredicate(scope, "protocolSequence", "frames");
 		const hiddenPredicate = hiddenPolicy === "visible-only"
@@ -2273,17 +2381,37 @@ export class CanonicalQueryService {
 			: hiddenPolicy === "hidden-only"
 				? " AND frames.hidden = 1"
 				: "";
+		// A sequence key and signature list describe the complete group, not just
+		// the frames that happen to match a report filter. Emit a group only when
+		// every frame in every occurrence satisfies the scope and hidden policy;
+		// otherwise a partial summary could disclose excluded identities/content.
+		const occurrenceFrameCountSql = `(
+			SELECT COUNT(*)
+			 FROM materialized_frames frames
+			 WHERE frames.profile_id = @profileId
+			   AND frames.ordinal >= occurrences.start_frame_ordinal
+			   AND frames.ordinal < occurrences.start_frame_ordinal + occurrences.length
+		)`;
+		const matchingOccurrenceFrameCountSql = `(
+			SELECT COUNT(*)
+			 FROM materialized_frames frames
+			 WHERE frames.profile_id = @profileId
+			   AND frames.ordinal >= occurrences.start_frame_ordinal
+			   AND frames.ordinal < occurrences.start_frame_ordinal + occurrences.length
+			   ${predicate.sql}${hiddenPredicate}
+		)`;
+		const safeOccurrenceSql = `${occurrenceFrameCountSql} = occurrences.length AND ${matchingOccurrenceFrameCountSql} = occurrences.length`;
 		const occurrenceCountSql = `(
 			SELECT COUNT(DISTINCT occurrences.occurrence_index)
 			 FROM sequence_occurrences occurrences
 			 WHERE occurrences.group_id = groups.id
-			   AND EXISTS (
-				   SELECT 1 FROM materialized_frames frames
-				   WHERE frames.profile_id = @profileId
-				     AND frames.ordinal >= occurrences.start_frame_ordinal
-				     AND frames.ordinal < occurrences.start_frame_ordinal + occurrences.length
-				     ${predicate.sql}${hiddenPredicate}
-			   )
+			   AND ${safeOccurrenceSql}
+		)`;
+		const groupHasOnlySafeOccurrencesSql = `NOT EXISTS (
+			SELECT 1
+			 FROM sequence_occurrences occurrences
+			 WHERE occurrences.group_id = groups.id
+			   AND NOT (${safeOccurrenceSql})
 		)`;
 		const rows = this.database.prepare(
 			`SELECT groups.id, groups.key_text, groups.signatures_json, groups.length,
@@ -2291,6 +2419,7 @@ export class CanonicalQueryService {
 			 FROM sequence_groups groups
 			 WHERE groups.profile_id = @profileId
 			   AND ${occurrenceCountSql} > 0
+			   AND ${groupHasOnlySafeOccurrencesSql}
 			 ORDER BY occurrence_count DESC, groups.score DESC, groups.id ASC
 			 LIMIT @limit`
 		).all({ profileId, ...predicate.params, limit: limit + 1 }) as Array<{
@@ -2302,6 +2431,7 @@ export class CanonicalQueryService {
 			score: number;
 		}>;
 		const pageRows = rows.slice(0, limit);
+		let textTruncated = false;
 		const sequences: AgentProtocolSequence[] = pageRows.map(row => {
 			const occurrenceCount = row.occurrence_count;
 			const sections = this.database.prepare(
@@ -2315,24 +2445,38 @@ export class CanonicalQueryService {
 				   AND frames.profile_id = @profileId${predicate.sql}${hiddenPredicate}
 				 ORDER BY frames.section_id`
 			).all({ profileId, groupId: row.id, ...predicate.params }) as Array<{ section_id: string }>;
+			const key = boundedProtocolReportText(row.key_text, textMaximum);
+			const rawSignatures = jsonArray<string>(row.signatures_json);
+			const signatureValues = rawSignatures.slice(0, signatureMaximum).map(signature => boundedProtocolReportText(String(signature), textMaximum));
+			const signaturesTruncated = rawSignatures.length > signatureValues.length || signatureValues.some(signature => signature.truncated);
+			textTruncated ||= key.truncated || signaturesTruncated;
 			return {
 				id: row.id,
-				key: row.key_text,
-				signatures: jsonArray<string>(row.signatures_json),
+				key: key.value,
+				...(key.truncated ? { keyLength: key.length, keyDigest: key.digest } : {}),
+				signatures: signatureValues.map(signature => signature.value),
+				signatureCount: rawSignatures.length,
+				...(signaturesTruncated ? { signaturesTruncated: true } : {}),
 				length: row.length,
 				occurrenceCount,
 				sections: sections.map(section => section.section_id),
 				classification: occurrenceCount >= minimumSupport ? "observed" : "insufficient-evidence"
 			};
 		});
-		return { sequences, truncated: rows.length > pageRows.length };
+		return { sequences, truncated: rows.length > pageRows.length || textTruncated };
 	}
 
 	getProtocolReport(input: AgentProtocolReportInput): AgentResponse<AgentProtocolReportResult> {
+		const reportInputRecord = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+		for (const field of ["cursor", "limit"] as const) {
+			if (field in reportInputRecord) {
+				throw new AgentQueryError("invalid-input", `get_protocol_report is non-pageable; ${field} is not accepted`, { field });
+			}
+		}
 		const snapshot = this.resolveDifferentialSnapshot(input?.snapshot);
 		const normalizedScope = normalizedProtocolReportScope(input.scope);
 		const scope = publicProtocolReportScope(normalizedScope);
-		const include = protocolReportSections(input.include);
+		const include = protocolReportSections(input.include, input.differentialAnalysis !== undefined);
 		const detail = input.detail ?? "standard";
 		if (detail !== "compact" && detail !== "standard") {
 			throw new AgentQueryError("invalid-input", "detail must be compact or standard", { detail });
@@ -2345,6 +2489,8 @@ export class CanonicalQueryService {
 		const caps = detail === "compact"
 			? { families: 32, positions: 48, transitions: 24, sequences: 16, candidates: 8 }
 			: { families: MAX_PROTOCOL_REPORT_FAMILIES, positions: MAX_PROTOCOL_REPORT_INVARIANTS, transitions: MAX_PROTOCOL_REPORT_TRANSITIONS, sequences: MAX_PROTOCOL_REPORT_SEQUENCES, candidates: MAX_PROTOCOL_REPORT_CANDIDATES };
+		const reportTextMaximum = detail === "compact" ? MAX_PROTOCOL_REPORT_COMPACT_TEXT : MAX_PROTOCOL_REPORT_STANDARD_TEXT;
+		const sequenceSignatureMaximum = detail === "compact" ? MAX_PROTOCOL_REPORT_COMPACT_SEQUENCE_SIGNATURES : MAX_PROTOCOL_REPORT_STANDARD_SEQUENCE_SIGNATURES;
 		const read = this.readProtocolReportFrames(snapshot.profileId, normalizedScope, hiddenPolicy);
 		const sampledFrames = read.rows.map(row => ({
 			row,
@@ -2381,6 +2527,7 @@ export class CanonicalQueryService {
 		const invariantBits: AgentProtocolInvariantBit[] = [];
 		const variableBytes: AgentProtocolVariableByte[] = [];
 		const variableBits: AgentProtocolVariableBit[] = [];
+		let reportTextTruncated = false;
 
 		for (const bucket of orderedBuckets) {
 			const signatures = new Map<string, number>();
@@ -2389,10 +2536,17 @@ export class CanonicalQueryService {
 				signatures.set(frame.row.signature, (signatures.get(frame.row.signature) ?? 0) + 1);
 			}
 			for (const [signature, count] of [...signatures.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))) {
+				const boundedSignature = boundedProtocolReportText(signature, reportTextMaximum);
+				reportTextTruncated ||= boundedSignature.truncated;
 				frameFamilies.push({
 					sectionId: bucket.sectionId,
 					frameLength: bucket.frameLength,
-					signature,
+					signature: boundedSignature.value,
+					...(boundedSignature.truncated ? {
+						signatureLength: boundedSignature.length,
+						signatureDigest: boundedSignature.digest,
+						signatureTruncated: true
+					} : {}),
 					count,
 					percentage: reportPercentage(count, bucket.frameCount),
 					classification: bucketHasSufficientEvidence(bucket) ? "observed" : "insufficient-evidence"
@@ -2401,7 +2555,7 @@ export class CanonicalQueryService {
 			for (const [position, stats] of bucket.positions) {
 				const sufficient = bucketHasSufficientEvidence(bucket) && stats.applicableFrameCount >= minimumSupport;
 				const values = reportValueCounts(stats.values);
-				if (values.length === 1 && sufficient) {
+				if (values.length === 1) {
 					invariantBytes.push({
 						sectionId: bucket.sectionId,
 						frameLength: bucket.frameLength,
@@ -2409,21 +2563,23 @@ export class CanonicalQueryService {
 						value: values[0]!.value,
 						count: values[0]!.count,
 						applicableFrameCount: stats.applicableFrameCount,
-						classification: "stable"
+						classification: sufficient ? "stable" : "insufficient-evidence"
 					});
-				} else if (values.length > 1 || !sufficient) {
+				} else {
 					variableBytes.push({
 						sectionId: bucket.sectionId,
 						frameLength: bucket.frameLength,
 						position,
 						values,
 						applicableFrameCount: stats.applicableFrameCount,
-						classification: values.length > 1 && sufficient ? "variable" : "insufficient-evidence"
+						classification: sufficient ? "variable" : "insufficient-evidence"
 					});
 				}
 				for (let bit = 0; bit < 8; bit += 1) {
-					const onePercentage = reportPercentage(stats.oneCounts[bit] ?? 0, stats.applicableFrameCount);
-					if ((onePercentage === 0 || onePercentage === 100) && sufficient) {
+					const oneCount = stats.oneCounts[bit] ?? 0;
+					const onePercentage = reportPercentage(oneCount, stats.applicableFrameCount);
+					const rawBitIsStable = oneCount === 0 || oneCount === stats.applicableFrameCount;
+					if (rawBitIsStable) {
 						invariantBits.push({
 							sectionId: bucket.sectionId,
 							frameLength: bucket.frameLength,
@@ -2431,9 +2587,9 @@ export class CanonicalQueryService {
 							bit,
 							onePercentage,
 							applicableFrameCount: stats.applicableFrameCount,
-							classification: "stable"
+							classification: sufficient ? "stable" : "insufficient-evidence"
 						});
-					} else if ((onePercentage > 0 && onePercentage < 100) || !sufficient) {
+					} else {
 						variableBits.push({
 							sectionId: bucket.sectionId,
 							frameLength: bucket.frameLength,
@@ -2441,7 +2597,7 @@ export class CanonicalQueryService {
 							bit,
 							onePercentage,
 							applicableFrameCount: stats.applicableFrameCount,
-							classification: onePercentage > 0 && onePercentage < 100 && sufficient ? "variable" : "insufficient-evidence"
+							classification: sufficient ? "variable" : "insufficient-evidence"
 						});
 					}
 				}
@@ -2478,10 +2634,23 @@ export class CanonicalQueryService {
 			transitions = allTransitionGroups.slice(0, caps.transitions).map(group => {
 				const positions = [...group.positions.entries()].sort((left, right) => left[0] - right[0]);
 				const boundedPositions = positions.slice(0, MAX_TRANSITION_CHANGED_POSITION_SET);
+				const boundedFromSignature = boundedProtocolReportText(group.fromSignature, reportTextMaximum);
+				const boundedToSignature = boundedProtocolReportText(group.toSignature, reportTextMaximum);
+				reportTextTruncated ||= boundedFromSignature.truncated || boundedToSignature.truncated;
 				return {
 					sectionId: group.sectionId,
-					fromSignature: group.fromSignature,
-					toSignature: group.toSignature,
+					fromSignature: boundedFromSignature.value,
+					...(boundedFromSignature.truncated ? {
+						fromSignatureLength: boundedFromSignature.length,
+						fromSignatureDigest: boundedFromSignature.digest,
+						fromSignatureTruncated: true
+					} : {}),
+					toSignature: boundedToSignature.value,
+					...(boundedToSignature.truncated ? {
+						toSignatureLength: boundedToSignature.length,
+						toSignatureDigest: boundedToSignature.digest,
+						toSignatureTruncated: true
+					} : {}),
 					count: group.transitionCount,
 					transitionCount: group.transitionCount,
 					changedPositionCounts: boundedPositions.map(([position, changedCount]) => ({ position, changedCount })),
@@ -2497,7 +2666,7 @@ export class CanonicalQueryService {
 		let sequences: AgentProtocolSequence[] | undefined;
 		let sequenceTruncated = false;
 		if (include.includes("sequences")) {
-			const sequenceResult = this.readProtocolReportSequences(snapshot.profileId, normalizedScope, hiddenPolicy, minimumSupport, caps.sequences);
+			const sequenceResult = this.readProtocolReportSequences(snapshot.profileId, normalizedScope, hiddenPolicy, minimumSupport, caps.sequences, reportTextMaximum, sequenceSignatureMaximum);
 			sequences = sequenceResult.sequences;
 			sequenceTruncated = sequenceResult.truncated;
 		}
@@ -2505,25 +2674,31 @@ export class CanonicalQueryService {
 		let differentialCandidates: AgentProtocolReportResult["differentialCandidates"];
 		let differential: AgentProtocolReportResult["differential"];
 		let differentialTruncated = false;
+		let differentialFollowUpInput: AgentCaptureDifferenceInput | undefined;
 		const differentialInput = input.differentialAnalysis;
 		if (include.includes("differential-candidates")) {
 			differentialCandidates = [];
 			if (differentialInput) {
+				const differentialScope = normalizeDifferentialScope(differentialInput.scope === undefined ? normalizedScope : differentialInput.scope);
+				const differentialMinimumSupport = differentialInput.minimumSupport === undefined
+					? minimumSupport
+					: boundedLimit(differentialInput.minimumSupport, 1, MAX_DIFFERENTIAL_FRAMES, "differentialAnalysis.minimumSupport");
 				const normalizeDifferentialSide = (side: NonNullable<AgentProtocolReportInput["differentialAnalysis"]>["baseline"]): AgentCaptureDifferenceInput["baseline"] => {
 					const sideHidden = side.filters?.hidden;
 					if (sideHidden !== undefined && sideHidden !== hiddenPolicy) {
 						throw new AgentQueryError("invalid-input", "Differential hidden policy must match the report hidden policy", { reportHidden: hiddenPolicy, differentialHidden: sideHidden });
 					}
-					return { ...side, filters: { ...(side.filters ?? {}), hidden: hiddenPolicy } };
+					const filters = normalizeDifferentialMessageFilters({ ...(side.filters ?? {}), hidden: hiddenPolicy });
+					return { snapshot: this.resolveDifferentialSnapshot(side.snapshot), label: side.label, filters };
 				};
-				const differentialResponse = this.analyzeCaptureDifference({
+				differentialFollowUpInput = {
 					baseline: normalizeDifferentialSide(differentialInput.baseline),
 					changed: normalizeDifferentialSide(differentialInput.changed),
 					alignment: differentialInput.alignment,
-					scope: differentialInput.scope ?? scope,
-					minimumSupport: differentialInput.minimumSupport ?? minimumSupport,
-					limit: caps.candidates
-				});
+					scope: differentialScope,
+					minimumSupport: differentialMinimumSupport
+				};
+				const differentialResponse = this.analyzeCaptureDifference({ ...differentialFollowUpInput, limit: caps.candidates });
 				differentialCandidates = differentialResponse.data.candidateFields.slice(0, caps.candidates).map(candidate => ({ ...candidate, classification: "candidate" as const })) as AgentProtocolCandidate[];
 				differential = {
 					baseline: differentialResponse.data.baseline,
@@ -2533,14 +2708,14 @@ export class CanonicalQueryService {
 					changedUnpairedFrameCount: differentialResponse.data.alignment.changedUnpairedFrameCount,
 					insertedFrameCount: differentialResponse.data.alignment.insertedFrameCount,
 					deletedFrameCount: differentialResponse.data.alignment.deletedFrameCount,
-					minimumSupport: differentialInput.minimumSupport ?? minimumSupport,
+					minimumSupport: differentialMinimumSupport,
 					truncated: differentialResponse.meta.truncated || differentialResponse.data.differenceSummary.truncated
 				};
 				differentialTruncated = differential.truncated;
 			}
 		}
 
-		const evidenceTruncated = read.truncated || transitionTruncated || sequenceTruncated || differentialTruncated
+		const evidenceTruncated = read.truncated || reportTextTruncated || transitionTruncated || sequenceTruncated || differentialTruncated
 			|| frameFamilies.length > caps.families || invariantBytes.length > caps.positions || invariantBits.length > caps.positions
 			|| variableBytes.length > caps.positions || variableBits.length > caps.positions;
 		const evidenceQuality = {
@@ -2562,13 +2737,28 @@ export class CanonicalQueryService {
 			profileVersion: snapshot.profileVersion,
 			sourceDataRevision: snapshot.sourceDataRevision
 		};
-		const scopeArguments = scope as Record<string, unknown>;
+		const reportFollowUpContext = protocolReportFollowUpContext(snapshotArguments, scope, hiddenPolicy);
+		const directScopeArguments = scope as Record<string, unknown>;
+		const transitionFollowUpAllowed = include.includes("transitions")
+			&& hiddenPolicy === "include"
+			&& Object.keys(scope).every(key => key === "sectionId");
 		const followUpOperations = [
-			{ tool: "query_messages", reason: "Inspect bounded frames that produced this snapshot report", arguments: { ...snapshotArguments, ...scopeArguments, hidden: hiddenPolicy, limit: 50 } },
-			...(include.includes("transitions") ? [{ tool: "get_transitions", reason: "Inspect common adjacent transitions from the pinned profile", arguments: { ...snapshotArguments, ...(scope.sectionId ? { sectionId: scope.sectionId } : {}), limit: 50 } }] : []),
-			...(include.includes("variable-bits") && variableBytes.length ? [{ tool: "get_byte_statistics", reason: "Inspect exact vocabulary and bit percentages for the bounded variable positions", arguments: { ...snapshotArguments, positions: [...new Set(variableBytes.slice(0, 32).map(item => item.position))], scope } }] : []),
-			...(include.includes("sequences") && sequences?.length ? [{ tool: "get_sequence_occurrences", reason: "Inspect occurrences of the first repeated sequence summary", arguments: { ...snapshotArguments, groupId: sequences[0]!.id, limit: 50 } }] : []),
-			...(differentialInput ? [{ tool: "analyze_capture_difference", reason: "Inspect the bounded differential candidate page with the same labelled snapshots", arguments: { ...differentialInput, scope: differentialInput.scope ?? scope, limit: caps.candidates } }] : [])
+			{ tool: "query_messages", reason: "Inspect bounded frames that produced this snapshot report", arguments: { ...reportFollowUpContext, ...directScopeArguments, limit: 50 } },
+			...(transitionFollowUpAllowed ? [{ tool: "get_transitions", reason: "Inspect common adjacent transitions from the pinned profile", arguments: { ...snapshotArguments, ...(scope.sectionId ? { sectionId: scope.sectionId } : {}), minimumCount: minimumSupport, limit: 50 } }] : []),
+			...(include.includes("variable-bits") && variableBytes.length ? [{ tool: "get_byte_statistics", reason: "Inspect exact vocabulary and bit percentages for the bounded variable positions", arguments: { ...reportFollowUpContext, positions: [...new Set(variableBytes.slice(0, 32).map(item => item.position))] } }] : []),
+			...(include.includes("sequences") && sequences?.length ? [{ tool: "get_sequence_occurrences", reason: "Inspect occurrences of the first repeated sequence summary", arguments: { ...reportFollowUpContext, groupId: sequences[0]!.id, limit: 50 } }] : []),
+			...(differentialFollowUpInput ? [{
+				tool: "analyze_capture_difference",
+				reason: "Inspect the bounded differential candidate page with the same labelled snapshots",
+				arguments: {
+					baseline: differentialFollowUpInput.baseline,
+					changed: differentialFollowUpInput.changed,
+					alignment: differentialFollowUpInput.alignment,
+					...(Object.keys(differentialFollowUpInput.scope ?? {}).length ? { scope: differentialFollowUpInput.scope } : {}),
+					minimumSupport: differentialFollowUpInput.minimumSupport,
+					limit: caps.candidates
+				}
+			}] : [])
 		].slice(0, 6) as AgentProtocolReportResult["followUpOperations"];
 		const baseData: AgentProtocolReportResult = {
 			snapshot,
@@ -2621,7 +2811,11 @@ export class CanonicalQueryService {
 		if (input.positions.length > 32) throw new AgentQueryError("invalid-input", "At most 32 byte positions may be requested", { maximum: 32 });
 		const positions = [...new Set(input.positions.map((position, index) => optionalNonNegativeInteger(position, `positions[${index}]`) as number))].sort((left, right) => left - right);
 		const normalizedScope = normalizeByteStatisticsScope(input.scope);
-		const scoped = Object.keys(normalizedScope.scope).length > 0;
+		const hiddenPolicy = input.hidden ?? "include";
+		if (hiddenPolicy !== "include" && hiddenPolicy !== "visible-only" && hiddenPolicy !== "hidden-only") {
+			throw new AgentQueryError("invalid-input", "hidden must be include, visible-only, or hidden-only", { hidden: hiddenPolicy });
+		}
+		const scoped = Object.keys(normalizedScope.scope).length > 0 || hiddenPolicy !== "include";
 		const requested: Partial<AgentSnapshotReference> = {
 			...(input.profileId ? { profileId: requiredText(input.profileId, "profileId") } : {}),
 			...(input.profileVersion === undefined ? {} : { profileVersion: optionalNonNegativeInteger(input.profileVersion, "profileVersion") }),
@@ -2655,7 +2849,7 @@ export class CanonicalQueryService {
 				varianceByPosition.set(row.position, row.variance);
 			}
 		} else {
-			const predicate = byteStatisticsFramePredicate(normalizedScope, "frames");
+			const predicate = byteStatisticsFramePredicate(normalizedScope, "frames", hiddenPolicy);
 			const frameParameters = { profileId: profile.id, ...predicate.params };
 			matchedFrameCount = (this.database.prepare(
 				`SELECT COUNT(*) AS count FROM materialized_frames AS frames
@@ -2719,13 +2913,29 @@ export class CanonicalQueryService {
 		};
 		const response = makeAgentResponse({
 			data,
-			appliedFilters: { captureId, positions, scope: normalizedScope.scope },
+			appliedFilters: {
+				captureId,
+				positions,
+				scope: normalizedScope.scope,
+				hidden: hiddenPolicy
+			},
 			snapshot,
 			requestedLimit: positions.length,
 			effectiveLimit: positions.length,
 			returned: positions.length,
 			truncated: false,
-			suggestedOperations: [{ tool: "query_messages", reason: "Relate byte variation to the bounded frames that contain it", arguments: { captureId, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision } }]
+			suggestedOperations: [{
+				tool: "query_messages",
+				reason: "Relate byte variation to the bounded frames that contain it",
+				arguments: {
+					captureId,
+					profileId: snapshot.profileId,
+					profileVersion: snapshot.profileVersion,
+					sourceDataRevision: snapshot.sourceDataRevision,
+					...(Object.keys(normalizedScope.scope).length ? { scope: normalizedScope.scope } : {}),
+					hidden: hiddenPolicy
+				}
+			}]
 		});
 		assertEncodedResponseSize(response);
 		return response;

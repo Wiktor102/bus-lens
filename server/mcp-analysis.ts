@@ -26,6 +26,14 @@ import type { McpQueryExecutor } from "./mcp-query-executor.ts";
 
 type RecordClient = (context: unknown, server: McpServer) => void;
 
+const differentialScopeSchema = z.object({
+	sectionId: z.string().min(1).optional(),
+	frameLength: z.number().int().positive().optional(),
+	exactSignature: z.string().min(1).optional(),
+	wildcardHexPattern: z.string().min(1).optional(),
+	direction: z.string().min(1).optional()
+});
+
 const transitionCommonInputShape = {
 	captureId: z.string().min(1),
 	profileId: z.string().optional(),
@@ -87,14 +95,6 @@ const differentialMessageFiltersSchema = z.object({
 	hidden: z.enum(["include", "visible-only", "hidden-only"]).optional(),
 	notePresence: z.enum(["any", "with-note", "without-note"]).optional(),
 	sequenceGroupId: z.string().min(1).optional()
-});
-
-const differentialScopeSchema = z.object({
-	sectionId: z.string().min(1).optional(),
-	frameLength: z.number().int().positive().optional(),
-	exactSignature: z.string().min(1).optional(),
-	wildcardHexPattern: z.string().min(1).optional(),
-	direction: z.string().min(1).optional()
 });
 
 const differentialInputSchema = z.object({
@@ -333,9 +333,11 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 			timestampFrom: z.number().finite().optional(),
 			timestampTo: z.number().finite().optional(),
 			sectionId: z.string().optional(),
+			frameLength: z.number().int().positive().optional(),
 			direction: z.string().optional(),
 			exactSignature: z.string().optional(),
 			wildcardHexPattern: z.string().optional(),
+			scope: differentialScopeSchema.optional(),
 			hidden: z.enum(["include", "visible-only", "hidden-only"]).optional(),
 			notePresence: z.enum(["any", "with-note", "without-note"]).optional(),
 			sequenceGroupId: z.string().optional(),
@@ -392,6 +394,8 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 			profileId: z.string().optional(),
 			profileVersion: z.number().int().nonnegative().optional(),
 			sourceDataRevision: z.number().int().nonnegative().optional(),
+			scope: differentialScopeSchema.optional(),
+			hidden: z.enum(["include", "visible-only", "hidden-only"]).optional(),
 			cursor: z.string().optional(),
 			limit: z.number().int().positive().max(100).optional(),
 			includeContext: z.boolean().optional(),
@@ -411,9 +415,10 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 			captureId: z.string().min(1),
 			profileId: z.string().optional(),
 			profileVersion: z.number().int().nonnegative().optional(),
-			sourceDataRevision: z.number().int().nonnegative().optional(),
-			positions: z.array(z.number().int().nonnegative()).min(1).max(32),
-			scope: byteStatisticsScopeSchema.optional()
+				sourceDataRevision: z.number().int().nonnegative().optional(),
+				positions: z.array(z.number().int().nonnegative()).min(1).max(32),
+				scope: byteStatisticsScopeSchema.optional(),
+				hidden: z.enum(["include", "visible-only", "hidden-only"]).optional()
 		}),
 		input => queries.getByteStatistics(input as AgentByteStatisticsInput),
 		response => `Returned byte statistics for ${(response.data as AgentByteStatisticsResult).positions.length} requested position${(response.data as AgentByteStatisticsResult).positions.length === 1 ? "" : "s"}.`,
