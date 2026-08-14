@@ -347,7 +347,7 @@ function createApplicationState(viewState: ViewStateSnapshot, selectedCaptureId:
 }
 
 function withViewState(state: ApplicationState, action: ViewStateAction): ApplicationState {
-	return cloneAndFreeze({ ...state, viewState: cloneViewStateSnapshot(reduceViewState(state.viewState, action)) });
+	return Object.freeze({ ...state, viewState: cloneViewStateSnapshot(reduceViewState(state.viewState, action)) });
 }
 
 function workflowFailure(error: string, canRetry: boolean): WorkflowState {
@@ -419,18 +419,18 @@ export function createApplicationStore(
 			"view/collapse-runs-changed": (state, event: { collapseRuns: boolean }) =>
 				withViewState(state, { type: "set-collapse-runs", collapseRuns: event.collapseRuns }),
 			"view/replaced": (state, event: { viewState: ViewStateSnapshot }) =>
-				cloneAndFreeze({ ...state, viewState: cloneViewStateSnapshot(event.viewState) }),
+				Object.freeze({ ...state, viewState: cloneViewStateSnapshot(event.viewState) }),
 			"capture/selected-changed": (state, event: { captureId: string | null }) =>
-				cloneAndFreeze({ ...state, selectedCaptureId: event.captureId }),
+				Object.freeze({ ...state, selectedCaptureId: event.captureId }),
 			"dialog/command-changed": (state, event: { command: DialogCommandInput | null }) => {
-				if (!event.command) return cloneAndFreeze({ ...state, dialog: null });
+				if (!event.command) return Object.freeze({ ...state, dialog: null });
 				const command = cloneAndFreeze({ ...event.command, requestId: ++nextDialogRequestId }) as DialogCommand;
-				return cloneAndFreeze({ ...state, dialog: command });
+				return Object.freeze({ ...state, dialog: command });
 			},
 			"canonicalization/changed": (state, event: { update: Partial<CanonicalizationState> }) =>
-				cloneAndFreeze({
+				Object.freeze({
 					...state,
-					canonicalization: Object.freeze({ ...state.canonicalization, ...event.update })
+					canonicalization: cloneAndFreeze({ ...state.canonicalization, ...event.update })
 				}),
 			"transport/connection-started": (state, event: { startedAt: number }) =>
 				replaceTransport(state, { connection: { status: "running", startedAt: event.startedAt } }),
@@ -461,13 +461,13 @@ export function createApplicationStore(
 			"send/runtime-updated": (state, event: { runtime: Pick<SendRuntimeState, "sendInFlight" | "queueRunning" | "stopQueueRequested"> }) =>
 				replaceSend(state, { ...event.runtime }),
 			"framing-toolbar/changed": (state, event: { state: FramingToolbarState }) =>
-				cloneAndFreeze({ ...state, framingToolbar: event.state }),
+				Object.freeze({ ...state, framingToolbar: cloneAndFreeze(event.state) }),
 			"message-stream/changed": (state, event: { state: MessageStreamSnapshot }) =>
-				cloneAndFreeze({ ...state, messageStream: event.state }),
+				Object.freeze({ ...state, messageStream: cloneAndFreeze(event.state) }),
 			"toast/changed": (state, event: { state: ToastState }) =>
-				cloneAndFreeze({ ...state, toast: event.state }),
+				Object.freeze({ ...state, toast: cloneAndFreeze(event.state) }),
 			"persistence-error/changed": (state, event: { state: PersistenceErrorState }) =>
-				cloneAndFreeze({ ...state, persistenceError: event.state }),
+				Object.freeze({ ...state, persistenceError: cloneAndFreeze(event.state) }),
 			"command/requested": state => state
 		}
 	});
