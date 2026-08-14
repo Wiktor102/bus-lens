@@ -196,7 +196,6 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 	let stateSaveTimer: ReturnType<typeof setTimeout> | null = null;
 	let unloading = false;
 	let persistedIds = emptyPersistedEntityIds();
-	let captureStatuses = new Map<string, CanonicalCaptureSummary["status"]>();
 	const activeCaptureWrites = new Map<string, Promise<unknown>>();
 	const pendingDeletions = emptyPersistedEntityIds();
 	const activeDeletions = {
@@ -218,6 +217,14 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 	});
 	let activeId: string | null | undefined = state.activeId || state.captures[0]?.id;
 
+	function captureById(captureId: string): Capture | undefined {
+		return state.captures.find(item => String(item.id) === String(captureId));
+	}
+
+	function captureStorageStatus(captureId: string): CanonicalCaptureSummary["status"] | undefined {
+		return captureById(captureId)?.storageStatus;
+	}
+
 	function reportPersistenceFailure(error: unknown): void {
 		if (unloading) return;
 		console.error("Bus Lens persistence failed", error);
@@ -229,19 +236,17 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		if (unloading || !databaseReady || !capture || !writer) return;
 		const id = String(capture.id);
 		if (activeCaptureWrites.has(id)) return;
-		if (captureStatuses.get(id) === "converting") return;
+		if (captureStorageStatus(id) === "converting") return;
 		const isNew = !persistedIds.captures.has(id);
 		let operation: Promise<unknown>;
 		if (isNew) {
-			captureStatuses.set(id, "canonical");
 			capture.storageStatus = "canonical";
 			operation = writer.createCapture(captureCreateRequest(capture)).then(result => {
 				applyCanonicalCaptureState(capture, result);
 				persistedIds.captures.add(id);
-				captureStatuses.set(id, "canonical");
 				capture.storageStatus = "canonical";
 			});
-		} else if (captureStatuses.get(id) === "canonical") {
+		} else if (captureStorageStatus(id) === "canonical") {
 			operation = writer.patchMetadata({ captureId: id, patch: captureMetadataPatch(capture) }).then(result => {
 				applyCanonicalCaptureState(capture, result);
 			});
@@ -255,7 +260,6 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 			.catch(error => {
 				if (isNew) {
 					persistedIds.captures.delete(id);
-					captureStatuses.delete(id);
 				}
 				reportPersistenceFailure(error);
 			})
@@ -264,11 +268,11 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 	}
 
 	function isCanonicalCapture(captureId: string): boolean {
-		return captureStatuses.get(String(captureId)) === "canonical";
+		return captureStorageStatus(captureId) === "canonical";
 	}
 
 	function getCaptureStorageStatus(captureId: string): CanonicalCaptureSummary["status"] | undefined {
-		return captureStatuses.get(String(captureId));
+		return captureStorageStatus(captureId);
 	}
 
 	function isCaptureConversionLocked(captureId: string): boolean {
@@ -277,8 +281,7 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 
 	function setCaptureStorageStatus(captureId: string, status: CanonicalCaptureSummary["status"]): void {
 		const id = String(captureId);
-		captureStatuses.set(id, status);
-		const item = state.captures.find(candidate => String(candidate.id) === id);
+		const item = captureById(id);
 		if (item) item.storageStatus = status;
 	}
 
@@ -294,9 +297,9 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 	async function refreshCapture(captureId: string): Promise<Capture> {
 		if (!client) throw new Error("archive client is unavailable");
 		const refreshed = await client.loadCapture(captureId);
-		const knownStatus = captureStatuses.get(String(captureId));
-		if (knownStatus) refreshed.storageStatus = knownStatus;
 		const index = state.captures.findIndex(capture => String(capture.id) === captureId);
+		const previous = index >= 0 ? state.captures[index] : undefined;
+		if (!refreshed.storageStatus && previous?.storageStatus) refreshed.storageStatus = previous.storageStatus;
 		if (index >= 0) state.captures[index] = refreshed;
 		return refreshed;
 	}
@@ -377,16 +380,14 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		if (!client) return;
 		try {
 			const summaries = await client.listCaptureSummaries();
-			captureStatuses = new Map(summaries.map(summary => [summary.id, summary.status]));
+			const statuses = new Map(summaries.map(summary => [summary.id, summary.status]));
 			for (const capture of state.captures) {
-				const status = captureStatuses.get(String(capture.id));
+				const status = statuses.get(String(capture.id));
 				if (status) capture.storageStatus = status;
 			}
 		} catch {
-			// A missing status read must fail closed: existing captures use the
-			// explicit legacy method until the server identifies them as canonical.
-			captureStatuses = new Map();
-			for (const capture of state.captures) capture.storageStatus = undefined;
+			// Keep the status embedded in each capture. It is the same authority used
+			// by the archive badge and remains valid when this supplemental read fails.
 		}
 	}
 

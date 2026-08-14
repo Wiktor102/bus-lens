@@ -160,3 +160,41 @@ test("saveState creates a new capture through POST /api/captures", async () => {
 		globalThis.fetch = originalFetch;
 	}
 });
+
+test("keeps canonical routing when the supplemental status list is incomplete", async () => {
+	const originalFetch = globalThis.fetch;
+	const requests: Array<{ path: string; method: string }> = [];
+	const stored = {
+		captures: [{ id: "canonical", document: { id: "canonical", name: "Before", storageStatus: "canonical", messages: [], byteStream: [] } }],
+		folders: [],
+		index: { activeId: "canonical", unfiledCollapsed: false },
+		queue: [],
+		history: [],
+		settings: {}
+	};
+	globalThis.fetch = async (input, init) => {
+		const path = String(input);
+		requests.push({ path, method: init?.method || "GET" });
+		if (path.endsWith("/health")) return new Response(null, { status: 204 });
+		if (path.endsWith("/archive")) return new Response(JSON.stringify(stored), { status: 200 });
+		if (path.endsWith("/canonical/captures")) return new Response(JSON.stringify([]), { status: 200 });
+		if (path.endsWith("/metadata")) return new Response(JSON.stringify({ metadataRevision: 2, updatedAt: "now" }), { status: 200 });
+		return new Response(null, { status: 204 });
+	};
+
+	try {
+		const runtime = createAppRuntime();
+		await runtime.ready;
+		assert.equal(runtime.getCaptureStorageStatus("canonical"), "canonical");
+		assert.equal(runtime.isCanonicalCapture("canonical"), true);
+
+		runtime.state.captures[0]!.name = "Renamed";
+		runtime.saveCapture("canonical");
+		await runtime.waitForCaptureWrite("canonical");
+
+		assert.ok(requests.some(request => request.path === "/api/captures/canonical/metadata" && request.method === "PATCH"));
+		assert.equal(requests.some(request => request.path === "/api/captures/canonical" && request.method === "PUT"), false);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
