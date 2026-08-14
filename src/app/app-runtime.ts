@@ -68,7 +68,8 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 
 	async function loadCapture(captureId: string): Promise<Capture | undefined> {
 		const id = String(captureId);
-		const capture = archive ? await archive.commands.getCapture(id) : cachedCapture(id);
+		const loaded = archive ? await archive.commands.getCapture(id) : cachedCapture(id);
+		const capture = loaded ? structuredClone(loaded) : undefined;
 		if (capture && String(activeId) === id) activeCapture = capture;
 		return capture;
 	}
@@ -83,7 +84,7 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		if (selectedId) {
 			const summaries = archive.reads.captureSummaries() ?? [];
 			for (const summary of summaries) captureStatuses.set(summary.id, summary.status);
-			activeCapture = await archive.commands.getCapture(selectedId);
+			activeCapture = await loadCapture(selectedId);
 		}
 	})();
 
@@ -155,7 +156,7 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 			const refreshed = await archive.commands.refreshCapture(captureId);
 			const status = getCaptureStorageStatus(captureId);
 			if (status) captureStatuses.set(String(captureId), status);
-			if (String(activeId) === String(captureId)) activeCapture = refreshed;
+			if (String(activeId) === String(captureId)) activeCapture = structuredClone(refreshed);
 			return refreshed;
 		},
 		getCanonicalizationPreflight: captureId => archive
