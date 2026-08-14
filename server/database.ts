@@ -4,7 +4,7 @@ import Database from "better-sqlite3";
 import { deriveTransitionPositionAggregates } from "./transition-positions.ts";
 
 export type SqliteDatabase = InstanceType<typeof Database>;
-export const CURRENT_SCHEMA_VERSION = 13;
+export const CURRENT_SCHEMA_VERSION = 12;
 
 type Migration = {
 	version: number;
