@@ -85,6 +85,21 @@ test("protocol reports keep sections and lengths separate and reuse transition/b
 		assert.ok(statistics.data.positions.some(position => position.position === 1 && position.vocabulary.length > 1));
 		assert.equal(report.data.evidenceQuality.sampleSufficiency, "sufficient");
 		assert.ok(report.data.followUpOperations.some(operation => operation.tool === "query_messages"));
+
+		const scoped = query.getProtocolReport({
+			snapshot: capture.snapshot,
+			scope: { sectionId: report.data.frameFamilies?.find(family => family.frameLength === 2)?.sectionId, frameLength: 2, direction: "RX" },
+			hidden: "visible-only",
+			include: ["frame-families", "variable-bits"]
+		});
+		const queryFollowUp = scoped.data.followUpOperations.find(operation => operation.tool === "query_messages");
+		assert.deepEqual(queryFollowUp?.arguments && (queryFollowUp.arguments as Record<string, unknown>).scope, {
+			sectionId: report.data.frameFamilies?.find(family => family.frameLength === 2)?.sectionId,
+			frameLength: 2,
+			direction: "rx"
+		});
+		assert.equal(queryFollowUp?.arguments && (queryFollowUp.arguments as Record<string, unknown>).hidden, "visible-only");
+		assert.ok(!scoped.data.followUpOperations.some(operation => operation.tool === "get_transitions"));
 	} finally {
 		database.close();
 	}
@@ -134,14 +149,16 @@ test("protocol reports classify low support and controlled differential evidence
 	try {
 		const small = recordCapture(database, "protocol-report-small", [0x10, 0x01]);
 		const query = new CanonicalQueryService(database);
-		const insufficient = query.getProtocolReport({ snapshot: small.snapshot, minimumSupport: 2, include: ["invariants", "variable-bits"] });
+		const insufficient = query.getProtocolReport({ snapshot: small.snapshot, minimumSupport: 2, include: ["invariants"] });
 		assert.equal(insufficient.data.evidenceQuality.sampleSufficiency, "insufficient-evidence");
-		assert.ok(insufficient.data.variableBits?.bytes.some(item => item.classification === "insufficient-evidence"));
+		assert.ok(insufficient.data.invariants?.bytes.some(item => item.classification === "insufficient-evidence"));
+		assert.ok(insufficient.data.invariants?.bits.some(item => item.classification === "insufficient-evidence"));
 
 		const baseline = recordCapture(database, "protocol-report-diff-before", [0, 0, 0, 0]);
 		const changed = recordCapture(database, "protocol-report-diff-after", [1, 0, 1, 0]);
 		const differential = query.getProtocolReport({
 			snapshot: baseline.snapshot,
+			scope: { frameLength: 2 },
 			include: ["differential-candidates"],
 			minimumSupport: 1,
 			differentialAnalysis: {
@@ -153,7 +170,93 @@ test("protocol reports classify low support and controlled differential evidence
 		assert.ok(differential.data.differentialCandidates?.length);
 		assert.ok(differential.data.differentialCandidates?.every(candidate => candidate.classification === "candidate"));
 		assert.ok(!JSON.stringify(differential).toLowerCase().includes("power state"));
-		assert.ok(differential.data.followUpOperations.some(operation => operation.tool === "analyze_capture_difference"));
+		const differentialFollowUp = differential.data.followUpOperations.find(operation => operation.tool === "analyze_capture_difference");
+		assert.deepEqual(differentialFollowUp?.arguments && (differentialFollowUp.arguments as Record<string, unknown>).scope, { frameLength: 2 });
+		assert.equal(differentialFollowUp?.arguments && (differentialFollowUp.arguments as Record<string, unknown>).minimumSupport, 1);
+		assert.ok(differentialFollowUp);
+
+		const rareBit = recordCapture(database, "protocol-report-rare-bit", [0x01, 0x00, ...Array.from({ length: 999 }, () => [0x00, 0x00]).flat()]);
+		const rareBitReport = query.getProtocolReport({ snapshot: rareBit.snapshot, include: ["invariants", "variable-bits"] });
+		assert.ok(rareBitReport.data.variableBits?.bits.some(item => item.position === 0 && item.bit === 0 && item.onePercentage === 0 && item.classification === "variable"));
+		assert.ok(!rareBitReport.data.invariants?.bits.some(item => item.position === 0 && item.bit === 0));
+	} finally {
+		database.close();
+	}
+});
+
+test("protocol reports scope before bounded sampling and do not expose unsafe sequence summaries", () => {
+	const database = openDatabase(":memory:");
+	try {
+		const lateBytes = [...Array.from({ length: 4_001 * 2 }, () => 0), 0xaa, 0xbb];
+		const late = recordCapture(database, "protocol-report-late-scope", lateBytes);
+		const query = new CanonicalQueryService(database);
+		const scoped = query.getProtocolReport({
+			snapshot: late.snapshot,
+			scope: { exactSignature: "AA BB" },
+			include: ["frame-families"]
+		});
+		assert.equal(scoped.data.evidenceQuality.scopeMatchedFrameCount, 1);
+		assert.equal(scoped.data.evidenceQuality.sampledFrameCount, 1);
+		assert.equal(scoped.data.frameFamilies?.length, 1);
+		assert.equal(scoped.data.frameFamilies?.[0]?.signature, "AA BB");
+		assert.equal(scoped.data.evidenceQuality.truncated, false);
+
+		const long = recordCapture(database, "protocol-report-long-signature", Array.from({ length: 1_024 }, (_value, index) => index % 256), [{ start: 0, framingMode: "length", frameSize: 1_024, collapseRuns: false, collapsed: false }]);
+		const compactLong = query.getProtocolReport({ snapshot: long.snapshot, detail: "compact", include: ["frame-families"] });
+		assert.ok(compactLong.data.frameFamilies?.[0]?.signatureTruncated);
+		assert.ok((compactLong.data.frameFamilies?.[0]?.signatureLength ?? 0) > 96);
+		assert.ok(Buffer.byteLength(JSON.stringify(compactLong), "utf8") <= 32 * 1024);
+
+		const repeated = recordCapture(database, "protocol-report-hidden-sequence", Array.from({ length: 4 }, () => [[1, 2], [3, 4], [5, 6], [7, 8]]).flat(2));
+		const group = database.prepare("SELECT id FROM sequence_groups WHERE profile_id = @profileId LIMIT 1").get({ profileId: repeated.snapshot.profileId }) as { id: string } | undefined;
+		assert.ok(group);
+		database.prepare("UPDATE materialized_frames SET hidden = 1 WHERE profile_id = @profileId AND ordinal = 0").run({ profileId: repeated.snapshot.profileId });
+		const visible = query.getProtocolReport({
+			snapshot: repeated.snapshot,
+			hidden: "visible-only",
+			include: ["sequences"]
+		});
+		assert.deepEqual(visible.data.sequences, []);
+		const occurrences = query.getSequenceOccurrences({
+			captureId: repeated.snapshot.captureId,
+			groupId: group!.id,
+			profileId: repeated.snapshot.profileId,
+			profileVersion: repeated.snapshot.profileVersion,
+			sourceDataRevision: repeated.snapshot.sourceDataRevision,
+			scope: { frameLength: 2 },
+			hidden: "visible-only",
+			includeContext: true,
+			limit: 10
+		});
+		assert.ok(occurrences.data.occurrences.length > 0);
+		assert.ok(occurrences.data.occurrences.every(occurrence => occurrence.context?.every(frame => !frame.hidden)));
+		assert.ok(occurrences.data.occurrences.every(occurrence => occurrence.context?.every(frame => frame.sectionId)));
+	} finally {
+		database.close();
+	}
+});
+
+test("protocol report rejects direct pagination fields and auto-includes differential candidates", () => {
+	const database = openDatabase(":memory:");
+	try {
+		const baseline = recordCapture(database, "protocol-report-auto-diff-before", [0, 0, 0, 0]);
+		const changed = recordCapture(database, "protocol-report-auto-diff-after", [1, 0, 1, 0]);
+		const query = new CanonicalQueryService(database);
+		assert.throws(
+			() => query.getProtocolReport({ snapshot: baseline.snapshot, cursor: "not-accepted" } as never),
+			error => (error as { code?: string }).code === "invalid-input"
+		);
+		const report = query.getProtocolReport({
+			snapshot: baseline.snapshot,
+			include: ["invariants"],
+			differentialAnalysis: {
+				baseline: { snapshot: baseline.snapshot, label: "before" },
+				changed: { snapshot: changed.snapshot, label: "after" },
+				alignment: { mode: "ordinal" }
+			}
+		});
+		assert.ok(report.data.include.includes("differential-candidates"));
+		assert.ok(report.data.differentialCandidates);
 	} finally {
 		database.close();
 	}
