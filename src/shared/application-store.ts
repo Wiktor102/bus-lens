@@ -41,7 +41,7 @@ function createApplicationState(viewState: ViewStateSnapshot, selectedCaptureId:
 }
 
 function withViewState(state: ApplicationState, action: ViewStateAction): ApplicationState {
-	return createApplicationState(reduceViewState(state.viewState, action));
+	return createApplicationState(reduceViewState(state.viewState, action), state.selectedCaptureId);
 }
 
 export function viewStateActionToApplicationEvent(action: ViewStateAction): ApplicationEvent {

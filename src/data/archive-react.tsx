@@ -11,8 +11,7 @@ import { useApplicationSelector, useApplicationSend } from "../app/application-s
 import type { ApplicationEvent } from "../shared/application-store.ts";
 import { selectSelectedCaptureId } from "../shared/application-store.ts";
 import { buildArchiveGroups, type ArchiveCapture, type ArchiveFolder } from "../features/archive/archive-list.ts";
-import { visibleMessages, type Capture } from "../features/capture/capture-framing.ts";
-import type { ArchiveIndex } from "../persistence/archive-client.ts";
+import type { ArchiveIndex, CaptureListItem } from "../persistence/archive-client.ts";
 import { archiveQueryKeys } from "./archive-queries.ts";
 import type { ArchiveCommands, ArchiveDataLayer } from "./archive-data-layer.ts";
 
@@ -112,17 +111,14 @@ export type ArchiveListModel = {
 	retry: () => void;
 };
 
-function archiveCapture(capture: Capture): ArchiveCapture {
+function archiveCapture(capture: CaptureListItem): ArchiveCapture {
 	return {
-		id: String(capture.id ?? ""),
-		name: String(capture.name ?? "Untitled capture"),
-		view: String(capture.view ?? ""),
-		folderId: capture.folderId ? String(capture.folderId) : null,
-		params: (Array.isArray(capture.params) ? capture.params : []).map(parameter => ({
-			key: String((parameter as { key?: unknown }).key ?? ""),
-			value: String((parameter as { value?: unknown }).value ?? "")
-		})),
-		messageCount: visibleMessages(capture).length,
+		id: capture.id,
+		name: capture.name,
+		view: capture.view,
+		folderId: capture.folderId,
+		params: capture.params.map(parameter => ({ key: parameter.key, value: parameter.value })),
+		messageCount: capture.messageCount,
 		storageStatus: capture.storageStatus
 	};
 }

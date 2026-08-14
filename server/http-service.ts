@@ -92,7 +92,7 @@ function entityRecord(repository: ArchiveRepository, entity: Entity, id: string)
 }
 
 function entityList(repository: ArchiveRepository, entity: Entity) {
-	if (entity === "captures") return repository.listCaptures();
+	if (entity === "captures") return repository.listCaptureProjections();
 	if (entity === "folders") return repository.listFolders();
 	if (entity === "queue") return repository.listQueue();
 	return repository.listHistory();

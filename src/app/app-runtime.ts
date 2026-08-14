@@ -161,7 +161,7 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		waitForCaptureWrite,
 		refreshCapture: async captureId => {
 			if (!archive) throw new Error("archive data layer is unavailable");
-			const refreshed = await archive.commands.getCapture(captureId);
+			const refreshed = await archive.commands.refreshCapture(captureId);
 			const index = state.captures.findIndex(item => String(item.id) === String(captureId));
 			if (index >= 0) state.captures[index] = refreshed;
 			const status = getCaptureStorageStatus(captureId);

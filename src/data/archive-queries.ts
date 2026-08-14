@@ -5,6 +5,7 @@ import type {
 	CanonicalizationJob,
 	CanonicalizationPreflight,
 	CaptureState,
+	CaptureListItem,
 	CanonicalNote,
 	CreateCaptureRequest,
 	MigrationReport,
@@ -159,12 +160,10 @@ export type ArchiveMutationCachePolicy = {
  */
 export const archiveMutationCachePolicy: ArchiveMutationCachePolicy = {
 	migrate: () => [archiveQueryKeys.all],
-	saveLegacyCaptureDocument: capture => [
-		archiveQueryKeys.snapshot(),
-		archiveQueryKeys.captures(),
-		archiveQueryKeys.capture(String(capture.id)),
-		archiveQueryKeys.captureSummaries()
-	],
+	// Legacy recording writes are a durable compatibility path, not a server
+	// state refresh signal.  Appending a byte must never refetch the sidebar or
+	// place the growing document in Query.
+	saveLegacyCaptureDocument: () => [],
 	saveFolder: () => [
 		archiveQueryKeys.snapshot(),
 		archiveQueryKeys.index(),
@@ -182,10 +181,7 @@ export const archiveMutationCachePolicy: ArchiveMutationCachePolicy = {
 	deleteHistoryItem: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.history()],
 	saveArchiveIndex: () => [
 		archiveQueryKeys.snapshot(),
-		archiveQueryKeys.index(),
-		archiveQueryKeys.captures(),
-		archiveQueryKeys.folders(),
-		archiveQueryKeys.captureSummaries()
+		archiveQueryKeys.index()
 	],
 	saveSendState: () => [
 		archiveQueryKeys.snapshot(),
@@ -202,6 +198,7 @@ export const archiveMutationCachePolicy: ArchiveMutationCachePolicy = {
 	patchMetadata: command => [
 		archiveQueryKeys.snapshot(),
 		archiveQueryKeys.capture(command.captureId),
+		archiveQueryKeys.captures(),
 		archiveQueryKeys.captureSummaries()
 	],
 	startCanonicalization: (captureId, job) => [
@@ -243,6 +240,38 @@ export function createArchiveMutationSuccessHandler<Name extends ArchiveMutation
 }
 
 export function createArchiveQueryOptions(client: ArchiveQuerySource) {
+	function captureListItem(capture: Capture | CaptureListItem): CaptureListItem {
+		const source = capture as Capture & CaptureListItem & { parameters?: unknown };
+		const parameters = Array.isArray(source.params)
+			? source.params
+			: Array.isArray(source.parameters)
+				? source.parameters
+				: [];
+		return {
+			id: String(source.id ?? ""),
+			name: String(source.name ?? "Untitled capture"),
+			description: String(source.description ?? ""),
+			view: String(source.view ?? ""),
+			folderId: source.folderId ? String(source.folderId) : null,
+			params: parameters.flatMap(parameter => {
+				if (!parameter || typeof parameter !== "object") return [];
+				const value = parameter as { key?: unknown; value?: unknown };
+				const key = String(value.key ?? "").trim();
+				return key ? [{ key, value: String(value.value ?? "") }] : [];
+			}),
+			messageCount: Number.isSafeInteger(source.messageCount)
+				? Math.max(0, Number(source.messageCount))
+				: Array.isArray(source.messages)
+					? source.messages.filter(message => !message.hidden).length
+					: 0,
+			...(source.storageStatus ? { storageStatus: source.storageStatus } : {}),
+			...(source.lifecycle === undefined ? {} : { lifecycle: String(source.lifecycle) }),
+			...(source.byteCount === undefined ? {} : { byteCount: Number(source.byteCount) }),
+			...(source.createdAt === undefined ? {} : { createdAt: String(source.createdAt) }),
+			...(source.updatedAt === undefined ? {} : { updatedAt: String(source.updatedAt) })
+		};
+	}
+
 	return {
 		snapshot: () => queryOptions<AppState, Error, AppState, ReturnType<typeof archiveQueryKeys.snapshot>>({
 			queryKey: archiveQueryKeys.snapshot(),
@@ -257,9 +286,11 @@ export function createArchiveQueryOptions(client: ArchiveQuerySource) {
 				folders: state.folders.map((folder, position) => ({ id: String(folder.id), position }))
 			}))
 		}),
-		captures: () => queryOptions<Capture[], Error, Capture[], ReturnType<typeof archiveQueryKeys.captures>>({
+		captures: () => queryOptions<CaptureListItem[], Error, CaptureListItem[], ReturnType<typeof archiveQueryKeys.captures>>({
 			queryKey: archiveQueryKeys.captures(),
-			queryFn: () => client.listCaptures ? client.listCaptures() : client.load().then(state => state.captures)
+			queryFn: () => client.listCaptures
+				? client.listCaptures().then(captures => captures.map(captureListItem))
+				: client.load().then(state => state.captures.map(captureListItem))
 		}),
 		capture: (captureId: string) => queryOptions<Capture, Error, Capture, ReturnType<typeof archiveQueryKeys.capture>>({
 			queryKey: archiveQueryKeys.capture(captureId),

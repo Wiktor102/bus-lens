@@ -11,6 +11,7 @@ import {
 	ArchiveClient,
 	type ArchiveIndex,
 	type CanonicalCaptureSummary,
+	type CaptureListItem,
 	type CanonicalNote,
 	type CaptureMetadataPatch,
 	type CaptureState,
@@ -23,6 +24,7 @@ import {
 import type { Capture } from "../features/capture/capture-framing.ts";
 import {
 	loadState,
+	MAX_SEND_HISTORY,
 	STORAGE_KEY,
 	type AppState,
 	type SendHistoryEntry,
@@ -45,7 +47,9 @@ export type ArchiveCommands = {
 	getArchiveIndex: () => Promise<ArchiveIndex>;
 	persistArchiveIndex: (index: ArchiveIndex) => Promise<void>;
 	getCapture: (captureId: string) => Promise<Capture>;
-	listCaptures: () => Promise<Capture[]>;
+	/** Force-fetches durable capture state and the byte-free sidebar projection. */
+	refreshCapture: (captureId: string) => Promise<Capture>;
+	listCaptures: () => Promise<CaptureListItem[]>;
 	saveLegacyCapture: (capture: Capture) => Promise<void>;
 	createCapture: (request: CreateCaptureRequest) => Promise<CaptureState>;
 	patchMetadata: (request: PatchMetadataRequest) => Promise<CaptureState>;
@@ -187,6 +191,25 @@ export function createArchiveDataLayer(
 		else queryClient.setQueryData(queryKey, previous);
 	}
 
+	function applyMetadataToCaptureList(
+		captures: CaptureListItem[] | undefined,
+		request: PatchMetadataRequest
+	): CaptureListItem[] | undefined {
+		if (!captures) return undefined;
+		const patch = request.patch;
+		return captures.map(capture => capture.id !== request.captureId
+			? capture
+			: {
+					...capture,
+					...(patch.name === undefined ? {} : { name: patch.name }),
+					...(patch.description === undefined ? {} : { description: patch.description }),
+					...(patch.controllerView === undefined && patch.view === undefined ? {} : { view: patch.controllerView ?? patch.view ?? "" }),
+					...(patch.folderId === undefined ? {} : { folderId: patch.folderId }),
+					...(patch.parameters === undefined ? {} : { params: patch.parameters.map(parameter => ({ ...parameter })) })
+				}
+		);
+	}
+
 	async function saveFolder(folder: StoredFolder): Promise<void> {
 		const previous = queryClient.getQueryData<StoredFolder[]>(archiveQueryKeys.folders());
 		if (previous) {
@@ -239,7 +262,7 @@ export function createArchiveDataLayer(
 		if (previous && typeof item.id === "string") {
 			const next = previous.some(candidate => candidate.id === item.id)
 				? previous.map(candidate => candidate.id === item.id ? { ...item } : candidate)
-				: [item, ...previous];
+				: [item, ...previous].slice(0, MAX_SEND_HISTORY);
 			queryClient.setQueryData(archiveQueryKeys.history(), next);
 		}
 		try {
@@ -274,6 +297,7 @@ export function createArchiveDataLayer(
 
 	async function patchMetadata(request: PatchMetadataRequest): Promise<CaptureState> {
 		const previous = queryClient.getQueryData<Capture>(archiveQueryKeys.capture(request.captureId));
+		const previousList = queryClient.getQueryData<CaptureListItem[]>(archiveQueryKeys.captures());
 		if (previous) {
 			const patch = request.patch;
 			queryClient.setQueryData(archiveQueryKeys.capture(request.captureId), {
@@ -286,38 +310,61 @@ export function createArchiveDataLayer(
 				...(patch.parameters === undefined ? {} : { params: patch.parameters.map(parameter => ({ ...parameter })) })
 			});
 		}
+		const optimisticList = applyMetadataToCaptureList(previousList, request);
+		if (optimisticList) queryClient.setQueryData(archiveQueryKeys.captures(), optimisticList);
 		try {
 			return await run("patchMetadata", request, () => client.patchMetadata(request));
 		} catch (error) {
 			rollbackQuery(archiveQueryKeys.capture(request.captureId), previous);
+			rollbackQuery(archiveQueryKeys.captures(), previousList);
 			throw error;
 		}
 	}
 
+	async function refreshCapture(captureId: string): Promise<Capture> {
+		const [capture] = await Promise.all([
+			queryClient.fetchQuery({ ...queries.capture(captureId), staleTime: 0 }),
+			queryClient.fetchQuery({ ...queries.captures(), staleTime: 0 }),
+			queryClient.fetchQuery({ ...queries.captureSummaries(), staleTime: 0 })
+		]);
+		return capture;
+	}
+
 	const commands: ArchiveCommands = {
 		hydrate: async () => {
-			const [index, captures, folders, queue, history, settings, summaries] = await Promise.all([
+			const [index, folders, queue, history, settings, summaries, fullState] = await Promise.all([
 				queryClient.ensureQueryData(queries.index()),
-				queryClient.ensureQueryData(queries.captures()),
 				queryClient.ensureQueryData(queries.folders()),
 				queryClient.ensureQueryData(queries.queue()),
 				queryClient.ensureQueryData(queries.history()),
 				queryClient.ensureQueryData(queries.settings()),
-				queryClient.ensureQueryData(queries.captureSummaries())
+				queryClient.ensureQueryData(queries.captureSummaries()),
+				// Full capture documents are needed by the live compatibility
+				// projection, but they do not belong in the sidebar list query.
+				client.load()
 			]);
-			return { index, captures, folders, queue, history, settings, summaries };
+			return { index, captures: fullState.captures, folders, queue, history, settings, summaries };
 		},
 		getArchiveIndex: () => queryClient.ensureQueryData(queries.index()),
 		persistArchiveIndex,
 		getCapture: captureId => queryClient.ensureQueryData(queries.capture(captureId)),
+		refreshCapture,
 		listCaptures: () => queryClient.ensureQueryData(queries.captures()),
-		saveLegacyCapture: capture => run("saveLegacyCaptureDocument", capture, () => client.saveLegacyCaptureDocument(capture)),
+		// Keep the compatibility document write outside Query.  In particular,
+		// recording calls this for every live flush and must not refetch list data.
+		saveLegacyCapture: async capture => {
+			try {
+				await client.saveLegacyCaptureDocument(capture);
+			} catch (error) {
+				throw commandError("saveLegacyCaptureDocument", error);
+			}
+		},
 		createCapture: request => run("createCapture", request, () => client.createCapture(request)),
 		patchMetadata,
 		deleteCapture: captureId => run("deleteCapture", captureId, () => client.delete(captureId)),
 		clearCaptureData: async captureId => {
 			await client.clearData({ captureId });
-			await invalidateArchiveMutationCache(queryClient, "patchMetadata", { captureId, patch: {} }, {} as CaptureState);
+			await refreshCapture(captureId);
 		},
 		duplicateCapture: async (captureId, duplicateCaptureId) => {
 			await client.duplicate({ captureId, duplicateCaptureId });
@@ -349,17 +396,17 @@ export function createArchiveDataLayer(
 		},
 		setByteVisibility: async request => {
 			const result = await client.setByteVisibility(request);
-			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.capture(request.captureId) });
+			await refreshCapture(request.captureId);
 			return result;
 		},
 		setFrameVisibility: async request => {
 			const result = await client.setFrameVisibility(request);
-			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.capture(request.captureId) });
+			await refreshCapture(request.captureId);
 			return result;
 		},
 		startCanonicalization: captureId => run("startCanonicalization", captureId, () => client.startCanonicalization(captureId)),
-		getCanonicalizationPreflight: captureId => queryClient.fetchQuery(queries.canonicalizationPreflight(captureId)),
-		getCanonicalizationJob: (captureId, jobId) => queryClient.fetchQuery(queries.canonicalizationJob(captureId, jobId)),
+		getCanonicalizationPreflight: captureId => queryClient.fetchQuery({ ...queries.canonicalizationPreflight(captureId), staleTime: 0 }),
+		getCanonicalizationJob: (captureId, jobId) => queryClient.fetchQuery({ ...queries.canonicalizationJob(captureId, jobId), staleTime: 0 }),
 		getLegacyBackup: captureId => queryClient.fetchQuery(queries.legacyBackup(captureId)),
 		recordingWriter: client
 	};

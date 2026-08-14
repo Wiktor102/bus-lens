@@ -421,6 +421,25 @@ export type CaptureState = Readonly<{
 	notes: readonly CanonicalNote[];
 }>;
 
+/**
+ * The archive/sidebar projection.  This intentionally has no messages,
+ * byteStream, or other streaming payloads; it is safe to retain in Query.
+ */
+export type CaptureListItem = Readonly<{
+	id: string;
+	name: string;
+	description: string;
+	view: string;
+	folderId: string | null;
+	params: readonly OrderedCaptureParameter[];
+	messageCount: number;
+	storageStatus?: "legacy-not-canonicalized" | "converting" | "canonical" | "canonicalization-failed";
+	lifecycle?: string;
+	byteCount?: number;
+	createdAt?: string;
+	updatedAt?: string;
+}>;
+
 export type CanonicalCaptureSummary = Readonly<{
 	id: string;
 	status: "canonical" | "legacy-not-canonicalized" | "converting" | "canonicalization-failed";
@@ -570,8 +589,8 @@ export class ArchiveClient implements CaptureWriter {
 	async loadArchiveIndex(): Promise<ArchiveIndex> {
 		return request<ArchiveIndex>("/archive-index");
 	}
-	async listCaptures(): Promise<Capture[]> {
-		const records = await request<Array<{ id?: string; document: Capture }>>("/captures");
+	async listCaptures(): Promise<CaptureListItem[]> {
+		const records = await request<Array<{ id?: string; document: CaptureListItem }>>("/captures");
 		return records.map(documentWithId);
 	}
 	async listFolders(): Promise<StoredFolder[]> {
