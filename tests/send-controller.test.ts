@@ -63,3 +63,61 @@ test("send controller publishes send and queue workflow transitions alongside ru
 	assert.equal(runtimeStates.at(-1)?.sendInFlight, false);
 	assert.equal(runtimeStates.at(-1)?.queueRunning, false);
 });
+
+test("stopping a running queue publishes a retryable stopped failure and keeps unsent items", async () => {
+	let releaseWrite!: () => void;
+	let notifyWriteStarted!: () => void;
+	const writeStarted = new Promise<void>(resolve => { notifyWriteStarted = resolve; });
+	const writeGate = new Promise<void>(resolve => { releaseWrite = resolve; });
+	const workflowEvents: Array<{ type: string; error?: string; canRetry?: boolean }> = [];
+	const port = {
+		readable: null,
+		writable: new WritableStream<Uint8Array>({
+			write() {
+				notifyWriteStarted();
+				return writeGate;
+			}
+		}),
+		open: async () => {},
+		close: async () => {}
+	};
+	const state: AppState = {
+		captures: [],
+		folders: [],
+		sendHistory: [],
+		sendQueue: [
+			{ id: "queued-1", bytes: [0xaa], createdAt: 1 },
+			{ id: "queued-2", bytes: [0xbb], createdAt: 2 }
+		],
+		sendSettings: { delayMs: 0, draft: "", baudRate: 115200 }
+	};
+	const controller = createSendController({
+		state,
+		capture: () => undefined,
+		transport: {
+			getPort: () => port,
+			isRecording: () => false,
+			queueLiveBytes: () => {}
+		},
+		showToast: () => {},
+		confirm: () => true,
+		publishSendState: () => {},
+		publishSendWorkflow: event => workflowEvents.push(event),
+		now: () => 1
+	});
+
+	const running = controller.runSendQueue();
+	await writeStarted;
+	controller.stopSendQueue();
+	releaseWrite();
+	await running;
+
+	assert.deepEqual(workflowEvents.map(event => event.type), [
+		"queue/started",
+		"send/started",
+		"send/succeeded",
+		"queue/failed"
+	]);
+	assert.deepEqual(workflowEvents.at(-1), { type: "queue/failed", error: "Queue stopped", canRetry: true });
+	assert.deepEqual(state.sendQueue.map(item => item.id), ["queued-2"]);
+});

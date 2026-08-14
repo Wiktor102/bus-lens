@@ -394,9 +394,19 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		const queued = [...state.sendQueue];
 		let completed = 0;
 		let queueFailure: string | null = null;
+		let queueCanRetry = false;
 		try {
 			for (let index = 0; index < queued.length; index++) {
-				if (stopQueueRequested || !dependencies.transport.getPort()?.writable) break;
+				if (stopQueueRequested) {
+					queueFailure = "Queue stopped";
+					queueCanRetry = true;
+					break;
+				}
+				if (!dependencies.transport.getPort()?.writable) {
+					queueFailure = "Queue stopped because the serial port is unavailable";
+					queueCanRetry = true;
+					break;
+				}
 				const sent = await transmitBytes(Uint8Array.from(queued[index].bytes as number[]), "queue");
 				if (!sent) {
 					queueFailure = "A queued message could not be sent";
@@ -413,13 +423,14 @@ export function createSendController(dependencies: SendControllerDependencies) {
 			}
 		} catch (error) {
 			queueFailure = error instanceof Error ? error.message : String(error);
+			queueCanRetry = false;
 			throw error;
 		} finally {
 			queueRunning = false;
 			stopQueueRequested = false;
 			dependencies.publishSendState();
 			if (queueFailure) {
-				dependencies.publishSendWorkflow?.({ type: "queue/failed", error: queueFailure, canRetry: false });
+				dependencies.publishSendWorkflow?.({ type: "queue/failed", error: queueFailure, canRetry: queueCanRetry });
 			} else {
 				dependencies.publishSendWorkflow?.({ type: "queue/succeeded", completedAt: now() });
 			}
