@@ -9,7 +9,6 @@ import { createBeforeUnloadHandler } from "./unload-lifecycle.ts";
 import { createSendController, type SendController } from "../features/send/send-controller.ts";
 import { createSerialController, type SerialController } from "../features/transport/serial-controller.ts";
 import { createLiveStateService } from "./live-state-service.ts";
-import { getViewStateSnapshot } from "../shared/view-state-bridge.ts";
 import {
 	applicationStore,
 	EMPTY_CANONICALIZATION_STATE,
@@ -42,7 +41,6 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		capture: runtime.capture,
 		getTransport: () => transport,
 		getSendController: () => sendController,
-		getViewStateSnapshot
 	});
 
 	transport = createSerialController({

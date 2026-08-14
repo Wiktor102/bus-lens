@@ -1,12 +1,11 @@
 import { deriveCaptureHeaderSnapshot } from "../features/capture/capture-header.ts";
 import { publishCaptureHeaderSnapshot } from "../features/capture/capture-header-bridge.ts";
-import { getViewStateSnapshot, subscribeToViewState } from "../shared/view-state-bridge.ts";
 import { deriveMessageStreamSnapshot } from "../features/message-stream/message-stream.ts";
 import { selectFramingToolbarSnapshot } from "../features/capture/framing-toolbar.ts";
 import type { Capture } from "../features/capture/capture-framing.ts";
 import type { SendController } from "../features/send/send-controller.ts";
 import type { SerialController } from "../features/transport/serial-controller.ts";
-import { applicationStore, type ApplicationStore } from "../shared/application-store.ts";
+import { applicationStore, selectViewState, type ApplicationStore } from "../shared/application-store.ts";
 import type { ViewStateSnapshot } from "../shared/view-state.ts";
 
 export type LiveStateServiceDependencies = {
@@ -14,7 +13,7 @@ export type LiveStateServiceDependencies = {
 	getTransport: () => Pick<SerialController, "getPort" | "isRecording" | "getRecordingCaptureId" | "publishState">;
 	getSendController: () => Pick<SendController, "getStatus"> | undefined;
 	getViewStateSnapshot?: () => ViewStateSnapshot;
-	applicationStore?: Pick<ApplicationStore, "send">;
+	applicationStore?: Pick<ApplicationStore, "send" | "select" | "subscribe">;
 };
 
 export type LiveStateService = {
@@ -31,8 +30,8 @@ export type LiveStateService = {
  * or Query state. Raw serial bytes remain owned by the recording pipeline.
  */
 export function createLiveStateService(dependencies: LiveStateServiceDependencies): LiveStateService {
-	const getViewState = dependencies.getViewStateSnapshot || getViewStateSnapshot;
 	const store = dependencies.applicationStore || applicationStore;
+	const getViewState = dependencies.getViewStateSnapshot || (() => store.select(selectViewState));
 
 	function publishCaptureHeaderState(capture = dependencies.capture()): void {
 		const recordingCaptureId = dependencies.getTransport().getRecordingCaptureId();
@@ -75,7 +74,7 @@ export function createLiveStateService(dependencies: LiveStateServiceDependencie
 
 	function subscribeToViewStateChanges(): () => void {
 		let previousViewState = getViewState();
-		return subscribeToViewState(() => {
+		return store.subscribe(() => {
 			const nextViewState = getViewState();
 			const renderChanged =
 				nextViewState.filterQuery !== previousViewState.filterQuery ||
