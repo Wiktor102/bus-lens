@@ -33,6 +33,7 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 	if (initializedController) return initializedController;
 
 	const runtime = createAppRuntime({ archive: options.archive });
+	const archiveReads = options.archive?.reads;
 	let transport!: SerialController;
 	let sendController!: SendController;
 	let retrySendPersistence: (() => void) | null = null;
@@ -45,7 +46,9 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 
 	transport = createSerialController({
 		capture: runtime.capture,
-		state: runtime.state,
+		getArchiveIndex: archiveReads?.index,
+		getSettings: archiveReads?.settings,
+		getCapture: runtime.getCapture,
 		archiveCommands: options.archive?.commands,
 		showToast: runtime.showToast,
 		publishCaptureHeaderState: snapshots.publishCaptureHeaderState,
@@ -78,7 +81,9 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 	});
 
 	sendController = createSendController({
-		state: runtime.state,
+		getQueue: archiveReads?.queue,
+		getHistory: archiveReads?.history,
+		getSettings: archiveReads?.settings,
 		capture: runtime.capture,
 		transport,
 		archiveCommands: options.archive?.commands,
@@ -104,10 +109,14 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 	});
 
 	const captureController = createCaptureController({
-		state: runtime.state,
 		capture: runtime.capture,
+		getCapture: runtime.getCapture,
+		getCaptures: archiveReads?.captures,
+		getFolders: archiveReads?.folders,
+		getArchiveIndex: archiveReads?.index,
 		getActiveId: runtime.getActiveId,
 		setActiveId: runtime.setActiveId,
+		setActiveCapture: runtime.setActiveCapture,
 		setSelectedCaptureId: captureId => applicationStore.send({ type: "capture/selected-changed", captureId }),
 		trackCaptureWrite: runtime.trackCaptureWrite,
 		archiveCommands: options.archive?.commands,
@@ -155,7 +164,7 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 	}
 
 	function openCanonicalization(captureId: string): void {
-		const item = runtime.state.captures.find(capture => String(capture.id) === String(captureId));
+		const item = runtime.getCapture(String(captureId));
 		if (!item) return;
 		const status = runtime.getCaptureStorageStatus(captureId) ?? item.storageStatus;
 		if (status === "canonical" || status === "converting") return;
@@ -322,10 +331,16 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 	}
 
 	const dataTransferController = createDataTransferController({
-		state: runtime.state,
 		capture: runtime.capture,
+		getCaptures: archiveReads?.captures,
+		getFolders: archiveReads?.folders,
+		getQueue: archiveReads?.queue,
+		getHistory: archiveReads?.history,
+		getSettings: archiveReads?.settings,
+		getArchiveIndex: archiveReads?.index,
 		getActiveId: runtime.getActiveId,
 		setActiveId: runtime.setActiveId,
+		setActiveCapture: runtime.setActiveCapture,
 		setSelectedCaptureId: captureId => applicationStore.send({ type: "capture/selected-changed", captureId }),
 		archiveCommands: options.archive?.commands,
 		render: snapshots.render,

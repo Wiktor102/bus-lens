@@ -1,4 +1,5 @@
-import type { AppState } from "../../shared/app-state.ts";
+import type { SendSettings, StoredFolder } from "../../shared/app-state.ts";
+import type { ArchiveIndex } from "../../persistence/archive-client.ts";
 import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
 import type { ApplicationEvent, TransportViewState } from "../../shared/application-store.ts";
 import { recordReceivedByte } from "../capture/capture-summary.ts";
@@ -44,7 +45,11 @@ type TransportWorkflowEvent = Extract<
 
 export type SerialControllerDependencies = {
 	capture: () => Capture | undefined;
-	state: AppState;
+	/** Test-only compatibility input; production reads come from the archive layer. */
+	state?: SerialCompatibilityState;
+	getArchiveIndex?: () => ArchiveIndex | undefined;
+	getSettings?: () => SendSettings | undefined;
+	getCapture?: (captureId: string) => Capture | undefined;
 	archiveCommands?: ArchiveCommands;
 	showToast: (message: string) => void;
 	publishCaptureHeaderState?: (capture?: Capture) => void;
@@ -64,6 +69,14 @@ export type SerialControllerDependencies = {
 	isCanonicalCapture?: (captureId: string) => boolean;
 	isCaptureConversionLocked?: (captureId: string) => boolean;
 	publishPersistenceError?: (error: { captureId: string; message: string } | null) => void;
+};
+
+type SerialCompatibilityState = {
+	activeId?: string | null;
+	unfiledCollapsed?: boolean;
+	captures?: Capture[];
+	folders?: StoredFolder[];
+	sendSettings?: Partial<SendSettings>;
 };
 
 type PendingLiveSegment = {
@@ -110,11 +123,12 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		: null;
 
 	function archiveIndex() {
-		return {
-			activeId: dependencies.state.activeId ?? (dependencies.capture()?.id ? String(dependencies.capture()?.id) : null),
-			unfiledCollapsed: Boolean(dependencies.state.unfiledCollapsed),
-			captures: dependencies.state.captures.map((capture, position) => ({ id: String(capture.id), folderId: capture.folderId ?? null, position })),
-			folders: dependencies.state.folders.map((folder, position) => ({ id: String(folder.id), position }))
+		const current = dependencies.getArchiveIndex?.();
+		return current || {
+			activeId: dependencies.state?.activeId ?? (dependencies.capture()?.id ? String(dependencies.capture()?.id) : null),
+			unfiledCollapsed: Boolean(dependencies.state?.unfiledCollapsed),
+			captures: (dependencies.state?.captures || []).map((capture, position) => ({ id: String(capture.id), folderId: capture.folderId ?? null, position })),
+			folders: (dependencies.state?.folders || []).map((folder, position) => ({ id: String(folder.id), position }))
 		};
 	}
 
@@ -135,8 +149,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		}
 	}
 
-	function persistSettings(): void {
-		const settings = dependencies.state.sendSettings || {};
+	function persistSettings(settings = dependencies.getSettings?.() || dependencies.state?.sendSettings || {}): void {
 		if (dependencies.archiveCommands) {
 			void dependencies.archiveCommands.saveSettings(settings).catch(error => dependencies.showToast(`Settings could not be saved: ${error instanceof Error ? error.message : String(error)}`));
 		}
@@ -144,7 +157,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 
 	function captureById(captureId: string | undefined): Capture | undefined {
 		if (!captureId) return dependencies.capture();
-		return dependencies.state.captures.find(capture => String(capture.id) === captureId) as Capture | undefined;
+		return dependencies.getCapture?.(captureId) || dependencies.state?.captures?.find(capture => String(capture.id) === captureId);
 	}
 
 	function handlePersistenceFailure(captureId: string, error: unknown): void {
@@ -340,11 +353,10 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		dependencies.publishTransportWorkflow?.({ type: "transport/connection-started", startedAt: Date.now() });
 		try {
 			port = await serial.requestPort();
-			const baudRate = dependencies.capture()?.baudRate || dependencies.state.sendSettings?.baudRate || 115200;
+			const baudRate = dependencies.capture()?.baudRate || dependencies.getSettings?.()?.baudRate || dependencies.state?.sendSettings?.baudRate || 115200;
 			await port.open({ baudRate });
-			dependencies.state.sendSettings ||= {};
-			dependencies.state.sendSettings.baudRate = baudRate;
-			persistSettings();
+			const settings = dependencies.getSettings?.() || dependencies.state?.sendSettings || {};
+			persistSettings({ ...settings, baudRate });
 			readAbort = false;
 			publishState();
 			dependencies.publishTransportWorkflow?.({ type: "transport/connection-succeeded", completedAt: Date.now() });

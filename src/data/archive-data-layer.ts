@@ -91,7 +91,20 @@ export type ArchiveDataLayer = {
 	queryClient: QueryClient;
 	queries: ReturnType<typeof createArchiveQueryOptions>;
 	commands: ArchiveCommands;
+	/** Synchronous reads for imperative workflow services; cache access stays here. */
+	reads: ArchiveReads;
 	ready: Promise<void>;
+};
+
+export type ArchiveReads = {
+	index: () => ArchiveIndex | undefined;
+	captures: () => CaptureListItem[] | undefined;
+	capture: (captureId: string) => Capture | undefined;
+	captureSummaries: () => CanonicalCaptureSummary[] | undefined;
+	folders: () => StoredFolder[] | undefined;
+	queue: () => SendQueueEntry[] | undefined;
+	history: () => SendHistoryEntry[] | undefined;
+	settings: () => SendSettings | undefined;
 };
 
 function browserStorage(): ArchiveDataLayerStorage | undefined {
@@ -482,5 +495,16 @@ export function createArchiveDataLayer(
 		throw commandError("bootstrap", error);
 	});
 
-	return { client, queryClient, queries, commands, ready };
+	const reads: ArchiveReads = {
+		index: () => queryClient.getQueryData(archiveQueryKeys.index()),
+		captures: () => queryClient.getQueryData(archiveQueryKeys.captures()),
+		capture: captureId => queryClient.getQueryData(archiveQueryKeys.capture(String(captureId))),
+		captureSummaries: () => queryClient.getQueryData(archiveQueryKeys.captureSummaries()),
+		folders: () => queryClient.getQueryData(archiveQueryKeys.folders()),
+		queue: () => queryClient.getQueryData(archiveQueryKeys.queue()),
+		history: () => queryClient.getQueryData(archiveQueryKeys.history()),
+		settings: () => queryClient.getQueryData(archiveQueryKeys.settings())
+	};
+
+	return { client, queryClient, queries, commands, reads, ready };
 }

@@ -1,6 +1,5 @@
 import {
 	MAX_SEND_HISTORY,
-	type AppState,
 	type SendHistoryEntry,
 	type SendQueueEntry,
 	type SendSettings
@@ -21,8 +20,18 @@ type SendWorkflowEvent = Extract<
 	{ type: "send/started" | "send/succeeded" | "send/failed" | "queue/started" | "queue/succeeded" | "queue/failed" }
 >;
 
+type SendCompatibilityState = {
+	sendHistory?: SendHistoryEntry[];
+	sendQueue?: SendQueueEntry[];
+	sendSettings?: Partial<SendSettings>;
+};
+
 export type SendControllerDependencies = {
-	state: AppState;
+	/** Test-only compatibility input; production reads come from TanStack Query. */
+	state?: SendCompatibilityState;
+	getQueue?: () => readonly SendQueueEntry[] | undefined;
+	getHistory?: () => readonly SendHistoryEntry[] | undefined;
+	getSettings?: () => SendSettings | undefined;
 	capture: () => Capture | undefined;
 	transport: Pick<SerialController, "getPort" | "isRecording" | "queueLiveBytes">;
 	archiveCommands?: ArchiveCommands;
@@ -35,14 +44,10 @@ export type SendControllerDependencies = {
 	now?: () => number;
 };
 
-type ReadySendState = AppState & {
-	sendHistory: SendHistoryEntry[];
-	sendQueue: SendQueueEntry[];
-	sendSettings: SendSettings;
-};
+const defaultSettings: SendSettings = { delayMs: 100, draft: "", baudRate: 115200 };
 
 export function createSendController(dependencies: SendControllerDependencies) {
-	const state = dependencies.state as ReadySendState;
+	const compatibilityState = dependencies.state;
 	const generateId = dependencies.generateId || (() => crypto.randomUUID());
 	const now = dependencies.now || (() => Date.now());
 	let sendInFlight = false;
@@ -54,6 +59,33 @@ export function createSendController(dependencies: SendControllerDependencies) {
 	let settingsPersistTimer: ReturnType<typeof setTimeout> | null = null;
 	let settingsWriteInFlight: Promise<void> | null = null;
 	let pendingSettingsWrite: { desired: SendSettings; previous: SendSettings } | null = null;
+
+	function settings(): SendSettings {
+		return {
+			...defaultSettings,
+			...(dependencies.getSettings?.() || compatibilityState?.sendSettings || {})
+		};
+	}
+
+	function queue(): readonly SendQueueEntry[] {
+		return dependencies.getQueue?.() || compatibilityState?.sendQueue || [];
+	}
+
+	function history(): readonly SendHistoryEntry[] {
+		return dependencies.getHistory?.() || compatibilityState?.sendHistory || [];
+	}
+
+	function replaceSettings(next: SendSettings): void {
+		if (compatibilityState) compatibilityState.sendSettings = { ...next };
+	}
+
+	function replaceQueue(next: SendQueueEntry[]): void {
+		if (compatibilityState) compatibilityState.sendQueue = next;
+	}
+
+	function replaceHistory(next: SendHistoryEntry[]): void {
+		if (compatibilityState) compatibilityState.sendHistory = next;
+	}
 
 	function reportPersistenceFailure(error: unknown, retry: () => Promise<void>): void {
 		retryOperation = retry;
@@ -80,11 +112,7 @@ export function createSendController(dependencies: SendControllerDependencies) {
 	}
 
 	function getStatus(): SendControllerStatus {
-		return {
-			sendInFlight,
-			queueRunning,
-			stopQueueRequested
-		};
+		return { sendInFlight, queueRunning, stopQueueRequested };
 	}
 
 	async function writeSettings(desired: SendSettings, previous: SendSettings): Promise<void> {
@@ -93,12 +121,10 @@ export function createSendController(dependencies: SendControllerDependencies) {
 			await dependencies.archiveCommands.saveSettings(desired);
 			clearPersistenceFailure();
 		} catch (error) {
-			if (state.sendSettings.delayMs === desired.delayMs) state.sendSettings.delayMs = previous.delayMs;
-			if (state.sendSettings.draft === desired.draft) state.sendSettings.draft = previous.draft;
-			if (state.sendSettings.baudRate === desired.baudRate) state.sendSettings.baudRate = previous.baudRate;
+			if (compatibilityState) replaceSettings(previous);
 			dependencies.publishSendState();
 			reportPersistenceFailure(error, async () => {
-				Object.assign(state.sendSettings, desired);
+				replaceSettings(desired);
 				dependencies.publishSendState();
 				await writeSettings(desired, previous);
 			});
@@ -127,7 +153,7 @@ export function createSendController(dependencies: SendControllerDependencies) {
 	function persistSettings(previous: SendSettings, immediate = false): void {
 		if (!dependencies.archiveCommands) return;
 		pendingSettingsWrite = {
-			desired: { ...state.sendSettings },
+			desired: settings(),
 			previous: pendingSettingsWrite?.previous || previous
 		};
 		if (immediate) {
@@ -153,11 +179,11 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		void dependencies.archiveCommands.saveHistoryItem(item).then(() => {
 			clearPersistenceFailure();
 		}).catch(error => {
-			state.sendHistory = previous;
+			if (compatibilityState) replaceHistory(previous);
 			dependencies.publishSendState();
 			reportPersistenceFailure(error, async () => {
-				if (!state.sendHistory.some(candidate => candidate.id === item.id)) {
-					state.sendHistory = [item, ...state.sendHistory].slice(0, MAX_SEND_HISTORY);
+				if (compatibilityState && !history().some(candidate => candidate.id === item.id)) {
+					replaceHistory([item, ...history()].slice(0, MAX_SEND_HISTORY));
 					dependencies.publishSendState();
 				}
 				await dependencies.archiveCommands!.saveHistoryItem(item);
@@ -167,49 +193,49 @@ export function createSendController(dependencies: SendControllerDependencies) {
 	}
 
 	function deleteQueueItem(item: SendQueueEntry, restoreIndex = 0): void {
-		if (!item.id) return;
-		if (dependencies.archiveCommands) {
-			void dependencies.archiveCommands.deleteQueueItem(item.id).then(() => {
-				clearPersistenceFailure();
-			}).catch(error => {
-				if (!state.sendQueue.some(candidate => candidate.id === item.id)) {
-					state.sendQueue.splice(Math.min(restoreIndex, state.sendQueue.length), 0, item);
-				}
+		if (!item.id || !dependencies.archiveCommands) return;
+		void dependencies.archiveCommands.deleteQueueItem(item.id).then(() => {
+			clearPersistenceFailure();
+		}).catch(error => {
+			if (compatibilityState && !queue().some(candidate => candidate.id === item.id)) {
+				const restored = [...queue()];
+				restored.splice(Math.min(restoreIndex, restored.length), 0, item);
+				replaceQueue(restored);
+			}
+			dependencies.publishSendState();
+			reportPersistenceFailure(error, async () => {
+				if (compatibilityState) replaceQueue(queue().filter(candidate => candidate.id !== item.id));
 				dependencies.publishSendState();
-				reportPersistenceFailure(error, async () => {
-					state.sendQueue = state.sendQueue.filter(candidate => candidate.id !== item.id);
-					dependencies.publishSendState();
-					await dependencies.archiveCommands!.deleteQueueItem(item.id!);
-					clearPersistenceFailure();
-				});
+				await dependencies.archiveCommands!.deleteQueueItem(item.id!);
+				clearPersistenceFailure();
 			});
-		}
+		});
 	}
 
 	function deleteHistoryItem(item: SendHistoryEntry, restoreIndex = 0): void {
 		const id = typeof item.id === "string" ? item.id : "";
-		if (!id) return;
-		if (dependencies.archiveCommands) {
-			void dependencies.archiveCommands.deleteHistoryItem(id).then(() => {
-				clearPersistenceFailure();
-			}).catch(error => {
-				if (!state.sendHistory.some(candidate => candidate.id === id)) {
-					state.sendHistory.splice(Math.min(restoreIndex, state.sendHistory.length), 0, item);
-				}
+		if (!id || !dependencies.archiveCommands) return;
+		void dependencies.archiveCommands.deleteHistoryItem(id).then(() => {
+			clearPersistenceFailure();
+		}).catch(error => {
+			if (compatibilityState && !history().some(candidate => candidate.id === id)) {
+				const restored = [...history()];
+				restored.splice(Math.min(restoreIndex, restored.length), 0, item);
+				replaceHistory(restored);
+			}
+			dependencies.publishSendState();
+			reportPersistenceFailure(error, async () => {
+				if (compatibilityState) replaceHistory(history().filter(candidate => candidate.id !== id));
 				dependencies.publishSendState();
-				reportPersistenceFailure(error, async () => {
-					state.sendHistory = state.sendHistory.filter(candidate => candidate.id !== id);
-					dependencies.publishSendState();
-					await dependencies.archiveCommands!.deleteHistoryItem(id);
-					clearPersistenceFailure();
-				});
+				await dependencies.archiveCommands!.deleteHistoryItem(id);
+				clearPersistenceFailure();
 			});
-		}
+		});
 	}
 
-	function recordSend(bytes: Iterable<number>, { origin, ok, error = "" }: { origin: string; ok: boolean; error?: string }) {
-		const previousHistory = [...state.sendHistory];
-		const entry = {
+	function recordSend(bytes: Iterable<number>, { origin, ok, error = "" }: { origin: string; ok: boolean; error?: string }): void {
+		const previousHistory = [...history()];
+		const entry: SendHistoryEntry = {
 			id: generateId(),
 			timestamp: now(),
 			bytes: [...bytes],
@@ -218,12 +244,11 @@ export function createSendController(dependencies: SendControllerDependencies) {
 			error,
 			captureId: ok && dependencies.transport.isRecording() ? dependencies.capture()?.id || null : null
 		};
-		state.sendHistory.unshift(entry);
-		state.sendHistory = state.sendHistory.slice(0, MAX_SEND_HISTORY);
+		replaceHistory([entry, ...previousHistory].slice(0, MAX_SEND_HISTORY));
 		persistHistoryItem(entry, previousHistory);
 	}
 
-	async function transmitBytes(bytes: Uint8Array, origin = "manual") {
+	async function transmitBytes(bytes: Uint8Array, origin = "manual"): Promise<boolean> {
 		if (!bytes?.length) return false;
 		const port = dependencies.transport.getPort();
 		if (!port?.writable) {
@@ -244,9 +269,7 @@ export function createSendController(dependencies: SendControllerDependencies) {
 			} finally {
 				writer.releaseLock();
 			}
-			if (dependencies.transport.isRecording() && dependencies.capture()) {
-				dependencies.transport.queueLiveBytes(bytes, "tx");
-			}
+			if (dependencies.transport.isRecording() && dependencies.capture()) dependencies.transport.queueLiveBytes(bytes, "tx");
 			recordSend(bytes, { origin, ok: true });
 			dependencies.showToast(`${bytes.length} byte${bytes.length === 1 ? "" : "s"} sent to RS-485`);
 			dependencies.publishSendWorkflow?.({ type: "send/succeeded", completedAt: now() });
@@ -263,38 +286,30 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		}
 	}
 
-	async function sendBytes(bytes: readonly number[]) {
+	async function sendBytes(bytes: readonly number[]): Promise<boolean> {
 		if (!bytes?.length) return false;
 		const sent = await transmitBytes(Uint8Array.from(bytes), "manual");
 		if (!sent) return false;
-		const previousSettings = { ...state.sendSettings };
-		state.sendSettings.draft = "";
+		const previousSettings = settings();
+		replaceSettings({ ...previousSettings, draft: "" });
 		persistSettings(previousSettings, true);
 		dependencies.publishSendState();
 		return true;
 	}
 
-	function addDraftToQueue(bytes: readonly number[]) {
+	function addDraftToQueue(bytes: readonly number[]): boolean {
 		if (!bytes?.length) return false;
-		const item: SendQueueEntry = {
-			id: generateId(),
-			bytes: [...bytes],
-			createdAt: now()
-		};
-		const position = state.sendQueue.length;
-		const previousSettings = { ...state.sendSettings };
-		state.sendQueue.push(item);
-		state.sendSettings.draft = "";
-		void persistQueueItem(item, position).then(() => {
-			clearPersistenceFailure();
-		}).catch(error => {
-			state.sendQueue = state.sendQueue.filter(candidate => candidate.id !== item.id);
+		const item: SendQueueEntry = { id: generateId(), bytes: [...bytes], createdAt: now() };
+		const position = queue().length;
+		const previousSettings = settings();
+		replaceQueue([...queue(), item]);
+		replaceSettings({ ...previousSettings, draft: "" });
+		void persistQueueItem(item, position).then(() => clearPersistenceFailure()).catch(error => {
+			if (compatibilityState) replaceQueue(queue().filter(candidate => candidate.id !== item.id));
 			dependencies.publishSendState();
 			reportPersistenceFailure(error, async () => {
-				if (!state.sendQueue.some(candidate => candidate.id === item.id)) {
-					state.sendQueue.splice(Math.min(position, state.sendQueue.length), 0, item);
-					dependencies.publishSendState();
-				}
+				if (compatibilityState && !queue().some(candidate => candidate.id === item.id)) replaceQueue([...queue(), item]);
+				dependencies.publishSendState();
 				await persistQueueItem(item, position);
 				clearPersistenceFailure();
 			});
@@ -305,64 +320,64 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		return true;
 	}
 
-	function setSendDraft(value: string) {
-		const previousSettings = { ...state.sendSettings };
-		state.sendSettings.draft = String(value);
-		persistSettings(previousSettings);
+	function setSendDraft(value: string): void {
+		const previous = settings();
+		replaceSettings({ ...previous, draft: String(value) });
+		persistSettings(previous);
 		dependencies.publishSendState();
 	}
 
-	function setQueueDelay(value: number) {
-		const previousSettings = { ...state.sendSettings };
-		state.sendSettings.delayMs = Math.max(0, Math.min(600_000, Number(value) || 0));
-		persistSettings(previousSettings);
+	function setQueueDelay(value: number): void {
+		const previous = settings();
+		replaceSettings({ ...previous, delayMs: Math.max(0, Math.min(600_000, Number(value) || 0)) });
+		persistSettings(previous);
 		dependencies.publishSendState();
 	}
 
-	function sendQueueItem(id: string) {
-		const item = state.sendQueue.find(entry => entry.id === id);
+	function sendQueueItem(id: string): void {
+		const item = queue().find(entry => entry.id === id);
 		if (item) void transmitBytes(Uint8Array.from(item.bytes as number[]), "manual");
 	}
 
-	function removeQueueItem(id: string) {
-		const removed = state.sendQueue.find(item => item.id === id);
-		const restoreIndex = state.sendQueue.findIndex(item => item.id === id);
-		state.sendQueue = state.sendQueue.filter(item => item.id !== id);
+	function removeQueueItem(id: string): void {
+		const removed = queue().find(item => item.id === id);
+		const restoreIndex = queue().findIndex(item => item.id === id);
+		if (compatibilityState) replaceQueue(queue().filter(item => item.id !== id));
 		if (removed) deleteQueueItem(removed, restoreIndex);
 		dependencies.publishSendState();
 	}
 
-	function replayHistoryItem(id: string) {
-		const item = state.sendHistory.find(entry => entry.id === id);
+	function replayHistoryItem(id: string): void {
+		const item = history().find(entry => entry.id === id);
 		if (item) void transmitBytes(Uint8Array.from(item.bytes as number[]), "replay");
 	}
 
-	function stopSendQueue() {
+	function stopSendQueue(): void {
 		stopQueueRequested = true;
 		queueDelayResolve?.();
 		dependencies.publishSendState();
 	}
 
-	function clearSendQueue() {
-		if (!state.sendQueue.length || queueRunning) return;
+	function clearSendQueue(): void {
+		if (!queue().length || queueRunning) return;
 		if (!dependencies.confirm("Clear every message from the transmit queue?")) return;
-		const removed = [...state.sendQueue];
-		state.sendQueue = [];
+		const removed = [...queue()];
+		if (compatibilityState) replaceQueue([]);
 		removed.forEach((item, index) => deleteQueueItem(item, index));
 		dependencies.publishSendState();
 	}
 
-	function clearSendHistory() {
-		if (!state.sendHistory.length) return;
+	function clearSendHistory(): void {
+		if (!history().length) return;
 		if (!dependencies.confirm("Clear the separate local send history? Captured TX bytes will remain in captures.")) return;
-		const removed = [...state.sendHistory];
-		state.sendHistory = [];
+		const removed = [...history()];
+		if (compatibilityState) replaceHistory([]);
 		removed.forEach((item, index) => deleteHistoryItem(item, index));
 		dependencies.publishSendState();
 	}
 
-	function waitForQueueDelay(ms: number) {
-		return new Promise<void>(resolve => {
+	function waitForQueueDelay(ms: number): Promise<void> {
+		return new Promise(resolve => {
 			const finish = () => {
 				if (queueDelayTimer) clearTimeout(queueDelayTimer);
 				queueDelayTimer = null;
@@ -374,13 +389,13 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		});
 	}
 
-	async function runSendQueue() {
-		if (queueRunning || sendInFlight || !dependencies.transport.getPort()?.writable || !state.sendQueue.length) return;
+	async function runSendQueue(): Promise<void> {
+		if (queueRunning || sendInFlight || !dependencies.transport.getPort()?.writable || !queue().length) return;
 		queueRunning = true;
 		stopQueueRequested = false;
 		dependencies.publishSendWorkflow?.({ type: "queue/started", startedAt: now() });
 		dependencies.publishSendState();
-		const queued = [...state.sendQueue];
+		const queued = [...queue()];
 		let completed = 0;
 		let queueFailure: string | null = null;
 		let queueCanRetry = false;
@@ -403,12 +418,10 @@ export function createSendController(dependencies: SendControllerDependencies) {
 				}
 				completed++;
 				const removed = queued[index];
-				state.sendQueue = state.sendQueue.filter(item => item.id !== removed.id);
+				if (compatibilityState) replaceQueue(queue().filter(item => item.id !== removed.id));
 				deleteQueueItem(removed, index);
 				dependencies.publishSendState();
-				if (index < queued.length - 1 && !stopQueueRequested) {
-					await waitForQueueDelay(state.sendSettings.delayMs);
-				}
+				if (index < queued.length - 1 && !stopQueueRequested) await waitForQueueDelay(settings().delayMs);
 			}
 		} catch (error) {
 			queueFailure = error instanceof Error ? error.message : String(error);
@@ -418,14 +431,9 @@ export function createSendController(dependencies: SendControllerDependencies) {
 			queueRunning = false;
 			stopQueueRequested = false;
 			dependencies.publishSendState();
-			if (queueFailure) {
-				dependencies.publishSendWorkflow?.({ type: "queue/failed", error: queueFailure, canRetry: queueCanRetry });
-			} else {
-				dependencies.publishSendWorkflow?.({ type: "queue/succeeded", completedAt: now() });
-			}
-			if (completed) {
-				dependencies.showToast(`Queue sent ${completed} message${completed === 1 ? "" : "s"}`);
-			}
+			if (queueFailure) dependencies.publishSendWorkflow?.({ type: "queue/failed", error: queueFailure, canRetry: queueCanRetry });
+			else dependencies.publishSendWorkflow?.({ type: "queue/succeeded", completedAt: now() });
+			if (completed) dependencies.showToast(`Queue sent ${completed} message${completed === 1 ? "" : "s"}`);
 		}
 	}
 

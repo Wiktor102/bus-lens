@@ -3,84 +3,54 @@ import test from "node:test";
 import { createAppRuntime } from "../src/app/app-runtime.ts";
 import { createCaptureController } from "../src/features/capture/capture-controller.ts";
 import type { ArchiveDataLayer } from "../src/data/archive-data-layer.ts";
-import { STORAGE_KEY, type AppState } from "../src/shared/app-state.ts";
+import type { Capture } from "../src/features/capture/capture-framing.ts";
 
-function emptyState(): AppState {
-	return {
-		captures: [],
-		folders: [],
-		activeId: null,
-		unfiledCollapsed: false,
-		sendQueue: [],
-		sendHistory: [],
-		sendSettings: { draft: "", delayMs: 100, baudRate: 115200 }
-	};
+function capture(id: string): Capture {
+	return { id, name: id, messages: [], byteStream: [], frameSections: [], notes: [], annotations: {} };
 }
 
-test("keeps a legacy fallback for live compatibility without exposing generic persistence", async () => {
-	const legacy: AppState = {
-		...emptyState(),
-		captures: [{ id: "legacy-capture", name: "Legacy", messages: [], byteStream: [] }]
-	};
-	const runtime = createAppRuntime({
-		storage: { getItem: key => key === STORAGE_KEY ? JSON.stringify(legacy) : null }
-	});
+test("does not expose a mutable archive-wide state or generic persistence API", async () => {
+	const runtime = createAppRuntime();
 
-	assert.equal(runtime.state.captures[0]?.id, "legacy-capture");
+	assert.equal("state" in runtime, false);
 	assert.equal("saveState" in runtime, false);
 	assert.equal("persistState" in runtime, false);
 	await runtime.ready;
-	assert.equal(runtime.capture()?.id, "legacy-capture");
+	assert.equal(runtime.capture(), undefined);
 });
 
-test("hydrates the compatibility projection only from the archive data layer", async () => {
-	const stored: AppState = {
-		...emptyState(),
-		captures: [{ id: "stored-capture", name: "Stored", messages: [], byteStream: [] }],
-		folders: [{ id: "stored-folder", name: "Stored folder", collapsed: false }],
-		activeId: "stored-capture",
-		unfiledCollapsed: true,
-		sendQueue: [{ id: "queue-1", bytes: [1] }],
-		sendHistory: [{ id: "history-1", bytes: [2] }],
-		sendSettings: { draft: "AA", delayMs: 250, baudRate: 9600 }
-	};
+test("hydrates the active capture through archive reads and named commands", async () => {
+	const stored = capture("stored-capture");
 	const archive = {
 		ready: Promise.resolve(),
+		reads: {
+			index: () => ({ activeId: stored.id, unfiledCollapsed: true, captures: [{ id: stored.id, folderId: null, position: 0 }], folders: [] }),
+			capture: () => undefined,
+			captureSummaries: () => [],
+			captures: () => [{ id: stored.id, name: stored.name, description: "", view: "", folderId: null, params: [], messageCount: 0 }],
+			folders: () => [],
+			queue: () => [],
+			history: () => [],
+			settings: () => ({ draft: "", delayMs: 100, baudRate: 115200 })
+		},
 		commands: {
-			hydrate: async () => ({
-				index: {
-					activeId: stored.activeId ?? null,
-					unfiledCollapsed: true,
-					captures: [{ id: "stored-capture", folderId: "stored-folder", position: 0 }],
-					folders: [{ id: "stored-folder", position: 0 }]
-				},
-				captures: stored.captures,
-				folders: stored.folders,
-				queue: stored.sendQueue!,
-				history: stored.sendHistory!,
-				settings: stored.sendSettings!,
-				summaries: []
-			}),
+			getCapture: async () => stored,
 			recordingWriter: {}
 		}
 	} as unknown as ArchiveDataLayer;
 
-	const runtime = createAppRuntime({ archive, storage: { getItem: () => null } });
+	const runtime = createAppRuntime({ archive });
 	await runtime.ready;
 
-	assert.deepEqual(runtime.state.captures.map(capture => capture.id), ["stored-capture"]);
-	assert.deepEqual(runtime.state.folders.map(folder => folder.id), ["stored-folder"]);
-	assert.deepEqual(runtime.state.sendQueue?.map(item => item.id), ["queue-1"]);
-	assert.deepEqual(runtime.state.sendHistory?.map(item => item.id), ["history-1"]);
-	assert.equal(runtime.getActiveId(), "stored-capture");
-	assert.equal(runtime.state.unfiledCollapsed, true);
-	assert.equal(runtime.state.sendSettings?.delayMs, 250);
+	assert.equal(runtime.getActiveId(), stored.id);
+	assert.equal(runtime.capture()?.id, stored.id);
+	assert.equal(runtime.getCapture(stored.id)?.id, stored.id);
 });
 
 test("waits for a named capture command before recording or canonicalization", async () => {
 	let release!: () => void;
 	const write = new Promise<void>(resolve => { release = resolve; });
-	const runtime = createAppRuntime({ storage: { getItem: () => null } });
+	const runtime = createAppRuntime();
 	runtime.trackCaptureWrite("capture-1", write);
 
 	let waited = false;

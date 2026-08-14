@@ -1,4 +1,4 @@
-import { normalizeSendState, type AppState, type SendHistoryEntry, type SendQueueEntry, type SendSettings, type StoredFolder } from "../../shared/app-state.ts";
+import { MAX_SEND_HISTORY, type SendHistoryEntry, type SendQueueEntry, type SendSettings, type StoredFolder } from "../../shared/app-state.ts";
 import {
 	frameWidth,
 	hexByte,
@@ -14,6 +14,7 @@ import {
 import { recognizeMessagePatterns } from "../analysis/analysis.ts";
 import type { ExportFormat } from "../dialogs/dialog-model.ts";
 import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
+import type { ArchiveIndex } from "../../persistence/archive-client.ts";
 
 export type DataTransferFile = {
 	name: string;
@@ -28,7 +29,7 @@ export type DataTransferTimeDependencies = {
 	nowIso?: () => string;
 };
 
-export type DataTransferState = AppState & {
+export type DataTransferState = {
 	captures: Capture[];
 	folders: StoredFolder[];
 	sendHistory: SendHistoryEntry[];
@@ -37,10 +38,18 @@ export type DataTransferState = AppState & {
 };
 
 export type DataTransferDependencies = DataTransferTimeDependencies & {
-	state: AppState;
+	/** Test-only compatibility input; production reads come from TanStack Query. */
+	state?: DataTransferState;
 	capture: () => Capture | undefined;
+	getCaptures?: () => readonly CaptureIndexEntry[] | undefined;
+	getFolders?: () => readonly StoredFolder[] | undefined;
+	getQueue?: () => readonly SendQueueEntry[] | undefined;
+	getHistory?: () => readonly SendHistoryEntry[] | undefined;
+	getSettings?: () => SendSettings | undefined;
+	getArchiveIndex?: () => ArchiveIndex | undefined;
 	getActiveId: () => string | null | undefined;
 	setActiveId: (captureId: string | null | undefined) => void;
+	setActiveCapture?: (capture: Capture | undefined) => void;
 	setSelectedCaptureId?: (captureId: string | null) => void;
 	archiveCommands?: ArchiveCommands;
 	render: () => void;
@@ -48,9 +57,11 @@ export type DataTransferDependencies = DataTransferTimeDependencies & {
 	download: Download;
 };
 
+type CaptureIndexEntry = Pick<Capture, "id" | "name" | "folderId" | "storageStatus">;
+
 export type DataTransferController = {
 	importFile: (file: DataTransferFile) => Promise<void>;
-	exportData: (format: ExportFormat) => void;
+	exportData: (format: ExportFormat) => Promise<void>;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -127,35 +138,62 @@ function formatTime(milliseconds: number): string {
 }
 
 export function createDataTransferController(dependencies: DataTransferDependencies): DataTransferController {
-	const state = dependencies.state as DataTransferState;
+	const compatibilityState = dependencies.state;
 	const { generateId, now, nowIso } = resolveTimeDependencies(dependencies);
+
+	function captures(): readonly CaptureIndexEntry[] {
+		return dependencies.getCaptures?.() || compatibilityState?.captures || [];
+	}
+
+	function folders(): readonly StoredFolder[] {
+		return dependencies.getFolders?.() || compatibilityState?.folders || [];
+	}
+
+	function queue(): readonly SendQueueEntry[] {
+		return dependencies.getQueue?.() || compatibilityState?.sendQueue || [];
+	}
+
+	function history(): readonly SendHistoryEntry[] {
+		return dependencies.getHistory?.() || compatibilityState?.sendHistory || [];
+	}
+
+	function settings(): SendSettings {
+		return { delayMs: 100, draft: "", baudRate: 115200, ...(dependencies.getSettings?.() || compatibilityState?.sendSettings || {}) };
+	}
 
 	async function importFile(file: DataTransferFile): Promise<void> {
 		try {
 			const text = await file.text();
 			let importedCaptures: Capture[] = [];
+			let importedFolders: StoredFolder[] = [];
+			let importedQueue: SendQueueEntry[] = [];
+			let importedHistory: SendHistoryEntry[] = [];
+			let importedSettings = settings();
+			const existingFolders = [...folders()];
+			const existingCaptures = [...captures()];
 			if (file.name.toLowerCase().endsWith(".json")) {
 				const imported: unknown = JSON.parse(text);
 				const importedArchive = isRecord(imported) ? imported : undefined;
 				const captures = (Array.isArray(imported) ? imported : importedArchive?.captures) as Capture[] | undefined;
 				if (!Array.isArray(captures)) throw new Error("No captures found");
 				importedCaptures = captures;
-				const importedFolders = Array.isArray(importedArchive?.folders) ? importedArchive.folders : [];
+				const sourceFolders = Array.isArray(importedArchive?.folders) ? importedArchive.folders : [];
 				const folderIdMap = new Map<unknown, string>();
-				const existingFolderNames = new Map(state.folders.map(folder => [folder.name.toLowerCase(), folder.id]));
-				const existingCaptureIds = new Set(state.captures.map(capture => capture.id));
-				importedFolders.forEach(sourceFolder => {
+				const existingFolderNames = new Map(existingFolders.map(folder => [folder.name.toLowerCase(), folder.id]));
+				const existingCaptureIds = new Set(existingCaptures.map(capture => capture.id));
+				sourceFolders.forEach(sourceFolder => {
 					const folder = isRecord(sourceFolder) ? sourceFolder : {};
 					const name = String(folder.name || "Imported folder").trim() || "Imported folder";
 					let id = existingFolderNames.get(name.toLowerCase());
 					if (!id) {
 						id = generateId();
-						state.folders.push({
+						const nextFolder = {
 							id,
 							name,
 							collapsed: Boolean(folder.collapsed),
 							createdAt: (folder.createdAt as string | undefined) || nowIso()
-						});
+						};
+						importedFolders.push(nextFolder);
 						existingFolderNames.set(name.toLowerCase(), id);
 					}
 					if (folder.id) folderIdMap.set(folder.id, id);
@@ -168,19 +206,27 @@ export function createDataTransferController(dependencies: DataTransferDependenc
 					rebuildPreview(capture, generateId);
 					capture.messages!.forEach(message => (message.id ||= generateId()));
 				});
-				state.captures.unshift(...captures);
+				if (compatibilityState) compatibilityState.folders.push(...importedFolders);
+				if (compatibilityState) compatibilityState.captures.unshift(...captures);
 				if (importedArchive && Array.isArray(importedArchive.sendHistory)) {
-					state.sendHistory = [...(importedArchive.sendHistory as SendHistoryEntry[]), ...state.sendHistory];
+					importedHistory = (importedArchive.sendHistory as SendHistoryEntry[])
+						.filter(item => Array.isArray(item.bytes) && item.bytes.length)
+						.map(item => ({ ...item, id: String(item.id || generateId()), bytes: item.bytes!.map(Number) }))
+						.slice(0, MAX_SEND_HISTORY);
 				}
 				if (importedArchive && Array.isArray(importedArchive.sendQueue)) {
-					state.sendQueue = [...(importedArchive.sendQueue as SendQueueEntry[]), ...state.sendQueue];
+					importedQueue = (importedArchive.sendQueue as SendQueueEntry[])
+						.filter(item => Array.isArray(item.bytes) && item.bytes.length)
+						.map(item => ({ ...item, id: String(item.id || generateId()), bytes: item.bytes!.map(Number), createdAt: item.createdAt || now() }));
 				}
 				if (importedArchive && isRecord(importedArchive.sendSettings)) {
-					state.sendSettings = { ...state.sendSettings, ...importedArchive.sendSettings, draft: state.sendSettings.draft };
+					importedSettings = { ...importedSettings, ...(importedArchive.sendSettings as Partial<SendSettings>), draft: importedSettings.draft };
 				}
-				normalizeSendState(state, { generateId, now });
-				dependencies.setActiveId(captures[0]?.id || dependencies.getActiveId());
-				dependencies.setSelectedCaptureId?.(captures[0]?.id ? String(captures[0].id) : null);
+				if (compatibilityState) {
+					compatibilityState.sendHistory = [...importedHistory, ...compatibilityState.sendHistory].slice(0, MAX_SEND_HISTORY);
+					compatibilityState.sendQueue = [...importedQueue, ...compatibilityState.sendQueue];
+					compatibilityState.sendSettings = importedSettings;
+				}
 			} else {
 				const captures = parseDump(text, { generateId, now, nowIso });
 				if (!captures.length) throw new Error("No timestamped hex messages found");
@@ -189,22 +235,26 @@ export function createDataTransferController(dependencies: DataTransferDependenc
 					normalizeCapture(capture, generateId);
 					rebuildPreview(capture, generateId);
 				});
-				state.captures.unshift(...captures);
-				dependencies.setActiveId(captures[0].id);
-				dependencies.setSelectedCaptureId?.(String(captures[0].id));
+				if (compatibilityState) compatibilityState.captures.unshift(...captures);
+			}
+			const activeCapture = importedCaptures[0];
+			if (activeCapture) {
+				dependencies.setActiveCapture?.(activeCapture);
+				dependencies.setActiveId(activeCapture.id);
+				dependencies.setSelectedCaptureId?.(String(activeCapture.id));
 			}
 			if (dependencies.archiveCommands) {
 				await Promise.all([
 					...importedCaptures.map(capture => dependencies.archiveCommands!.saveLegacyCapture(capture)),
-					...state.folders.map(folder => dependencies.archiveCommands!.saveFolder(folder)),
-					...state.sendQueue.map((item, position) => dependencies.archiveCommands!.saveQueueItem(item, position)),
-					...state.sendHistory.map(item => dependencies.archiveCommands!.saveHistoryItem(item)),
-					dependencies.archiveCommands.saveSettings(state.sendSettings),
+					...importedFolders.map(folder => dependencies.archiveCommands!.saveFolder(folder)),
+					...importedQueue.map((item, position) => dependencies.archiveCommands!.saveQueueItem(item, existingCaptures.length + position)),
+					...importedHistory.map(item => dependencies.archiveCommands!.saveHistoryItem(item)),
+					...(importedQueue.length || importedHistory.length || file.name.toLowerCase().endsWith(".json") ? [dependencies.archiveCommands.saveSettings(importedSettings)] : []),
 					dependencies.archiveCommands.persistArchiveIndex({
 						activeId: dependencies.getActiveId() ?? null,
-						unfiledCollapsed: Boolean(state.unfiledCollapsed),
-						captures: state.captures.map((capture, position) => ({ id: String(capture.id), folderId: capture.folderId ?? null, position })),
-						folders: state.folders.map((folder, position) => ({ id: String(folder.id), position }))
+						unfiledCollapsed: Boolean(dependencies.getArchiveIndex?.()?.unfiledCollapsed),
+						captures: [...importedCaptures, ...existingCaptures].map((capture, position) => ({ id: String(capture.id), folderId: capture.folderId ?? null, position })),
+						folders: [...existingFolders, ...importedFolders].map((folder, position) => ({ id: String(folder.id), position }))
 					})
 				]);
 			}
@@ -216,21 +266,25 @@ export function createDataTransferController(dependencies: DataTransferDependenc
 		}
 	}
 
-	function exportData(format: ExportFormat): void {
+	async function exportData(format: ExportFormat): Promise<void> {
 		const capture = dependencies.capture()!;
+		if (!capture) return;
 		const safeName = capture.name!.replace(/[^a-z0-9_-]+/gi, "-").toLowerCase();
 		if (format === "json") {
+			const exportedCaptures = compatibilityState?.captures || (dependencies.archiveCommands
+				? (await Promise.all(captures().map(item => dependencies.archiveCommands!.getCapture(String(item.id))))).filter(Boolean) as Capture[]
+				: [capture]);
 			dependencies.download(
 				JSON.stringify(
 					{
 						app: "Bus Lens",
 						version: 3,
 						exportedAt: nowIso(),
-						folders: state.folders,
-						captures: state.captures,
-						sendHistory: state.sendHistory,
-						sendQueue: state.sendQueue,
-						sendSettings: { ...state.sendSettings, draft: "" }
+						folders: folders(),
+						captures: exportedCaptures,
+						sendHistory: history(),
+						sendQueue: queue(),
+						sendSettings: { ...settings(), draft: "" }
 					},
 					null,
 					2
