@@ -9,7 +9,6 @@ import {
 import { getArchiveActions } from "./archive-bridge";
 import { type ArchiveCapture, type ArchiveGroup, type ArchiveStorageFilter } from "./archive-list";
 import { captureStorageLabel, captureStorageUiStatus } from "../capture/capture-storage";
-<<<<<<< HEAD
 import { ArrowUp, Check, ChevronRight, Copy, Download, Folder, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import { useArchiveGroups, useArchiveList, useSelectedCaptureId } from "../../data/archive-react.tsx";
 

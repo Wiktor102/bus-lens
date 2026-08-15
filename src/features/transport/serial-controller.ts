@@ -2,7 +2,7 @@ import { publishTransportSnapshot } from "./transport-bridge.ts";
 import type { AppState } from "../../shared/app-state.ts";
 import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
 import { recordReceivedByte } from "../capture/capture-summary.ts";
-import { rebuildPreview, type Capture } from "../capture/capture-framing.ts";
+import { appendLivePreview, rebuildPreview, type Capture } from "../capture/capture-framing.ts";
 import {
 	CaptureAppendQueue,
 	type AppendCaptureChunkRequest,
@@ -50,9 +50,9 @@ export type SerialControllerDependencies = {
 	publishPersistenceError?: (error: { captureId: string; message: string } | null) => void;
 };
 
-type PendingLiveByte = {
+type PendingLiveSegment = {
 	captureId?: string;
-	value: number;
+	values: number[];
 	timestamp: number;
 	direction: string;
 	sessionId?: string;
@@ -75,7 +75,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	let recordingCaptureId: string | null = null;
 	let canonicalRecording = false;
 	let readAbort = false;
-	let pendingLiveBytes: PendingLiveByte[] = [];
+	let pendingLiveSegments: PendingLiveSegment[] = [];
 	let liveRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 	let persistenceError: { captureId: string; error: unknown } | null = null;
 	let legacyWrite: Promise<void> = Promise.resolve();
@@ -196,40 +196,45 @@ export function createSerialController(dependencies: SerialControllerDependencie
 
 	function flushLiveBytes() {
 		liveRefreshTimer = null;
-		if (!pendingLiveBytes.length) return;
-		const captureId = pendingLiveBytes[0]?.captureId;
+		if (!pendingLiveSegments.length) return;
+		const pendingSegments = pendingLiveSegments;
+		pendingLiveSegments = [];
+		const captureId = pendingSegments[0]?.captureId;
 		const capture = captureById(captureId);
-		if (!capture) {
-			pendingLiveBytes = [];
-			return;
-		}
+		if (!capture) return;
 		const sessionsById = new Map((capture.captureSessions || []).map(session => [session.id, session]));
 		let nextRawOffset = capture.nextRawOffset ?? Math.max(0, ...(capture.byteStream || []).map((record, index) => (record.rawOffset ?? index) + 1));
-		for (const record of pendingLiveBytes) {
-			capture.byteStream!.push({ ...record, rawOffset: nextRawOffset++ });
-			if (record.direction !== "tx") {
-				recordReceivedByte(
-					record.sessionId ? sessionsById.get(record.sessionId) : undefined,
-					record.timestamp
-				);
+		const previousByteStreamLength = capture.byteStream!.length;
+		for (const segment of pendingSegments) {
+			for (const value of segment.values) {
+				capture.byteStream!.push({
+					value,
+					timestamp: segment.timestamp,
+					direction: segment.direction,
+					sessionId: segment.sessionId,
+					rawOffset: nextRawOffset++
+				});
+				if (segment.direction !== "tx") {
+					recordReceivedByte(segment.sessionId ? sessionsById.get(segment.sessionId) : undefined, segment.timestamp);
+				}
 			}
 		}
 		capture.nextRawOffset = nextRawOffset;
 		if (canonicalRecording && captureId && appendQueue && recordingSessionId && captureId === recordingCaptureId) {
-			for (const record of pendingLiveBytes) {
+			for (const segment of pendingSegments) {
 				appendQueue.enqueue(captureId, {
-					timestamp: record.timestamp,
-					direction: record.direction === "tx" ? "tx" : "rx",
-					bytes: [record.value]
+					timestamp: segment.timestamp,
+					direction: segment.direction === "tx" ? "tx" : "rx",
+					bytes: segment.values
 				});
 			}
 			void appendQueue.flush(captureId).catch(() => {
 				// The queue retains the rejected batch and publishes a persistent error.
 			});
 		}
-		pendingLiveBytes = [];
 		const trimmed = trimCapture(capture);
-		rebuildPreview(capture);
+		const incrementallyRebuilt = !trimmed && appendLivePreview(capture, previousByteStreamLength);
+		if (!incrementallyRebuilt) rebuildPreview(capture);
 		if (!canonicalRecording) persistLiveCapture(capture);
 		dependencies.publishFramingToolbarState(capture);
 		dependencies.renderMessages();
@@ -237,16 +242,16 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	}
 
 	function queueLiveBytes(bytes: Iterable<number>, direction: string) {
+		const values = [...bytes];
+		if (!values.length) return;
 		const timestamp = performance.timeOrigin + performance.now();
-		for (const value of bytes) {
-			pendingLiveBytes.push({
-				captureId: recordingCaptureId ?? (dependencies.capture()?.id ? String(dependencies.capture()?.id) : undefined),
-				value,
-				timestamp,
-				direction,
-				sessionId: recordingSessionId || undefined
-			});
-		}
+		pendingLiveSegments.push({
+			captureId: recordingCaptureId ?? (dependencies.capture()?.id ? String(dependencies.capture()?.id) : undefined),
+			values,
+			timestamp,
+			direction,
+			sessionId: recordingSessionId || undefined
+		});
 		if (!liveRefreshTimer) liveRefreshTimer = setTimeout(flushLiveBytes, LIVE_REFRESH_MS);
 	}
 
@@ -461,6 +466,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		getPort,
 		isConnected,
 		isRecording,
+		getRecordingCaptureId: () => recording ? recordingCaptureId : null,
 		hasUnacknowledgedBytes: () => appendQueue?.hasUnacknowledgedBytes() ?? false,
 		getPersistenceError: () => persistenceError?.error ?? null,
 		retryPersistence,
