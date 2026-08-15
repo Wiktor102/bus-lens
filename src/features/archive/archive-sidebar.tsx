@@ -121,12 +121,15 @@ function CaptureItem({
 		>
 			<button className="capture-open" type="button" data-capture-id={capture.id} onClick={() => onSelect(capture.id)}>
 				<strong className="capture-name-row">
-					{capture.name}
-					{storageStatus === "legacy" || storageStatus === "failed" ? (
-						<span className={`storage-badge storage-${storageStatus}`} data-storage-status={capture.storageStatus || "legacy-not-canonicalized"}>
-							{captureStorageLabel(storageStatus)}
-						</span>
-					) : null}
+					<span className="capture-name">{capture.name}</span>
+					<span className="capture-badges">
+						{capture.isRecording ? <span className="recording-badge">LIVE</span> : null}
+						{storageStatus === "legacy" || storageStatus === "failed" ? (
+							<span className={`storage-badge storage-${storageStatus}`} data-storage-status={capture.storageStatus || "legacy-not-canonicalized"}>
+								{captureStorageLabel(storageStatus)}
+							</span>
+						) : null}
+					</span>
 				</strong>
 				<small>
 					<span>{capture.view || "Unassigned view"}</span>

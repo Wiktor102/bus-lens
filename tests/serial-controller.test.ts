@@ -43,6 +43,36 @@ test("retaining a rolling capture preserves absolute offsets and section starts"
 	assert.deepEqual(capture.messages?.at(-1)?.rawOffsets, [MAX_CAPTURE_BYTES - 1, MAX_CAPTURE_BYTES]);
 });
 
+test("keeps the recording target when the selected capture changes", async () => {
+	const recordingCapture: Capture = { id: "recording", byteStream: [], frameSections: [], messages: [], notes: [], annotations: {} };
+	const selectedCapture: Capture = { id: "selected", byteStream: [], frameSections: [], messages: [], notes: [], annotations: {} };
+	let selected = recordingCapture;
+	const controller = createSerialController({
+		capture: () => selected,
+		state: { captures: [recordingCapture, selectedCapture] } as AppState,
+		saveState: () => {},
+		showToast: () => {},
+		publishCaptureHeaderState: () => {},
+		publishFramingToolbarState: () => {},
+		publishAnalysisState: () => {},
+		publishNotesState: () => {},
+		renderMessages: () => {},
+		stopSendQueue: () => {}
+	});
+
+	await controller.toggleRecording();
+	selected = selectedCapture;
+	controller.queueLiveBytes([0xaa], "rx");
+	controller.flushLiveBytes();
+
+	assert.equal(controller.getRecordingCaptureId(), recordingCapture.id);
+	assert.deepEqual(recordingCapture.byteStream?.map(record => record.value), [0xaa]);
+	assert.deepEqual(selectedCapture.byteStream, []);
+
+	await controller.stopRecording();
+	assert.equal(controller.getRecordingCaptureId(), null);
+});
+
 test("retaining a rolling capture preserves the framing active at the rollover boundary", () => {
 	const capture: Capture = {
 		byteStream: Array.from({ length: MAX_CAPTURE_BYTES }, (_, rawOffset) => ({

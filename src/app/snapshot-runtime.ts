@@ -28,7 +28,7 @@ export type SnapshotRuntimeDependencies = {
 	state: AppState;
 	capture: () => Capture | undefined;
 	getActiveId: () => string | null | undefined;
-	getTransport: () => Pick<SerialController, "getPort" | "isRecording" | "publishState">;
+	getTransport: () => Pick<SerialController, "getPort" | "isRecording" | "getRecordingCaptureId" | "publishState">;
 	getSendController: () => Pick<SendController, "getStatus"> | undefined;
 	getViewStateSnapshot?: () => ViewStateSnapshot;
 };
@@ -50,6 +50,7 @@ export function createSnapshotRuntime(dependencies: SnapshotRuntimeDependencies)
 	const getViewState = dependencies.getViewStateSnapshot || getViewStateSnapshot;
 
 	function publishArchiveState(): void {
+		const recordingCaptureId = dependencies.getTransport().getRecordingCaptureId();
 		publishArchiveSnapshot({
 			captures: state.captures.map(item => ({
 				id: String(item.id),
@@ -61,6 +62,7 @@ export function createSnapshotRuntime(dependencies: SnapshotRuntimeDependencies)
 					value: String((parameter as { value?: unknown }).value ?? "")
 				})),
 				messageCount: visibleMessages(item).length,
+				isRecording: recordingCaptureId === String(item.id),
 				storageStatus: item.storageStatus
 			})),
 			folders: state.folders.map(folder => ({
@@ -108,7 +110,9 @@ export function createSnapshotRuntime(dependencies: SnapshotRuntimeDependencies)
 
 	function publishCaptureHeaderState(): void {
 		const capture = dependencies.capture();
-		publishCaptureHeaderSnapshot(deriveCaptureHeaderSnapshot(capture, dependencies.getTransport().isRecording()));
+		const recordingCaptureId = dependencies.getTransport().getRecordingCaptureId();
+		const isRecording = Boolean(capture?.id && recordingCaptureId === String(capture.id));
+		publishCaptureHeaderSnapshot(deriveCaptureHeaderSnapshot(capture, isRecording));
 		publishCaptureStorageSnapshot(captureStorageSnapshot(capture?.id ? String(capture.id) : null, capture?.storageStatus));
 	}
 
