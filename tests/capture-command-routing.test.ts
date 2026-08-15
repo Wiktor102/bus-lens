@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createCaptureController } from "../src/features/capture/capture-controller.ts";
 import { createAppRuntime } from "../src/app/app-runtime.ts";
+import { createSnapshotRuntime } from "../src/app/snapshot-runtime.ts";
+import { getMessageStreamSnapshot } from "../src/features/message-stream/message-stream-bridge.ts";
 import type { Capture } from "../src/features/capture/capture-framing.ts";
 import type { CaptureWriter } from "../src/persistence/archive-client.ts";
 import type { AppState } from "../src/shared/app-state.ts";
@@ -163,6 +165,13 @@ test("reloads server-owned frame IDs after canonical reframing", async () => {
 	};
 	const state = { captures: [capture], folders: [], unfiledCollapsed: false } as unknown as AppState;
 	let refreshCount = 0;
+	const snapshots = createSnapshotRuntime({
+		state,
+		capture: () => state.captures[0],
+		getActiveId: () => capture.id,
+		getTransport: () => ({ getPort: () => null, isRecording: () => false, publishState: () => {} }),
+		getSendController: () => ({ getStatus: () => ({ sendInFlight: false, queueRunning: false, stopQueueRequested: false }) })
+	});
 	const writer = {
 		reframe: async () => ({ captureId: capture.id!, profileId: "profile-2", version: 2, sourceDataRevision: 1, retainedStartOffset: 0, verified: true })
 	} as unknown as CaptureWriter;
@@ -172,7 +181,7 @@ test("reloads server-owned frame IDs after canonical reframing", async () => {
 		getActiveId: () => capture.id,
 		setActiveId: () => {},
 		saveState: () => { throw new Error("canonical mutation used generic saveState"); },
-		render: () => {},
+		render: snapshots.render,
 		renderMessages: () => {},
 		showToast: () => {},
 		confirm: () => true,
@@ -197,6 +206,12 @@ test("reloads server-owned frame IDs after canonical reframing", async () => {
 	assert.equal(refreshCount, 1);
 	assert.equal(state.captures[0]?.activeFramingProfileId, "profile-2");
 	assert.deepEqual(state.captures[0]?.messages?.map(message => message.id), ["server-frame-1", "server-frame-2"]);
+	assert.deepEqual(
+		getMessageStreamSnapshot().entries
+			.filter(entry => entry.type === "message")
+			.map(entry => entry.row.id),
+		["server-frame-1", "server-frame-2"]
+	);
 });
 
 test("serializes metadata and framing revisions while coalescing the latest optimistic state", async () => {

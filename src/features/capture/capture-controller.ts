@@ -227,6 +227,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			if (current) {
 				current.activeFramingProfileId = profile.profileId;
 			}
+			dependencies.render();
 		}
 	}
 
