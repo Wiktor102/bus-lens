@@ -4,9 +4,23 @@ import { createAppRuntime } from "../src/app/app-runtime.ts";
 import { createCaptureController } from "../src/features/capture/capture-controller.ts";
 import type { ArchiveDataLayer } from "../src/data/archive-data-layer.ts";
 import type { Capture } from "../src/features/capture/capture-framing.ts";
+import { applicationStore } from "../src/shared/application-store.ts";
 
 function capture(id: string): Capture {
-	return { id, name: id, messages: [], byteStream: [], frameSections: [], notes: [], annotations: {} };
+	return {
+		id,
+		name: id,
+		description: "",
+		view: "",
+		baudRate: 115200,
+		params: [],
+		messages: [],
+		byteStream: [],
+		frameSections: [],
+		notes: [],
+		annotations: {},
+		patternRemarks: {}
+	};
 }
 
 test("does not expose a mutable archive-wide state or generic persistence API", async () => {
@@ -64,11 +78,9 @@ test("waits for a named capture command before recording or canonicalization", a
 });
 
 test("keeps canonical routing when the supplemental status list is incomplete", async () => {
-	const stored: AppState = {
-		...emptyState(),
-		captures: [{ id: "canonical", name: "Before", storageStatus: "canonical", params: [], messages: [], byteStream: [] }],
-		activeId: "canonical"
-	};
+	applicationStore.send({ type: "capture/selected-changed", captureId: null });
+	const stored = capture("canonical");
+	stored.storageStatus = "canonical";
 	const metadataCalls: string[] = [];
 	const writer = {
 		patchMetadata: async () => {
@@ -78,21 +90,18 @@ test("keeps canonical routing when the supplemental status list is incomplete", 
 	};
 	const archive = {
 		ready: Promise.resolve(),
+		reads: {
+			index: () => ({ activeId: stored.id, unfiledCollapsed: false, captures: [{ id: stored.id, folderId: null, position: 0 }], folders: [] }),
+			capture: () => stored,
+			captureSummaries: () => [],
+			captures: () => [{ id: stored.id, name: stored.name, description: "", view: "", folderId: null, params: [], messageCount: 0 }],
+			folders: () => [],
+			queue: () => [],
+			history: () => [],
+			settings: () => ({ draft: "", delayMs: 100, baudRate: 115200 })
+		},
 		commands: {
-			hydrate: async () => ({
-				index: {
-					activeId: stored.activeId ?? null,
-					unfiledCollapsed: false,
-					captures: [{ id: "canonical", folderId: null, position: 0 }],
-					folders: []
-				},
-				captures: stored.captures,
-				folders: [],
-				queue: [],
-				history: [],
-				settings: stored.sendSettings!,
-				summaries: []
-			}),
+			getCapture: async () => stored,
 			recordingWriter: writer
 		}
 	} as unknown as ArchiveDataLayer;
@@ -102,11 +111,12 @@ test("keeps canonical routing when the supplemental status list is incomplete", 
 	assert.equal(runtime.isCanonicalCapture("canonical"), true);
 
 	const controller = createCaptureController({
-		state: runtime.state,
 		capture: runtime.capture,
+		getCapture: runtime.getCapture,
+		getCaptures: archive.reads.captures,
+		getFolders: archive.reads.folders,
 		getActiveId: runtime.getActiveId,
 		setActiveId: runtime.setActiveId,
-		saveState: () => { throw new Error("canonical rename used legacy persistence"); },
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
