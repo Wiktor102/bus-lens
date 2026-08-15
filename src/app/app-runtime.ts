@@ -49,6 +49,9 @@ export type AppRuntime = {
 	saveSendState: () => void;
 	saveSettings: () => void;
 	captureWriter: CaptureWriter | undefined;
+	trackCaptureWrite: (captureId: string, write: Promise<unknown>) => void;
+	markCapturePersisted: (captureId: string) => void;
+	deleteCapture: (captureId: string) => Promise<void>;
 	isCanonicalCapture: (captureId: string) => boolean;
 	getCaptureStorageStatus: (captureId: string) => CanonicalCaptureSummary["status"] | undefined;
 	isCaptureConversionLocked: (captureId: string) => boolean;
@@ -204,6 +207,7 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		queue: new Map<string, Promise<void>>(),
 		history: new Map<string, Promise<void>>()
 	};
+	const activeCaptureDeletes = new Map<string, Promise<void>>();
 	const showToast = (message: string): void => {
 		if (toastTimer) clearTimeout(toastTimer);
 		publishToastSnapshot({ message, visible: true });
@@ -267,6 +271,45 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		activeCaptureWrites.set(id, tracked);
 	}
 
+	function trackCaptureWrite(captureId: string, write: Promise<unknown>): void {
+		const id = String(captureId);
+		const previous = activeCaptureWrites.get(id);
+		const tracked = (previous ? Promise.all([previous, write]) : write).catch(() => undefined);
+		activeCaptureWrites.set(id, tracked);
+		void tracked.then(() => {
+			if (activeCaptureWrites.get(id) === tracked) activeCaptureWrites.delete(id);
+		});
+	}
+
+	function markCapturePersisted(captureId: string): void {
+		const id = String(captureId);
+		persistedIds.captures.add(id);
+		pendingDeletions.captures.delete(id);
+		const capture = captureById(id);
+		if (capture) capture.storageStatus = "canonical";
+	}
+
+	function deleteCapture(captureId: string): Promise<void> {
+		const id = String(captureId);
+		const existing = activeCaptureDeletes.get(id);
+		if (existing) return existing;
+		if (!writer) return Promise.reject(new Error("archive writer is unavailable"));
+		const wasPersisted = persistedIds.captures.has(id);
+		const deletion = (async () => {
+			await waitForCaptureWrite(id);
+			await writer.delete(id);
+			persistedIds.captures.delete(id);
+			pendingDeletions.captures.delete(id);
+		})()
+			.catch(error => {
+				if (wasPersisted) persistedIds.captures.add(id);
+				throw error;
+			})
+			.finally(() => activeCaptureDeletes.delete(id));
+		activeCaptureDeletes.set(id, deletion);
+		return deletion;
+	}
+
 	function isCanonicalCapture(captureId: string): boolean {
 		return captureStorageStatus(captureId) === "canonical";
 	}
@@ -313,12 +356,13 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		current: Set<string>,
 		pending: Set<string>,
 		active: Map<string, Promise<void>>,
-		remove: (id: string) => Promise<void>
+		remove: (id: string) => Promise<void>,
+		blocked?: (id: string) => boolean
 	): void {
 		for (const id of pending) if (current.has(id)) pending.delete(id);
 		for (const id of previous) if (!current.has(id)) pending.add(id);
 		for (const id of pending) {
-			if (current.has(id) || active.has(id)) continue;
+			if (current.has(id) || active.has(id) || blocked?.(id)) continue;
 			const removal = remove(id)
 				.then(() => { pending.delete(id); })
 				.catch(reportPersistenceFailure)
@@ -329,11 +373,21 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 
 	function reconcileDeletions(current: PersistedEntityIds): void {
 		if (!client) return;
-		reconcileDeletedIds(persistedIds.captures, current.captures, pendingDeletions.captures, activeDeletions.captures, id => client.deleteCapture(id));
+		const persistedCaptureIds = new Set(
+			[...current.captures].filter(id => persistedIds.captures.has(id) || !activeCaptureWrites.has(id))
+		);
+		reconcileDeletedIds(
+			persistedIds.captures,
+			persistedCaptureIds,
+			pendingDeletions.captures,
+			activeDeletions.captures,
+			id => client.deleteCapture(id),
+			id => activeCaptureDeletes.has(id)
+		);
 		reconcileDeletedIds(persistedIds.folders, current.folders, pendingDeletions.folders, activeDeletions.folders, id => client.deleteFolder(id));
 		reconcileDeletedIds(persistedIds.queue, current.queue, pendingDeletions.queue, activeDeletions.queue, id => client.deleteQueueItem(id));
 		reconcileDeletedIds(persistedIds.history, current.history, pendingDeletions.history, activeDeletions.history, id => client.deleteHistoryItem(id));
-		persistedIds = current;
+		persistedIds = { ...current, captures: persistedCaptureIds };
 	}
 
 	function persistState(): void {
@@ -459,6 +513,9 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		saveSendState,
 		saveSettings,
 		captureWriter: writer,
+		trackCaptureWrite,
+		markCapturePersisted,
+		deleteCapture,
 		isCanonicalCapture,
 		getCaptureStorageStatus,
 		isCaptureConversionLocked,
