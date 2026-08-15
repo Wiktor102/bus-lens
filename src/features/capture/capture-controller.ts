@@ -644,8 +644,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		dependencies.publishCaptureHeaderState();
 	}
 
-	function duplicateActiveCapture() {
-		const source = capture();
+	function duplicateCapture(source: ActiveCapture | undefined) {
 		if (!source || rejectLockedMutation(source)) return;
 		const copy = structuredClone(source);
 		copy.id = crypto.randomUUID();
@@ -670,6 +669,14 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				});
 		} else dependencies.saveState();
 		dependencies.render();
+	}
+
+	function duplicateArchiveCapture(captureId: string) {
+		duplicateCapture(captureById(captureId));
+	}
+
+	function duplicateActiveCapture() {
+		duplicateCapture(capture());
 	}
 
 	async function deleteArchiveCapture(captureId: string): Promise<void> {
@@ -1059,6 +1066,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		selectArchiveCapture,
 		toggleArchiveFolder,
 		moveArchiveCapture,
+		duplicateArchiveCapture,
 		deleteArchiveCapture,
 		saveFolder,
 		deleteFolder,

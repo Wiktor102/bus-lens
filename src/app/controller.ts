@@ -349,6 +349,7 @@ export function initializeController(): ControllerLifecycle {
 		toggleFolder: captureController.toggleArchiveFolder,
 		moveCapture: captureController.moveArchiveCapture,
 		upgradeCapture: captureController.upgradeCapture,
+		duplicateCapture: captureController.duplicateArchiveCapture,
 		deleteCapture: captureController.deleteArchiveCapture,
 		openNewCapture: () => captureController.publishContextDialog(true),
 		openExport: () => publishDialogCommand({ type: "export" }),
