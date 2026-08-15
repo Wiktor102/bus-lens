@@ -1,20 +1,14 @@
-import { registerArchiveActions } from "../features/archive/archive-bridge.ts";
 import { createAppRuntime } from "./app-runtime.ts";
 import { download } from "../features/data-transfer/browser-download.ts";
-import { registerCaptureHeaderActions } from "../features/capture/capture-header-bridge.ts";
-import { registerCaptureStorageActions } from "../features/capture/capture-storage-bridge.ts";
 import { rebuildPreview, visibleByteEntries } from "../features/capture/capture-framing.ts";
 import { createCaptureController } from "../features/capture/capture-controller.ts";
 import { createDataTransferController } from "../features/data-transfer/data-transfer.ts";
-import { publishDialogCommand, registerDialogActions } from "../features/dialogs/dialog-bridge.ts";
-import { registerMessageStreamActions } from "../features/message-stream/message-stream-bridge.ts";
-import { registerNotesActions } from "../features/notes/notes-bridge.ts";
+import { publishDialogCommand } from "../features/dialogs/dialog-bridge.ts";
+import type { MessageStreamActions } from "../features/message-stream/message-stream-bridge.ts";
 import { createBeforeUnloadHandler } from "./unload-lifecycle.ts";
 import { createSendController, type SendController } from "../features/send/send-controller.ts";
 import { createSerialController, type SerialController } from "../features/transport/serial-controller.ts";
 import { createLiveStateService } from "./live-state-service.ts";
-import { registerSendActions } from "../features/send/send-bridge.ts";
-import { registerTransportActions } from "../features/transport/transport-bridge.ts";
 import { getViewStateSnapshot } from "../shared/view-state-bridge.ts";
 import {
 	applicationStore,
@@ -28,7 +22,6 @@ import {
 	EMPTY_PERSISTENCE_ERROR,
 	getPersistenceErrorSnapshot,
 	publishPersistenceError,
-	registerPersistenceErrorActions
 } from "../shared/persistence-error-bridge.ts";
 
 export type ControllerLifecycle = {
@@ -84,23 +77,6 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 				runtime.captureWriter!.finalizeSession({ captureId, sessionId, expectedDataRevision }),
 			refreshCapture: runtime.refreshCapture
 		} : undefined
-	});
-
-	registerPersistenceErrorActions({
-		retry: () => {
-			if (getPersistenceErrorSnapshot().captureId === null && retrySendPersistence) retrySendPersistence();
-			else void transport.retryPersistence();
-		},
-		exportRecovery: () => {
-			const capture = transport.recoveryDocument();
-			if (!capture) return;
-			download(
-				JSON.stringify(capture, null, 2),
-				`bus-lens-${String(capture.id ?? "capture")}-recovery.json`,
-				"application/json"
-			);
-		},
-		dismiss: () => publishPersistenceError(EMPTY_PERSISTENCE_ERROR)
 	});
 
 	sendController = createSendController({
@@ -347,23 +323,6 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		}
 	}
 
-	applicationStore.subscribeToCommands(command => {
-		switch (command.type) {
-			case "canonicalization/close":
-				closeCanonicalizationDialog();
-				break;
-			case "canonicalization/download":
-				void downloadLegacyBackup();
-				break;
-			case "canonicalization/start":
-				void startCanonicalization();
-				break;
-			case "canonicalization/retry":
-				void retryCanonicalization();
-				break;
-		}
-	});
-
 	const dataTransferController = createDataTransferController({
 		state: runtime.state,
 		capture: runtime.capture,
@@ -376,68 +335,8 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		download
 	});
 
-	registerTransportActions({
-		connect: transport.connect,
-		disconnect: transport.disconnect,
-		toggleConnection: transport.toggleConnection,
-		toggleRecording: transport.toggleRecording
-	});
-
 	snapshots.subscribeToViewStateChanges();
-
-	registerCaptureHeaderActions({
-		setTitle: captureController.setCaptureTitle,
-		commitTitle: captureController.commitCaptureTitle,
-		setDescription: captureController.setCaptureDescription,
-		commitDescription: captureController.commitCaptureDescription,
-		openContext: captureController.publishContextDialog,
-		duplicate: captureController.duplicateActiveCapture,
-		clearMessages: captureController.clearActiveCaptureMessages,
-		deleteCapture: captureController.deleteActiveCapture,
-		upgradeStorage: captureController.upgradeActiveCapture
-	});
-
-	registerCaptureStorageActions({ upgrade: captureController.upgradeActiveCapture });
-
-	registerArchiveActions({
-		selectCapture: captureController.selectArchiveCapture,
-		toggleFolder: captureController.toggleArchiveFolder,
-		moveCapture: captureController.moveArchiveCapture,
-		upgradeCapture: captureController.upgradeCapture,
-		duplicateCapture: () => captureController.duplicateActiveCapture(),
-		deleteCapture: captureController.deleteArchiveCapture,
-		openNewCapture: () => captureController.publishContextDialog(true),
-		openExport: () => publishDialogCommand({ type: "export" }),
-		saveFolder: captureController.saveFolder,
-		deleteFolder: captureController.deleteFolder,
-		importFile: dataTransferController.importFile
-	});
-
-	registerDialogActions({
-		saveContext: captureController.commitContextDraft,
-		saveAnnotation: captureController.commitAnnotationDraft,
-		deleteAnnotation: captureController.removeAnnotationDraft,
-		savePatternRemark: captureController.commitPatternRemarkDraft,
-		exportData: dataTransferController.exportData,
-		notify: runtime.showToast
-	});
-
-	registerSendActions({
-		setDraft: sendController.setSendDraft,
-		setDelay: sendController.setQueueDelay,
-		send: sendController.sendBytes,
-		addToQueue: sendController.addDraftToQueue,
-		sendQueueItem: sendController.sendQueueItem,
-		removeQueueItem: sendController.removeQueueItem,
-		loadHistory: sendController.loadHistoryItem,
-		replayHistory: sendController.replayHistoryItem,
-		runQueue: sendController.runSendQueue,
-		stopQueue: sendController.stopSendQueue,
-		clearQueue: sendController.clearSendQueue,
-		clearHistory: sendController.clearSendHistory
-	});
-
-	registerMessageStreamActions({
+	const messageActions: MessageStreamActions = {
 		openMessageNote: messageId => captureController.publishAnnotationDialog("message", messageId),
 		openByteNote: (messageId, position) => captureController.publishAnnotationDialog("byte", `${messageId}:${position}`),
 		replayMessage: messageId => {
@@ -560,9 +459,217 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		setSectionFrameTimeGap: captureController.setSectionFrameTimeGap,
 		setSectionCollapse: captureController.setSectionCollapse,
 		setSectionCollapsed: captureController.setSectionCollapsed
-	});
+	};
 
-	registerNotesActions({ addSequenceNote: captureController.addSequenceNote });
+	applicationStore.subscribeToCommands(command => {
+		switch (command.type) {
+			case "transport/connect":
+				void transport.connect();
+				break;
+			case "transport/disconnect":
+				void transport.disconnect();
+				break;
+			case "transport/toggle-connection":
+				void transport.toggleConnection();
+				break;
+			case "recording/toggle":
+				void transport.toggleRecording();
+				break;
+			case "capture/set-title":
+				captureController.setCaptureTitle(command.value);
+				break;
+			case "capture/commit-title":
+				captureController.commitCaptureTitle(command.value);
+				break;
+			case "capture/set-description":
+				captureController.setCaptureDescription(command.value);
+				break;
+			case "capture/commit-description":
+				captureController.commitCaptureDescription(command.value);
+				break;
+			case "capture/open-context":
+				captureController.publishContextDialog();
+				break;
+			case "capture/duplicate":
+				captureController.duplicateActiveCapture();
+				break;
+			case "capture/clear-messages":
+				captureController.clearActiveCaptureMessages();
+				break;
+			case "capture/delete-active":
+				void captureController.deleteActiveCapture();
+				break;
+			case "capture/upgrade-active":
+				captureController.upgradeActiveCapture();
+				break;
+			case "capture/upgrade":
+				captureController.upgradeCapture(command.captureId);
+				break;
+			case "capture/delete":
+				void captureController.deleteArchiveCapture(command.captureId);
+				break;
+			case "archive/select":
+				captureController.selectArchiveCapture(command.captureId);
+				break;
+			case "archive/toggle-folder":
+				captureController.toggleArchiveFolder(command.folderId);
+				break;
+			case "archive/move-capture":
+				captureController.moveArchiveCapture(command.captureId, command.folderId);
+				break;
+			case "archive/open-new-capture":
+				captureController.publishContextDialog(true);
+				break;
+			case "archive/open-export":
+				publishDialogCommand({ type: "export" });
+				break;
+			case "archive/save-folder":
+				captureController.saveFolder(command.name, command.editingId);
+				break;
+			case "archive/delete-folder":
+				captureController.deleteFolder(command.folderId);
+				break;
+			case "archive/import-file":
+				void dataTransferController.importFile(command.file);
+				break;
+			case "storage/upgrade":
+				captureController.upgradeActiveCapture();
+				break;
+			case "dialog/save-context":
+				captureController.commitContextDraft(command.input);
+				break;
+			case "dialog/save-annotation":
+				captureController.commitAnnotationDraft(command.input);
+				break;
+			case "dialog/delete-annotation":
+				captureController.removeAnnotationDraft(command.input);
+				break;
+			case "dialog/save-pattern-remark":
+				captureController.commitPatternRemarkDraft(command.input);
+				break;
+			case "dialog/export":
+				dataTransferController.exportData(command.format);
+				break;
+			case "dialog/notify":
+				runtime.showToast(command.message);
+				break;
+			case "canonicalization/close":
+				closeCanonicalizationDialog();
+				break;
+			case "canonicalization/download":
+				void downloadLegacyBackup();
+				break;
+			case "canonicalization/start":
+				void startCanonicalization();
+				break;
+			case "canonicalization/retry":
+				void retryCanonicalization();
+				break;
+			case "send/set-draft":
+				sendController.setSendDraft(command.value);
+				break;
+			case "send/set-delay":
+				sendController.setQueueDelay(command.value);
+				break;
+			case "send/send":
+				void sendController.sendBytes(command.bytes).then(command.respond);
+				break;
+			case "send/add-to-queue":
+				sendController.addDraftToQueue(command.bytes);
+				break;
+			case "send/send-queue-item":
+				sendController.sendQueueItem(command.id);
+				break;
+			case "send/remove-queue-item":
+				sendController.removeQueueItem(command.id);
+				break;
+			case "send/replay-history":
+				sendController.replayHistoryItem(command.id);
+				break;
+			case "send/run-queue":
+				void sendController.runSendQueue();
+				break;
+			case "send/stop-queue":
+				sendController.stopSendQueue();
+				break;
+			case "send/clear-queue":
+				sendController.clearSendQueue();
+				break;
+			case "send/clear-history":
+				sendController.clearSendHistory();
+				break;
+			case "message/open-note":
+				messageActions.openMessageNote(command.messageId);
+				break;
+			case "message/open-byte-note":
+				messageActions.openByteNote(command.messageId, command.position);
+				break;
+			case "message/replay":
+				messageActions.replayMessage(command.messageId);
+				break;
+			case "message/open-pattern-remark":
+				messageActions.openPatternRemark(command.patternId);
+				break;
+			case "message/hide":
+				messageActions.hideMessage(command.messageId);
+				break;
+			case "message/hide-byte":
+				messageActions.hideByte(command.messageId, command.position);
+				break;
+			case "message/begin-section":
+				messageActions.beginSection(command.messageId, command.position);
+				break;
+			case "message/move-section":
+				messageActions.moveSection(command.sectionId, command.action);
+				break;
+			case "message/delete-section":
+				messageActions.deleteSection(command.sectionId);
+				break;
+			case "message/set-section-framing":
+				messageActions.setSectionFraming(command.sectionId, command.update);
+				break;
+			case "message/set-section-frame-size":
+				messageActions.setSectionFrameSize(command.sectionId, command.value);
+				break;
+			case "message/set-section-framing-mode":
+				messageActions.setSectionFramingMode(command.sectionId, command.value);
+				break;
+			case "message/set-section-frame-marker":
+				messageActions.setSectionFrameMarker(command.sectionId, command.value);
+				break;
+			case "message/set-section-marker-position":
+				messageActions.setSectionMarkerPosition(command.sectionId, command.value);
+				break;
+			case "message/set-section-frame-time-gap":
+				messageActions.setSectionFrameTimeGap(command.sectionId, command.value);
+				break;
+			case "message/set-section-collapse":
+				messageActions.setSectionCollapse(command.sectionId, command.collapseRuns);
+				break;
+			case "message/set-section-collapsed":
+				messageActions.setSectionCollapsed(command.sectionId, command.collapsed);
+				break;
+			case "notes/add-sequence":
+				captureController.addSequenceNote(command);
+				break;
+			case "persistence/retry":
+				if (getPersistenceErrorSnapshot().captureId === null && retrySendPersistence) retrySendPersistence();
+				else void transport.retryPersistence();
+				break;
+			case "persistence/export-recovery": {
+				const capture = transport.recoveryDocument();
+				if (capture) download(
+					JSON.stringify(capture, null, 2),
+					`bus-lens-${String(capture.id ?? "capture")}-recovery.json`,
+					"application/json"
+				);
+				break;
+			}
+			case "persistence/dismiss":
+				publishPersistenceError(EMPTY_PERSISTENCE_ERROR);
+				break;
+		}
+	});
 
 	const lifecycle: ControllerLifecycle = {
 		beforeUnload: createBeforeUnloadHandler({

@@ -16,10 +16,10 @@ placed in the Query cache.
 
 The migrated live UI snapshots (view, transport/send workflows, framing toolbar, message stream,
 dialogs, canonicalization, persistence errors, and toast state) are application-store owned.
-Remaining feature bridge modules are compatibility action registries or delegates to that store;
-they do not maintain a second snapshot owner. Legacy import, canonicalization commands, archive
+Remaining feature bridge modules are typed command delegates to that store; they do not maintain a
+second snapshot owner or mutable action registry. Legacy import, canonicalization commands, archive
 queries, and serial append paths remain command-owned.
 
 Components consume selectors and named data-layer commands. They do not write store context, call
-`QueryClient` mutation methods, or construct ad-hoc cache keys. Compatibility bridges may remain
-while a vertical slice is being moved, but they must delegate to the authoritative owner.
+`QueryClient` mutation methods, or construct ad-hoc cache keys. The remaining bridge module names
+are compatibility import surfaces only and delegate to the authoritative owner.

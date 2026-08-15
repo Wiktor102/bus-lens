@@ -5,7 +5,7 @@ import {
 	type SendQueueEntry,
 	type SendSettings
 } from "../../shared/app-state.ts";
-import { hexByte, type Capture } from "../capture/capture-framing.ts";
+import type { Capture } from "../capture/capture-framing.ts";
 import type { SerialController } from "../transport/serial-controller.ts";
 import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
 import type { ApplicationEvent } from "../../shared/application-store.ts";
@@ -332,17 +332,6 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		dependencies.publishSendState();
 	}
 
-	function loadHistoryItem(id: string) {
-		const item = state.sendHistory.find(entry => entry.id === id);
-		if (!item) return null;
-		const draft = (item.bytes as number[]).map(hexByte).join(" ");
-		const previousSettings = { ...state.sendSettings };
-		state.sendSettings.draft = draft;
-		persistSettings(previousSettings, true);
-		dependencies.publishSendState();
-		return draft;
-	}
-
 	function replayHistoryItem(id: string) {
 		const item = state.sendHistory.find(entry => entry.id === id);
 		if (item) void transmitBytes(Uint8Array.from(item.bytes as number[]), "replay");
@@ -449,7 +438,6 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		setQueueDelay,
 		sendQueueItem,
 		removeQueueItem,
-		loadHistoryItem,
 		replayHistoryItem,
 		stopSendQueue,
 		clearSendQueue,

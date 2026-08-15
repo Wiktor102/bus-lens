@@ -1,3 +1,5 @@
+import { applicationStore } from "../../shared/application-store.ts";
+
 export type CaptureHeaderActions = {
 	setTitle: (value: string) => void;
 	commitTitle: (value: string) => void;
@@ -10,22 +12,17 @@ export type CaptureHeaderActions = {
 	upgradeStorage: () => void;
 };
 
-const noopActions: CaptureHeaderActions = {
-	setTitle: () => {},
-	commitTitle: () => {},
-	setDescription: () => {},
-	commitDescription: () => {},
-	openContext: () => {},
-	duplicate: () => {},
-	clearMessages: () => {},
-	deleteCapture: () => {},
-	upgradeStorage: () => {}
+/** Typed command actions; header data is derived from query state. */
+const actions: CaptureHeaderActions = {
+	setTitle: value => applicationStore.sendCommand({ type: "capture/set-title", value }),
+	commitTitle: value => applicationStore.sendCommand({ type: "capture/commit-title", value }),
+	setDescription: value => applicationStore.sendCommand({ type: "capture/set-description", value }),
+	commitDescription: value => applicationStore.sendCommand({ type: "capture/commit-description", value }),
+	openContext: () => applicationStore.sendCommand({ type: "capture/open-context" }),
+	duplicate: () => applicationStore.sendCommand({ type: "capture/duplicate" }),
+	clearMessages: () => applicationStore.sendCommand({ type: "capture/clear-messages" }),
+	deleteCapture: () => applicationStore.sendCommand({ type: "capture/delete-active" }),
+	upgradeStorage: () => applicationStore.sendCommand({ type: "capture/upgrade-active" })
 };
 
-let actions = noopActions;
-
-/** Compatibility action registry; header data is derived from query state. */
-export const registerCaptureHeaderActions = (next: CaptureHeaderActions): void => {
-	actions = next;
-};
 export const getCaptureHeaderActions = (): CaptureHeaderActions => actions;

@@ -3,6 +3,7 @@ import {
 	captureStorageLocked,
 	type CaptureStorageUiStatus
 } from "./capture-storage.ts";
+import { applicationStore } from "../../shared/application-store.ts";
 
 export type CaptureStorageSnapshot = {
 	captureId: string | null;
@@ -24,12 +25,11 @@ const emptySnapshot: CaptureStorageSnapshot = {
 	canUpgrade: false
 };
 
-let actions: CaptureStorageActions = { upgrade: () => {} };
-
-/** Compatibility action registry; storage status is derived from query data. */
-export const registerCaptureStorageActions = (next: CaptureStorageActions): void => {
-	actions = next;
+/** Typed command action; storage status is derived from query data. */
+const actions: CaptureStorageActions = {
+	upgrade: () => applicationStore.sendCommand({ type: "storage/upgrade" })
 };
+
 export const getCaptureStorageActions = (): CaptureStorageActions => actions;
 
 export function captureStorageSnapshot(captureId: string | null, status: unknown): CaptureStorageSnapshot {

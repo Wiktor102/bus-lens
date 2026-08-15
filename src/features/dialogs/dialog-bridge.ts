@@ -19,20 +19,10 @@ export type DialogActions = {
 	notify: (message: string) => void;
 };
 
-const noopActions: DialogActions = {
-	saveContext: () => false,
-	saveAnnotation: () => false,
-	deleteAnnotation: () => {},
-	savePatternRemark: () => false,
-	exportData: () => {},
-	notify: () => {}
-};
-
-let actions = noopActions;
 let lastCommand: DialogCommand | null | undefined;
 let lastSnapshot: DialogSnapshot | undefined;
 
-/** Compatibility action registry; dialog state is owned by applicationStore. */
+/** Typed command actions; dialog state is owned by applicationStore. */
 export function getDialogSnapshot(): DialogSnapshot {
 	const command = applicationStore.select(selectDialog);
 	if (command !== lastCommand) {
@@ -43,9 +33,24 @@ export function getDialogSnapshot(): DialogSnapshot {
 }
 
 export const subscribeToDialogs = applicationStore.subscribe;
-export const registerDialogActions = (next: DialogActions): void => {
-	actions = next;
+const actions: DialogActions = {
+	saveContext: input => {
+		applicationStore.sendCommand({ type: "dialog/save-context", input });
+		return true;
+	},
+	saveAnnotation: input => {
+		applicationStore.sendCommand({ type: "dialog/save-annotation", input });
+		return true;
+	},
+	deleteAnnotation: input => applicationStore.sendCommand({ type: "dialog/delete-annotation", input }),
+	savePatternRemark: input => {
+		applicationStore.sendCommand({ type: "dialog/save-pattern-remark", input });
+		return true;
+	},
+	exportData: format => applicationStore.sendCommand({ type: "dialog/export", format }),
+	notify: message => applicationStore.sendCommand({ type: "dialog/notify", message })
 };
+
 export const getDialogActions = (): DialogActions => actions;
 
 export function publishDialogCommand(command: DialogCommandInput): void {

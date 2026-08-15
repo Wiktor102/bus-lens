@@ -807,9 +807,11 @@ function SendPanel({ open, onOpenChange }: SendPanelProps) {
 										data-history-load={item.id}
 										type="button"
 										onClick={() => {
-											const loaded = actions.loadHistory(item.id);
-											if (loaded === null) return;
+											const loaded = item.bytes
+												.map(byte => byte.toString(16).padStart(2, "0").toUpperCase())
+												.join(" ");
 											setDraft(loaded);
+											actions.setDraft(loaded);
 											requestAnimationFrame(() => inputRef.current?.focus());
 										}}
 									>

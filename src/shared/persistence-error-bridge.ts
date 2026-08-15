@@ -15,7 +15,6 @@ export type PersistenceErrorActions = {
 
 export const EMPTY_PERSISTENCE_ERROR: PersistenceErrorSnapshot = EMPTY_APPLICATION_PERSISTENCE_ERROR;
 
-let actions: PersistenceErrorActions = { retry: () => {}, exportRecovery: () => {}, dismiss: () => {} };
 let lastState: PersistenceErrorSnapshot | undefined;
 let lastSnapshot: PersistenceErrorSnapshot | undefined;
 
@@ -33,7 +32,9 @@ export const subscribeToPersistenceError = applicationStore.subscribe;
 export function publishPersistenceError(state: PersistenceErrorSnapshot): void {
 	applicationStore.send({ type: "persistence-error/changed", state });
 }
-export const registerPersistenceErrorActions = (next: PersistenceErrorActions): void => {
-	actions = next;
+const actions: PersistenceErrorActions = {
+	retry: () => applicationStore.sendCommand({ type: "persistence/retry" }),
+	exportRecovery: () => applicationStore.sendCommand({ type: "persistence/export-recovery" }),
+	dismiss: () => applicationStore.sendCommand({ type: "persistence/dismiss" })
 };
 export const getPersistenceErrorActions = (): PersistenceErrorActions => actions;

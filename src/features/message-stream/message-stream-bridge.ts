@@ -1,5 +1,6 @@
 import type { SectionMoveAction } from "../capture/section-repositioning.ts";
 import type { SectionFramingUpdate } from "../capture/capture-framing.ts";
+import { applicationStore } from "../../shared/application-store.ts";
 
 export type MessageStreamTarget = {
 	messageId: string;
@@ -26,30 +27,25 @@ export type MessageStreamActions = {
 	setSectionCollapsed: (sectionId: string, collapsed: boolean) => void;
 };
 
-const noopActions: MessageStreamActions = {
-	openMessageNote: () => {},
-	openByteNote: () => {},
-	replayMessage: () => {},
-	openPatternRemark: () => {},
-	hideMessage: () => {},
-	hideByte: () => {},
-	beginSection: () => {},
-	moveSection: () => {},
-	deleteSection: () => {},
-	setSectionFraming: () => {},
-	setSectionFrameSize: () => {},
-	setSectionFramingMode: () => {},
-	setSectionFrameMarker: () => {},
-	setSectionMarkerPosition: () => {},
-	setSectionFrameTimeGap: () => {},
-	setSectionCollapse: () => {},
-	setSectionCollapsed: () => {}
+/** Typed command actions; message stream snapshots are application-store owned. */
+const actions: MessageStreamActions = {
+	openMessageNote: messageId => applicationStore.sendCommand({ type: "message/open-note", messageId }),
+	openByteNote: (messageId, position) => applicationStore.sendCommand({ type: "message/open-byte-note", messageId, position }),
+	replayMessage: messageId => applicationStore.sendCommand({ type: "message/replay", messageId }),
+	openPatternRemark: patternId => applicationStore.sendCommand({ type: "message/open-pattern-remark", patternId }),
+	hideMessage: messageId => applicationStore.sendCommand({ type: "message/hide", messageId }),
+	hideByte: (messageId, position) => applicationStore.sendCommand({ type: "message/hide-byte", messageId, position }),
+	beginSection: (messageId, position) => applicationStore.sendCommand({ type: "message/begin-section", messageId, position }),
+	moveSection: (sectionId, action) => applicationStore.sendCommand({ type: "message/move-section", sectionId, action }),
+	deleteSection: sectionId => applicationStore.sendCommand({ type: "message/delete-section", sectionId }),
+	setSectionFraming: (sectionId, update) => applicationStore.sendCommand({ type: "message/set-section-framing", sectionId, update }),
+	setSectionFrameSize: (sectionId, value) => applicationStore.sendCommand({ type: "message/set-section-frame-size", sectionId, value }),
+	setSectionFramingMode: (sectionId, value) => applicationStore.sendCommand({ type: "message/set-section-framing-mode", sectionId, value }),
+	setSectionFrameMarker: (sectionId, value) => applicationStore.sendCommand({ type: "message/set-section-frame-marker", sectionId, value }),
+	setSectionMarkerPosition: (sectionId, value) => applicationStore.sendCommand({ type: "message/set-section-marker-position", sectionId, value }),
+	setSectionFrameTimeGap: (sectionId, value) => applicationStore.sendCommand({ type: "message/set-section-frame-time-gap", sectionId, value }),
+	setSectionCollapse: (sectionId, collapseRuns) => applicationStore.sendCommand({ type: "message/set-section-collapse", sectionId, collapseRuns }),
+	setSectionCollapsed: (sectionId, collapsed) => applicationStore.sendCommand({ type: "message/set-section-collapsed", sectionId, collapsed })
 };
 
-/** Action compatibility boundary; message stream snapshots are application-store owned. */
-let actions = noopActions;
-
-export const registerMessageStreamActions = (next: MessageStreamActions): void => {
-	actions = next;
-};
 export const getMessageStreamActions = (): MessageStreamActions => actions;

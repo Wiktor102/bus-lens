@@ -238,11 +238,10 @@ export type ApplicationCommand =
 	| { type: "canonicalization/retry" }
 	| { type: "send/set-draft"; value: string }
 	| { type: "send/set-delay"; value: number }
-	| { type: "send/send"; bytes: number[] }
+	| { type: "send/send"; bytes: number[]; respond?: (sent: boolean) => void }
 	| { type: "send/add-to-queue"; bytes: number[] }
 	| { type: "send/send-queue-item"; id: string }
 	| { type: "send/remove-queue-item"; id: string }
-	| { type: "send/load-history"; id: string }
 	| { type: "send/replay-history"; id: string }
 	| { type: "send/run-queue" }
 	| { type: "send/stop-queue" }

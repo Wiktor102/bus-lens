@@ -1,9 +1,6 @@
-/**
- * Compatibility action registry for the transport controls.
- *
- * Transport state is owned by the application store; this module no longer
- * publishes or stores a transport snapshot.
- */
+import { applicationStore } from "../../shared/application-store.ts";
+
+/** Typed command actions for transport controls. */
 export type TransportActions = {
 	connect: () => Promise<void>;
 	disconnect: () => Promise<void>;
@@ -11,16 +8,11 @@ export type TransportActions = {
 	toggleRecording: () => void;
 };
 
-const noopActions: TransportActions = {
-	connect: async () => {},
-	disconnect: async () => {},
-	toggleConnection: async () => {},
-	toggleRecording: () => {}
+const actions: TransportActions = {
+	connect: async () => { applicationStore.sendCommand({ type: "transport/connect" }); },
+	disconnect: async () => { applicationStore.sendCommand({ type: "transport/disconnect" }); },
+	toggleConnection: async () => { applicationStore.sendCommand({ type: "transport/toggle-connection" }); },
+	toggleRecording: () => applicationStore.sendCommand({ type: "recording/toggle" })
 };
 
-let actions: TransportActions = noopActions;
-
-export const registerTransportActions = (next: TransportActions): void => {
-	actions = next;
-};
 export const getTransportActions = (): TransportActions => actions;
