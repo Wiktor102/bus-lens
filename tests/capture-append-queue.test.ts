@@ -103,3 +103,28 @@ test("backpressure reports queued bytes without dropping recovery data", async (
 	assert.equal(queue.isBackpressured("capture"), false);
 	assert.deepEqual(changes, [true, false]);
 });
+
+test("backpressure remains accurate when a batch contains many coalesced segments", async () => {
+	let release: (() => void) | undefined;
+	const held = new Promise<void>(resolve => { release = resolve; });
+	const changes: boolean[] = [];
+	const queue = new CaptureAppendQueue({
+		appendChunk: async request => {
+			await held;
+			return acknowledgement(request, 1);
+		}
+	}, {
+		backpressureBytes: 3,
+		generateRequestId: () => "coalesced-request",
+		onBackpressureChange: (_captureId, active) => changes.push(active)
+	});
+	queue.start("capture", { sessionId: "session", nextChunkSequence: 0, nextRawOffset: 0, dataRevision: 0 });
+	queue.enqueue("capture", { timestamp: 1, direction: "rx", bytes: [1, 2] });
+	queue.enqueue("capture", { timestamp: 1, direction: "rx", bytes: [3, 4] });
+	const draining = queue.flush("capture");
+	assert.equal(queue.isBackpressured("capture"), true);
+	release?.();
+	await draining;
+	assert.equal(queue.isBackpressured("capture"), false);
+	assert.deepEqual(changes, [true, false]);
+});

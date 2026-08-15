@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	appendLivePreview,
 	frameWidth,
 	hexByte,
 	makeMessage,
@@ -54,6 +55,46 @@ test("frames a raw stream by message length and calculates visible width", () =>
 	]);
 	assert.deepEqual(current.messages.map(message => message.bytes), [[1, 2], [3, 4], [5]]);
 	assert.equal(frameWidth(current), 2);
+});
+
+test("extends length and time previews without reframing the retained prefix", () => {
+	for (const [framingMode, frameTimeGap] of [["length", undefined], ["time", 5]] as const) {
+		const current = {
+			id: `live-${framingMode}`,
+			byteStream: [1, 2].map((value, rawOffset) => ({ value, timestamp: rawOffset, rawOffset })),
+			messages: [],
+			notes: [],
+			frameSections: [{ id: "section", start: 0, framingMode, frameSize: 3, frameTimeGap }]
+		} as Capture;
+		rebuildPreview(current, (() => { let id = 0; return () => `message-${++id}`; })());
+		const firstMessageId = current.messages[0]?.id;
+		const previousLength = current.byteStream!.length;
+		current.byteStream!.push(
+			{ value: 3, timestamp: 2, rawOffset: 2 },
+			{ value: 4, timestamp: framingMode === "time" ? 10 : 3, rawOffset: 3 }
+		);
+
+		assert.equal(appendLivePreview(current, previousLength, () => "new-message"), true);
+		assert.equal(current.messages[0]?.id, firstMessageId);
+		assert.deepEqual(current.messages.map(message => message.bytes), framingMode === "length" ? [[1, 2, 3], [4]] : [[1, 2, 3], [4]]);
+		assert.deepEqual(current.messages.flatMap(message => message.rawOffsets || []), [0, 1, 2, 3]);
+	}
+});
+
+test("extends marker-end previews while retaining marker boundaries", () => {
+	const current = {
+		id: "live-marker",
+		byteStream: [1, 0xaa].map((value, rawOffset) => ({ value, timestamp: rawOffset, rawOffset })),
+		messages: [],
+		notes: [],
+		frameSections: [{ id: "section", start: 0, framingMode: "marker", frameMarker: "AA", markerPosition: "end" }]
+	} as Capture;
+	rebuildPreview(current, () => "first-message");
+	const previousLength = current.byteStream!.length;
+	current.byteStream!.push({ value: 2, timestamp: 2, rawOffset: 2 }, { value: 0xaa, timestamp: 3, rawOffset: 3 });
+
+	assert.equal(appendLivePreview(current, previousLength, () => "second-message"), true);
+	assert.deepEqual(current.messages.map(message => message.bytes), [[1, 0xaa], [2, 0xaa]]);
 });
 
 test("keeps marker and time-framed legacy boundaries when migrating to sections", () => {

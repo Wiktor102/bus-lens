@@ -8,7 +8,7 @@ import { publishSendSnapshot } from "../features/send/send-bridge.ts";
 import { deriveNotesSnapshot } from "../features/notes/notes.ts";
 import { publishNotesSnapshot } from "../features/notes/notes-bridge.ts";
 import { getViewStateSnapshot, subscribeToViewState } from "../shared/view-state-bridge.ts";
-import { deriveMessageStreamSnapshot } from "../features/message-stream/message-stream.ts";
+import { deriveMessageStreamSnapshot, type MessageStreamDeriveOptions } from "../features/message-stream/message-stream.ts";
 import { publishMessageStreamSnapshot } from "../features/message-stream/message-stream-bridge.ts";
 import { selectFramingToolbarSnapshot } from "../features/capture/framing-toolbar.ts";
 import { visibleMessages, type Capture } from "../features/capture/capture-framing.ts";
@@ -40,7 +40,7 @@ export type SnapshotRuntime = {
 	publishFramingToolbarState: (capture?: Capture) => void;
 	publishAnalysisState: (capture?: Capture) => void;
 	publishNotesState: (capture?: Capture) => void;
-	renderMessages: () => void;
+	renderMessages: (options?: MessageStreamDeriveOptions) => void;
 	render: () => void;
 	subscribeToViewStateChanges: () => () => void;
 };
@@ -124,10 +124,10 @@ export function createSnapshotRuntime(dependencies: SnapshotRuntimeDependencies)
 		publishNotesSnapshot(deriveNotesSnapshot(capture));
 	}
 
-	function renderMessages(): void {
+	function renderMessages(options: MessageStreamDeriveOptions = {}): void {
 		const capture = dependencies.capture();
 		if (!capture) return;
-		publishMessageStreamSnapshot(deriveMessageStreamSnapshot(capture, getViewState()));
+		publishMessageStreamSnapshot(deriveMessageStreamSnapshot(capture, getViewState(), options));
 	}
 
 	function render(): void {

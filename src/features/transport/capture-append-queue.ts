@@ -47,15 +47,13 @@ type QueuedBatch = {
 
 type CaptureQueueState = CaptureAppendBoundary & {
 	pending: CaptureChunkSegment[];
+	pendingByteCount: number;
 	batches: QueuedBatch[];
+	queuedByteCount: number;
 	drainPromise: Promise<void> | null;
 	error: unknown;
 	backpressured: boolean;
 };
-
-function byteCount(segments: readonly CaptureChunkSegment[]): number {
-	return segments.reduce((total, segment) => total + segment.bytes.length, 0);
-}
 
 function copySegment(segment: CaptureChunkSegment): CaptureChunkSegment {
 	return { timestamp: segment.timestamp, direction: segment.direction, bytes: [...segment.bytes] };
@@ -83,7 +81,9 @@ export class CaptureAppendQueue {
 		this.states.set(captureId, {
 			...boundary,
 			pending: [],
+			pendingByteCount: 0,
 			batches: [],
+			queuedByteCount: 0,
 			drainPromise: null,
 			error: null,
 			backpressured: false
@@ -94,14 +94,18 @@ export class CaptureAppendQueue {
 		const state = this.requireState(captureId);
 		if (!segment.bytes.length) return;
 		state.pending.push(copySegment(segment));
+		state.pendingByteCount += segment.bytes.length;
+		state.queuedByteCount += segment.bytes.length;
 		this.updateBackpressure(captureId, state);
 	}
 
 	flush(captureId: string): Promise<void> {
 		const state = this.requireState(captureId);
 		if (state.pending.length) {
-			const segments = state.pending.splice(0).map(copySegment);
-			state.batches.push({ requestId: this.generateRequestId(), byteCount: byteCount(segments), segments });
+			const segments = state.pending.splice(0);
+			const byteCount = state.pendingByteCount;
+			state.pendingByteCount = 0;
+			state.batches.push({ requestId: this.generateRequestId(), byteCount, segments });
 		}
 		this.updateBackpressure(captureId, state);
 		return this.ensureDrain(captureId, state);
@@ -116,7 +120,7 @@ export class CaptureAppendQueue {
 	async drain(captureId: string): Promise<void> {
 		await this.flush(captureId);
 		const state = this.requireState(captureId);
-		if (state.pending.length || state.batches.length) throw state.error ?? new Error(`capture ${captureId} append queue did not drain`);
+		if (state.queuedByteCount > 0) throw state.error ?? new Error(`capture ${captureId} append queue did not drain`);
 	}
 
 	boundary(captureId: string): CaptureAppendBoundary {
@@ -140,9 +144,9 @@ export class CaptureAppendQueue {
 	hasUnacknowledgedBytes(captureId?: string): boolean {
 		if (captureId) {
 			const state = this.states.get(captureId);
-			return Boolean(state && (state.pending.length || state.batches.length));
+			return Boolean(state && state.queuedByteCount > 0);
 		}
-		return [...this.states.values()].some(state => state.pending.length > 0 || state.batches.length > 0);
+		return [...this.states.values()].some(state => state.queuedByteCount > 0);
 	}
 
 	recoverySegments(captureId: string): CaptureChunkSegment[] {
@@ -187,6 +191,7 @@ export class CaptureAppendQueue {
 				state.nextChunkSequence = response.nextSequence;
 				state.nextRawOffset = response.nextRawOffset;
 				state.dataRevision = response.dataRevision;
+				state.queuedByteCount -= batch.byteCount;
 				state.batches.shift();
 				this.updateBackpressure(captureId, state);
 			} catch (error) {
@@ -198,8 +203,7 @@ export class CaptureAppendQueue {
 	}
 
 	private updateBackpressure(captureId: string, state: CaptureQueueState): void {
-		const queuedBytes = byteCount(state.pending) + state.batches.reduce((total, batch) => total + batch.byteCount, 0);
-		const active = queuedBytes > this.backpressureBytes;
+		const active = state.queuedByteCount > this.backpressureBytes;
 		if (active === state.backpressured) return;
 		state.backpressured = active;
 		this.options.onBackpressureChange?.(captureId, active);

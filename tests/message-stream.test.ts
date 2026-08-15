@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { deriveMessageStreamSnapshot } from "../src/features/message-stream/message-stream.ts";
 import { EMPTY_VIEW_STATE_SNAPSHOT } from "../src/shared/view-state.ts";
-import { normalizeCapture, rebuildPreview, type Capture } from "../src/features/capture/capture-framing.ts";
+import { appendLivePreview, normalizeCapture, rebuildPreview, type Capture } from "../src/features/capture/capture-framing.ts";
 
 function idFactory(prefix = "generated") {
 	let count = 0;
@@ -140,4 +140,34 @@ test("marks retained projections as a durable tail instead of a complete capture
 
 	assert.equal(snapshot.retainedTail, true);
 	assert.equal(snapshot.durableByteCount, 50_025);
+});
+
+test("live snapshots reuse stable rows and defer repeated pattern recognition", () => {
+	const current = {
+		id: "live-snapshot",
+		byteStream: [0xaa, 1, 0xaa, 2].map((value, rawOffset) => ({ value, timestamp: rawOffset, rawOffset })),
+		messages: [],
+		notes: [],
+		annotations: {},
+		frameSections: [{ id: "section", start: 0, framingMode: "length", frameSize: 1 }]
+	} as Capture;
+	rebuildPreview(current, idFactory("live-message"));
+	const initial = deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT);
+	const previousRow = initial.matchingRows[0];
+	const previousPatterns = initial.patterns;
+	const previousLength = current.byteStream!.length;
+	current.byteStream!.push({ value: 0xaa, timestamp: 4, rawOffset: 4 }, { value: 3, timestamp: 5, rawOffset: 5 });
+	assert.equal(appendLivePreview(current, previousLength, idFactory("live-message")), true);
+
+	const live = deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT, { live: true });
+	assert.strictEqual(live.patterns, previousPatterns);
+	assert.strictEqual(live.matchingRows[0], previousRow);
+	assert.deepEqual(live.matchingRows.map(row => row.bytes), [[0xaa], [1], [0xaa], [2], [0xaa], [3]]);
+	assert.equal(live.signatureCounts.get("AA"), 3);
+
+	const final = { ...current, messages: [] } as Capture;
+	rebuildPreview(final, idFactory("final-message"));
+	const expected = deriveMessageStreamSnapshot(final, EMPTY_VIEW_STATE_SNAPSHOT);
+	assert.deepEqual(live.matchingRows.map(row => row.bytes), expected.matchingRows.map(row => row.bytes));
+	assert.deepEqual([...live.signatureCounts], [...expected.signatureCounts]);
 });
