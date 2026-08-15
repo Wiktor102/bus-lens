@@ -13,6 +13,7 @@ import {
 	type CanonicalNoteTarget,
 	type CreateAgentNoteRequest
 } from "./canonical-capture-command-service.ts";
+import type { AgentNoteQueryInput, AgentNoteQueryResult } from "./canonical-query.ts";
 import { getMcpClientAttribution, agentResponseSchema } from "./mcp-server.ts";
 import type { McpQueryExecutor } from "./mcp-query-executor.ts";
 
@@ -44,7 +45,41 @@ function errorResult(error: unknown): { isError: true; structuredContent: AgentR
 	};
 }
 
-export function registerAgentNoteTools(server: McpServer, _queries: McpQueryExecutor, recordClient: RecordClient, commands: CanonicalCaptureCommandService): void {
+export function registerAgentNoteTools(server: McpServer, queries: McpQueryExecutor, recordClient: RecordClient, commands: CanonicalCaptureCommandService): void {
+	server.registerTool(
+		"query_notes",
+		{
+			title: "Query Bus Lens evidence notes",
+			description: "Return bounded note text and exact evidence anchors. Filter by capture, note ID, related frame ID, overlapping inclusive raw-byte range, author type, or creation time range; use the opaque cursor for additional notes.",
+			inputSchema: z.object({
+				captureId: z.string().min(1).optional(),
+				noteId: z.string().min(1).optional(),
+				frameId: z.string().min(1).optional(),
+				rawOffsetFrom: z.number().int().safe().nonnegative().optional(),
+				rawOffsetTo: z.number().int().safe().nonnegative().optional(),
+				authorType: z.enum(["human", "agent"]).optional(),
+				createdFrom: z.string().optional(),
+				createdTo: z.string().optional(),
+				timeFrom: z.string().optional(),
+				timeTo: z.string().optional(),
+				textLimit: z.number().int().positive().max(4_000).optional(),
+				cursor: z.string().optional(),
+				limit: z.number().int().positive().max(100).optional()
+			}),
+			outputSchema: agentResponseSchema
+		},
+		async (input, context) => {
+			recordClient(context, server);
+			try {
+				const response = await queries.queryNotes(input as AgentNoteQueryInput);
+				const result = response as AgentResponse<AgentNoteQueryResult>;
+				return { structuredContent: result, content: [{ type: "text" as const, text: `Returned ${result.data.notes.length} bounded evidence note${result.data.notes.length === 1 ? "" : "s"}; inspect anchors before interpreting the note text.` }] };
+			} catch (error) {
+				return errorResult(error);
+			}
+		}
+	);
+
 	server.registerTool(
 		"add_agent_note",
 		{

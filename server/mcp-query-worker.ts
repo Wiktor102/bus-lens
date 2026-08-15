@@ -16,10 +16,14 @@ import {
 	type AgentCaptureDifferenceResult,
 	type AgentCaptureDiscovery,
 	type AgentCaptureOverview,
+	type AgentFramingProfiles,
+	type AgentFramingProfilesInput,
 	type AgentMessageContext,
 	type AgentMessageContextInput,
 	type AgentMessageQueryInput,
 	type AgentMessageQueryResult,
+	type AgentNoteQueryInput,
+	type AgentNoteQueryResult,
 	type AgentRawRead,
 	type AgentRawReadInput,
 	type AgentSequenceGroupsInput,
@@ -35,11 +39,13 @@ import type { AgentProtocolReportInput, AgentProtocolReportResult } from "./prot
 export type McpQueryRequest =
 	| { operation: "capture-discovery"; input: CaptureDiscoveryFiltersInput }
 	| { operation: "capture-overview"; captureId: string; snapshot?: Partial<AgentSnapshotReference> }
+	| { operation: "framing-profiles"; input: AgentFramingProfilesInput }
 	| { operation: "comparison"; input: AgentCompareCapturesInput }
 	| { operation: "capture-difference"; input: AgentCaptureDifferenceInput }
 	| { operation: "protocol-report"; input: AgentProtocolReportInput }
 	| { operation: "messages"; input: AgentMessageQueryInput }
 	| { operation: "message-context"; input: AgentMessageContextInput }
+	| { operation: "notes"; input: AgentNoteQueryInput }
 	| { operation: "sequence-groups"; input: AgentSequenceGroupsInput }
 	| { operation: "sequence-occurrences"; input: AgentSequenceOccurrencesInput }
 	| { operation: "byte-statistics"; input: AgentByteStatisticsInput }
@@ -81,11 +87,13 @@ try {
 	const value = database.transaction(():
 		| AgentResponse<AgentCaptureDiscovery>
 			| AgentResponse<AgentCaptureOverview>
+			| AgentResponse<AgentFramingProfiles>
 			| AgentResponse<AgentComparisonResult>
 			| AgentResponse<AgentCaptureDifferenceResult>
 			| AgentResponse<AgentProtocolReportResult>
 			| AgentResponse<AgentMessageQueryResult>
 		| AgentResponse<AgentMessageContext>
+		| AgentResponse<AgentNoteQueryResult>
 		| AgentResponse<AgentSequenceGroupsResult>
 		| AgentResponse<AgentSequenceOccurrencesResult>
 		| AgentResponse<AgentByteStatisticsResult>
@@ -96,6 +104,8 @@ try {
 				return queries.queryCaptureDiscovery(request.input);
 			case "capture-overview":
 				return queries.queryCaptureOverview(request.captureId, request.snapshot);
+			case "framing-profiles":
+				return queries.listFramingProfiles(request.input);
 			case "comparison":
 				return queries.compareCaptures(request.input);
 			case "capture-difference":
@@ -106,6 +116,8 @@ try {
 				return queries.queryMessages(request.input);
 			case "message-context":
 				return queries.getMessageContext(request.input);
+			case "notes":
+				return queries.queryNotes(request.input);
 			case "sequence-groups":
 				return queries.getSequenceGroups(request.input);
 			case "sequence-occurrences":

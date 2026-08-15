@@ -99,6 +99,12 @@ export const DEFAULT_FRAME_WINDOW_LIMIT = 50;
 export const MAX_FRAME_WINDOW_LIMIT = 200;
 export const DEFAULT_CAPTURE_DISCOVERY_LIMIT = 20;
 export const MAX_CAPTURE_DISCOVERY_LIMIT = 100;
+export const DEFAULT_FRAMING_PROFILE_LIMIT = 20;
+export const MAX_FRAMING_PROFILE_LIMIT = 100;
+export const DEFAULT_NOTE_QUERY_LIMIT = 20;
+export const MAX_NOTE_QUERY_LIMIT = 100;
+export const DEFAULT_NOTE_TEXT_LIMIT = 4_000;
+export const MAX_NOTE_TEXT_LIMIT = 4_000;
 export const MAX_CONTEXT_PARAMETER_FILTERS = 64;
 const MAX_BYTE_STATISTICS_COMPARISON_POSITIONS = 1;
 const MAX_TRANSITION_CHANGED_POSITION_SET = 128;
@@ -236,10 +242,17 @@ export type AgentNoteSummary = Readonly<{
 	textPreview: string;
 	createdAt: string;
 	profileId: string | null;
+	profileVersion?: number | null;
+	sourceDataRevision?: number | null;
+	frameId?: string | null;
 	rawOffset: number | null;
+	rawOffsets?: readonly number[] | null;
 	startOffset: number | null;
 	endOffset: number | null;
+	startOrdinal?: number | null;
+	endOrdinal?: number | null;
 	sequenceGroupId: string | null;
+	sequenceKey?: string | null;
 	authorType: "human" | "agent";
 	reportedClientName?: string;
 	reportedClientVersion?: string;
@@ -278,6 +291,60 @@ export type AgentCaptureOverview = Readonly<{
 		frames: Readonly<{ startOrdinal: number | null; endOrdinal: number | null }>;
 	}>;
 	conversionGuidance?: string;
+}>;
+
+export type AgentFramingProfile = Readonly<{
+	id: string;
+	version: number;
+	algorithmVersion: number;
+	isActive: boolean;
+	verified: boolean;
+	createdAt: string;
+	updatedAt: string;
+	sourceDataRevision: number;
+	retainedStartOffset: number;
+	selection: AgentFramingProfileSelection;
+	framingSummary: Readonly<{
+		text: string;
+		sections: readonly AgentFramingSection[];
+		sectionsTruncated?: boolean;
+		frameCount: number;
+		visibleFrameCount: number;
+		framedByteCount: number;
+		rawBounds: Readonly<{ startOffset: number | null; endOffset: number | null }>;
+		frameBounds: Readonly<{ startOrdinal: number | null; endOrdinal: number | null }>;
+	}>;
+}>;
+
+export type AgentFramingProfileSelection = Readonly<{
+	kind: "raw" | "framing";
+	captureId: string;
+	sourceDataRevision: number;
+	profileId?: string;
+	profileVersion?: number;
+}>;
+
+export type AgentFramingProfiles = Readonly<{
+	captureId: string;
+	rawData: Readonly<{
+		selection: AgentFramingProfileSelection;
+		sourceDataRevision: number;
+		availableBounds: Readonly<{ startOffset: number | null; endOffset: number | null }>;
+	}>;
+	activeProfileId: string | null;
+	activeProfile: AgentFramingProfile | null;
+	profiles: readonly AgentFramingProfile[];
+	selectionOptions: Readonly<{
+		raw: AgentFramingProfileSelection;
+		current: AgentFramingProfileSelection | null;
+		historical: readonly AgentFramingProfileSelection[];
+	}>;
+}>;
+
+export type AgentFramingProfilesInput = Readonly<{
+	captureId: string;
+	cursor?: string;
+	limit?: number;
 }>;
 
 export type AgentMessageQueryInput = Readonly<{
@@ -319,6 +386,7 @@ export type AgentMessage = Readonly<{
 	hidden: boolean;
 	sequenceMembership: readonly Readonly<{ groupId: string; occurrenceNumber: number; offset: number }>[];
 	noteReferences: readonly string[];
+	noteSummaries?: readonly AgentNoteSummary[];
 }>;
 
 export type AgentMessageQueryResult = Readonly<{
@@ -333,6 +401,7 @@ export type AgentMessageContextInput = Readonly<{
 	sourceDataRevision?: number;
 	rowsBefore?: number;
 	rowsAfter?: number;
+	includeNoteSummaries?: boolean;
 }>;
 
 export type AgentMessageContext = Readonly<{
@@ -340,6 +409,58 @@ export type AgentMessageContext = Readonly<{
 	rowsBefore: number;
 	rowsAfter: number;
 	messages: readonly AgentMessage[];
+}>;
+
+export type AgentNoteEvidenceAnchors = Readonly<{
+	targetKind: string;
+	captureId: string;
+	profileId: string | null;
+	profileVersion: number | null;
+	sourceDataRevision: number | null;
+	frameId: string | null;
+	messageId: string | null;
+	bytePosition: number | null;
+	rawOffset: number | null;
+	rawOffsets: readonly number[] | null;
+	rawRange: Readonly<{ startOffset: number; endOffset: number }> | null;
+	frameRange: Readonly<{ startOrdinal: number; endOrdinal: number }> | null;
+	sequenceGroupId: string | null;
+	sequenceKey: string | null;
+}>;
+
+export type AgentNote = Readonly<{
+	id: string;
+	captureId: string;
+	text: string;
+	textTruncated: boolean;
+	createdAt: string;
+	updatedAt: string | null;
+	authorType: "human" | "agent";
+	reportedClientName?: string;
+	reportedClientVersion?: string;
+	protocolVersion?: string;
+	anchors: AgentNoteEvidenceAnchors;
+}>;
+
+export type AgentNoteQueryInput = Readonly<{
+	captureId?: string;
+	noteId?: string;
+	frameId?: string;
+	rawOffsetFrom?: number;
+	rawOffsetTo?: number;
+	authorType?: "human" | "agent";
+	createdFrom?: string;
+	createdTo?: string;
+	// timeFrom/timeTo are aliases for clients that describe the same filter as a time range.
+	timeFrom?: string;
+	timeTo?: string;
+	textLimit?: number;
+	cursor?: string;
+	limit?: number;
+}>;
+
+export type AgentNoteQueryResult = Readonly<{
+	notes: readonly AgentNote[];
 }>;
 
 export type AgentSequenceGroupsInput = Readonly<{
@@ -646,9 +767,43 @@ type ProfileRow = {
 	version: number;
 	algorithm_version: number;
 	is_active: number;
+	created_at?: string;
+	updated_at?: string;
 	source_data_revision: number | null;
 	retained_start_offset: number | null;
 	verified: number;
+};
+
+type FramingProfileListRow = ProfileRow & {
+	created_at: string;
+	updated_at: string;
+};
+
+type NoteQueryRow = {
+	id: string;
+	capture_id: string;
+	text: string;
+	created_at: string;
+	updated_at: string | null;
+	target_kind: string;
+	raw_offset: number | null;
+	profile_id: string | null;
+	profile_version: number | null;
+	profile_source_data_revision: number | null;
+	raw_offsets_json: string | null;
+	start_offset: number | null;
+	end_offset: number | null;
+	sequence_key: string | null;
+	start_row: number | null;
+	end_row: number | null;
+	message_id: string | null;
+	byte_position: number | null;
+	frame_id: string | null;
+	sequence_group_id: string | null;
+	author_type: "human" | "agent";
+	reported_client_name: string | null;
+	reported_client_version: string | null;
+	protocol_version: string | null;
 };
 
 type AnalysisFrameRow = FrameRow & {
@@ -918,6 +1073,95 @@ function previewText(text: string, max = 240): string {
 	return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+function framingSummaryText(sections: readonly AgentFramingSection[]): string {
+	if (!sections.length) return "No framing sections";
+	return sections.map(section => {
+		const details = section.framingMode === "length"
+			? `${section.frameLength ?? "?"} bytes`
+			: section.framingMode === "marker"
+				? `${section.marker ?? "?"} marker${section.markerPosition ? ` at ${section.markerPosition}` : ""}`
+				: `${section.timeGapMs ?? "?"} ms gap`;
+		return `section ${section.position} @ raw ${section.startOffset}: ${section.framingMode} (${details})`;
+	}).join("; ");
+}
+
+function noteRawOffsetsFromJson(value: string | null): number[] | null {
+	if (!value) return null;
+	const offsets = jsonArray<unknown>(value).map(Number);
+	return offsets.length && offsets.every(offset => Number.isSafeInteger(offset) && offset >= 0) ? offsets : null;
+}
+
+function noteRawRange(row: Pick<NoteQueryRow, "raw_offset" | "start_offset" | "end_offset" | "raw_offsets_json">): { startOffset: number; endOffset: number } | null {
+	const offsets = [
+		...(row.raw_offset === null ? [] : [row.raw_offset]),
+		...(row.start_offset === null ? [] : [row.start_offset]),
+		...(row.end_offset === null ? [] : [row.end_offset]),
+		...(noteRawOffsetsFromJson(row.raw_offsets_json) ?? [])
+	].filter(Number.isSafeInteger);
+	return offsets.length ? { startOffset: Math.min(...offsets), endOffset: Math.max(...offsets) } : null;
+}
+
+function noteEvidenceAnchors(row: NoteQueryRow): AgentNoteEvidenceAnchors {
+	const rawOffsets = noteRawOffsetsFromJson(row.raw_offsets_json);
+	return {
+		targetKind: row.target_kind,
+		captureId: row.capture_id,
+		profileId: row.profile_id,
+		profileVersion: row.profile_version,
+		sourceDataRevision: row.profile_source_data_revision,
+		frameId: row.frame_id,
+		messageId: row.message_id,
+		bytePosition: row.byte_position,
+		rawOffset: row.raw_offset,
+		rawOffsets,
+		rawRange: noteRawRange(row),
+		frameRange: row.start_row !== null && row.end_row !== null ? { startOrdinal: row.start_row, endOrdinal: row.end_row } : null,
+		sequenceGroupId: row.sequence_group_id,
+		sequenceKey: row.sequence_key
+	};
+}
+
+function noteSummaryFromRow(row: Pick<NoteQueryRow, "id" | "target_kind" | "text" | "created_at" | "profile_id" | "profile_version" | "profile_source_data_revision" | "frame_id" | "raw_offset" | "raw_offsets_json" | "start_offset" | "end_offset" | "start_row" | "end_row" | "sequence_group_id" | "sequence_key" | "author_type" | "reported_client_name" | "reported_client_version" | "protocol_version">): AgentNoteSummary {
+	return {
+		id: row.id,
+		targetKind: row.target_kind,
+		textPreview: previewText(row.text),
+		createdAt: row.created_at,
+		profileId: row.profile_id,
+		profileVersion: row.profile_version,
+		sourceDataRevision: row.profile_source_data_revision,
+		frameId: row.frame_id,
+		rawOffset: row.raw_offset,
+		rawOffsets: noteRawOffsetsFromJson(row.raw_offsets_json),
+		startOffset: row.start_offset,
+		endOffset: row.end_offset,
+		startOrdinal: row.start_row,
+		endOrdinal: row.end_row,
+		sequenceGroupId: row.sequence_group_id,
+		sequenceKey: row.sequence_key,
+		authorType: row.author_type,
+		...(row.reported_client_name ? { reportedClientName: row.reported_client_name } : {}),
+		...(row.reported_client_version ? { reportedClientVersion: row.reported_client_version } : {}),
+		...(row.protocol_version ? { protocolVersion: row.protocol_version } : {})
+	};
+}
+
+function noteFromQueryRow(row: NoteQueryRow, textLimit: number): AgentNote {
+	return {
+		id: row.id,
+		captureId: row.capture_id,
+		text: previewText(row.text, textLimit),
+		textTruncated: row.text.length > textLimit,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+		authorType: row.author_type,
+		...(row.reported_client_name ? { reportedClientName: row.reported_client_name } : {}),
+		...(row.reported_client_version ? { reportedClientVersion: row.reported_client_version } : {}),
+		...(row.protocol_version ? { protocolVersion: row.protocol_version } : {}),
+		anchors: noteEvidenceAnchors(row)
+	};
+}
+
 function requiredText(value: unknown, label: string): string {
 	const text = typeof value === "string" ? value.trim() : "";
 	if (!text) throw new AgentQueryError("invalid-input", `${label} is required`, { label });
@@ -938,6 +1182,13 @@ function optionalFiniteNumber(value: unknown, label: string): number | undefined
 		throw new AgentQueryError("invalid-input", `${label} must be a finite number`, { label });
 	}
 	return value;
+}
+
+function optionalNoteTime(value: unknown, label: string): string | undefined {
+	if (value === undefined) return undefined;
+	const text = requiredText(value, label);
+	if (!Number.isFinite(Date.parse(text))) throw new AgentQueryError("invalid-input", `${label} must be a valid ISO date or timestamp`, { label, value: text });
+	return text;
 }
 
 function normalizedSignature(value: unknown, label: string): string | undefined {
@@ -1589,6 +1840,173 @@ export class CanonicalQueryService {
 		};
 	}
 
+	private readFramingProfileSummary(
+		captureId: string,
+		captureDataRevision: number,
+		rawBounds: Readonly<{ startOffset: number | null; endOffset: number | null }>,
+		row: FramingProfileListRow
+	): AgentFramingProfile {
+		const sectionRows = this.database.prepare(
+			`SELECT id, position, start_offset, framing_mode, frame_length, marker_bytes, marker_position,
+			        time_gap_ms, collapse_runs, collapsed
+			 FROM framing_sections WHERE profile_id = @profileId ORDER BY position LIMIT @limit`
+		).all({ profileId: row.id, limit: 65 }) as Array<{
+			id: string; position: number; start_offset: number; framing_mode: string; frame_length: number | null;
+			marker_bytes: string | null; marker_position: string | null; time_gap_ms: number | null; collapse_runs: number; collapsed: number;
+		}>;
+		const sectionCount = (this.database.prepare(
+			"SELECT COUNT(*) AS count FROM framing_sections WHERE profile_id = @profileId"
+		).get({ profileId: row.id }) as { count: number }).count;
+		const sections: AgentFramingSection[] = sectionRows.slice(0, 64).map(section => ({
+			id: section.id,
+			position: section.position,
+			startOffset: section.start_offset,
+			framingMode: section.framing_mode,
+			frameLength: section.frame_length,
+			marker: markerText(section.marker_bytes),
+			markerPosition: section.marker_position,
+			timeGapMs: section.time_gap_ms,
+			collapseRuns: Boolean(section.collapse_runs),
+			collapsed: Boolean(section.collapsed)
+		}));
+		const frameCount = (this.database.prepare(
+			"SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId"
+		).get({ profileId: row.id }) as { count: number }).count;
+		const visibleFrameCount = (this.database.prepare(
+			"SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId AND hidden = 0"
+		).get({ profileId: row.id }) as { count: number }).count;
+		const framedByteCount = (this.database.prepare(
+			"SELECT COALESCE(SUM(json_array_length(bytes_json)), 0) AS count FROM materialized_frames WHERE profile_id = @profileId"
+		).get({ profileId: row.id }) as { count: number }).count;
+		const frameBounds = this.database.prepare(
+			"SELECT MIN(ordinal) AS start_ordinal, MAX(ordinal) AS end_ordinal FROM materialized_frames WHERE profile_id = @profileId"
+		).get({ profileId: row.id }) as { start_ordinal: number | null; end_ordinal: number | null };
+		const sourceDataRevision = row.source_data_revision ?? captureDataRevision;
+		const selection: AgentFramingProfileSelection = {
+			kind: "framing",
+			captureId,
+			profileId: row.id,
+			profileVersion: row.version,
+			sourceDataRevision
+		};
+		return {
+			id: row.id,
+			version: row.version,
+			algorithmVersion: row.algorithm_version,
+			isActive: Boolean(row.is_active),
+			verified: Boolean(row.verified),
+			createdAt: row.created_at,
+			updatedAt: row.updated_at,
+			sourceDataRevision,
+			retainedStartOffset: row.retained_start_offset ?? 0,
+			selection,
+			framingSummary: {
+				text: framingSummaryText(sections),
+				sections,
+				...(sectionCount > sections.length ? { sectionsTruncated: true } : {}),
+				frameCount,
+				visibleFrameCount,
+				framedByteCount,
+				rawBounds,
+				frameBounds: { startOrdinal: frameBounds.start_ordinal, endOrdinal: frameBounds.end_ordinal }
+			}
+		};
+	}
+
+	listFramingProfiles(input: AgentFramingProfilesInput): AgentResponse<AgentFramingProfiles> {
+		const captureId = requiredText(input.captureId, "captureId");
+		const capture = this.database.prepare(
+			"SELECT id, data_revision, active_framing_profile_id FROM captures WHERE id = @captureId"
+		).get({ captureId }) as { id: string; data_revision: number; active_framing_profile_id: string | null } | undefined;
+		if (!capture) {
+			const summary = this.getCaptureSummary(captureId);
+			if (summary?.status !== "canonical") {
+				throw new AgentQueryError("legacy-not-canonicalized", "This capture has no canonical profile history; convert it in the Bus Lens UI before discovering framing profiles", { captureId, status: summary?.status ?? "missing" });
+			}
+			throw new AgentQueryError("not-found", "Capture was not found", { captureId });
+		}
+		const rawBounds = this.database.prepare(
+			"SELECT MIN(start_offset) AS start_offset, MAX(start_offset + byte_count - 1) AS end_offset FROM raw_chunks WHERE capture_id = @captureId"
+		).get({ captureId }) as { start_offset: number | null; end_offset: number | null };
+		const activeRow = capture.active_framing_profile_id
+			? this.database.prepare(
+				`SELECT id, capture_id, version, algorithm_version, is_active, created_at, updated_at,
+				        source_data_revision, retained_start_offset, verified
+				 FROM framing_profiles WHERE id = @profileId AND capture_id = @captureId`
+			).get({ captureId, profileId: capture.active_framing_profile_id }) as FramingProfileListRow | undefined
+			: undefined;
+		const activeProfileId = activeRow?.id ?? null;
+		const filterScope = { captureId };
+		const cursorPayload = input.cursor ? decodeAgentCursor(input.cursor, "framing-profile-list", ["version", "id"]) : undefined;
+		if (cursorPayload) assertCursorFilters(cursorPayload, filterScope);
+		const limit = boundedLimit(input.limit, DEFAULT_FRAMING_PROFILE_LIMIT, MAX_FRAMING_PROFILE_LIMIT);
+		const params: Record<string, unknown> = { captureId, limit: limit + 1 };
+		const cursorSql = cursorPayload
+			? " AND (version < @cursorVersion OR (version = @cursorVersion AND id < @cursorId))"
+			: "";
+		if (cursorPayload) {
+			params.cursorVersion = cursorPayload.key.version;
+			params.cursorId = cursorPayload.key.id;
+		}
+		const rows = this.database.prepare(
+			`SELECT id, capture_id, version, algorithm_version, is_active, created_at, updated_at,
+			        source_data_revision, retained_start_offset, verified
+			 FROM framing_profiles
+			 WHERE capture_id = @captureId${cursorSql}
+			 ORDER BY version DESC, id DESC
+			 LIMIT @limit`
+		).all(params) as FramingProfileListRow[];
+		const summaryById = new Map<string, AgentFramingProfile>();
+		const readSummary = (row: FramingProfileListRow): AgentFramingProfile => {
+			const existing = summaryById.get(row.id);
+			if (existing) return existing;
+			const summary = this.readFramingProfileSummary(captureId, capture.data_revision, { startOffset: rawBounds.start_offset, endOffset: rawBounds.end_offset }, row);
+			summaryById.set(row.id, summary);
+			return summary;
+		};
+		const activeProfile = activeRow ? readSummary(activeRow) : null;
+		return selectSizeBoundedPage(rows, limit, (pageRows, page) => {
+			const profiles = pageRows.map(readSummary);
+			const historical = profiles.filter(profile => profile.id !== activeProfileId).map(profile => profile.selection);
+			const hasMore = rows.length > pageRows.length;
+			const last = pageRows.at(-1);
+			const nextCursor = hasMore && last
+				? encodeAgentCursor({ contractVersion: 1, scope: "framing-profile-list", filters: filterScope, key: { version: last.version, id: last.id } })
+				: undefined;
+			const current = activeProfile?.selection ?? null;
+			const rawSelection: AgentFramingProfileSelection = {
+				kind: "raw",
+				captureId,
+				sourceDataRevision: capture.data_revision
+			};
+			const data: AgentFramingProfiles = {
+				captureId,
+				rawData: {
+					selection: rawSelection,
+					sourceDataRevision: capture.data_revision,
+					availableBounds: { startOffset: rawBounds.start_offset, endOffset: rawBounds.end_offset }
+				},
+				activeProfileId,
+				activeProfile,
+				profiles,
+				selectionOptions: { raw: rawSelection, current, historical }
+			};
+			return makeAgentResponse({
+				data,
+				appliedFilters: filterScope,
+				requestedLimit: page.requestedLimit,
+				effectiveLimit: page.effectiveLimit,
+				returned: profiles.length,
+				nextCursor,
+				truncationReason: page.truncationReason,
+				truncated: hasMore,
+				suggestedOperations: current
+					? [{ tool: "get_capture_overview", reason: "Inspect the current framing after choosing a profile snapshot", arguments: current }]
+					: [{ tool: "read_raw_bytes", reason: "Inspect retained raw data when no framing profile is available", arguments: { captureId } }]
+			});
+		});
+	}
+
 	private readAgentOverview(captureId: string, requested?: Partial<AgentSnapshotReference>): AgentCaptureOverview {
 		const summary = this.getCaptureSummary(captureId);
 		if (!summary) throw new AgentQueryError("not-found", "Capture was not found", { captureId });
@@ -1680,7 +2098,7 @@ export class CanonicalQueryService {
 			).get({ groupId: row.id }) as { occurrence_index: number; start_frame_ordinal: number } | undefined;
 			const note = this.database.prepare(
 				`SELECT text FROM stable_notes
-				 WHERE capture_id = @captureId
+				 WHERE stable_notes.capture_id = @captureId
 				   AND (profile_id IS NULL OR profile_id = @profileId)
 				   AND (sequence_group_id = @groupId OR (target_kind = 'pattern' AND sequence_key = @sequenceKey))
 				 ORDER BY created_at DESC LIMIT 1`
@@ -1819,7 +2237,7 @@ export class CanonicalQueryService {
 		return resolved;
 	}
 
-	private mapAnalysisMessages(rows: readonly AnalysisFrameRow[], previousTimestamp: number | null = null): AgentMessage[] {
+	private mapAnalysisMessages(rows: readonly AnalysisFrameRow[], previousTimestamp: number | null = null, includeNoteSummaries = false): AgentMessage[] {
 		if (!rows.length) return [];
 		const minOrdinal = rows[0].ordinal;
 		const maxOrdinal = rows.at(-1)?.ordinal ?? minOrdinal;
@@ -1856,16 +2274,21 @@ export class CanonicalQueryService {
 		const noteRows = minRawOffset === null || maxRawOffset === null
 			? []
 			: this.database.prepare(
-				`SELECT id, frame_id, profile_id, raw_offset, start_offset, end_offset, start_row, end_row
-				 FROM stable_notes
-				 WHERE capture_id = @captureId
+				`SELECT notes.id, notes.frame_id, notes.profile_id, notes.raw_offset, notes.start_offset, notes.end_offset, notes.start_row, notes.end_row,
+				        notes.text, notes.created_at, notes.target_kind, notes.raw_offsets_json, notes.sequence_group_id, notes.sequence_key,
+				        notes.author_type, notes.reported_client_name, notes.reported_client_version, notes.protocol_version,
+				        profiles.version AS profile_version, profiles.source_data_revision AS profile_source_data_revision
+				 FROM stable_notes notes
+				 LEFT JOIN framing_profiles profiles
+				   ON profiles.id = notes.profile_id AND profiles.capture_id = notes.capture_id
+				 WHERE notes.capture_id = @captureId
 				   AND (
-					 frame_id IN (${framePlaceholders.join(", ")})
-					 OR (profile_id = @profileId AND start_row IS NOT NULL AND end_row IS NOT NULL AND start_row <= @maxOrdinal AND end_row >= @minOrdinal)
-					 OR (profile_id = @profileId AND start_offset IS NOT NULL AND end_offset IS NOT NULL AND end_offset >= @minRawOffset AND start_offset <= @maxRawOffset)
-					 OR (raw_offset BETWEEN @minRawOffset AND @maxRawOffset)
+					 notes.frame_id IN (${framePlaceholders.join(", ")})
+					 OR (notes.profile_id = @profileId AND notes.start_row IS NOT NULL AND notes.end_row IS NOT NULL AND notes.start_row <= @maxOrdinal AND notes.end_row >= @minOrdinal)
+					 OR (notes.profile_id = @profileId AND notes.start_offset IS NOT NULL AND notes.end_offset IS NOT NULL AND notes.end_offset >= @minRawOffset AND notes.start_offset <= @maxRawOffset)
+					 OR (notes.raw_offset BETWEEN @minRawOffset AND @maxRawOffset)
 				   )
-				 ORDER BY created_at, id`
+				 ORDER BY notes.created_at, notes.id`
 			).all({
 				captureId,
 				profileId,
@@ -1883,18 +2306,55 @@ export class CanonicalQueryService {
 				end_offset: number | null;
 				start_row: number | null;
 				end_row: number | null;
-			}>;
+				text: string;
+				created_at: string;
+				target_kind: string;
+				raw_offsets_json: string | null;
+				sequence_group_id: string | null;
+				sequence_key: string | null;
+				author_type: "human" | "agent";
+				reported_client_name: string | null;
+				reported_client_version: string | null;
+				protocol_version: string | null;
+				profile_version: number | null;
+				profile_source_data_revision: number | null;
+				}>;
 		const messages: AgentMessage[] = [];
 		let priorTimestamp = previousTimestamp;
 		for (const row of rows) {
 			const timestamp = timestampFromFrame(row);
 			const span = frameRawSpan(row);
-			const notes = noteRows.filter(note =>
+			const noteRowsForMessage = noteRows.filter(note =>
 				note.frame_id === row.id
 				|| note.profile_id === profileId && note.start_row !== null && note.end_row !== null && note.start_row <= row.ordinal && note.end_row >= row.ordinal
 				|| note.profile_id === profileId && note.start_offset !== null && note.end_offset !== null && span.startOffset !== null && span.endOffset !== null && note.end_offset >= span.startOffset && note.start_offset <= span.endOffset
 				|| note.raw_offset !== null && span.startOffset !== null && span.endOffset !== null && note.raw_offset >= span.startOffset && note.raw_offset <= span.endOffset
-			).map(note => note.id);
+			);
+			const notes = noteRowsForMessage.map(note => note.id);
+			const noteSummaries = includeNoteSummaries
+				? [...new Map(noteRowsForMessage.map(note => [note.id, noteSummaryFromRow({
+					id: note.id,
+					target_kind: note.target_kind,
+					text: note.text,
+					created_at: note.created_at,
+					profile_id: note.profile_id,
+					profile_version: note.profile_version,
+					profile_source_data_revision: note.profile_source_data_revision,
+					frame_id: note.frame_id,
+					raw_offset: note.raw_offset,
+					raw_offsets_json: note.raw_offsets_json,
+					start_offset: note.start_offset,
+					end_offset: note.end_offset,
+					start_row: note.start_row,
+					end_row: note.end_row,
+					sequence_group_id: note.sequence_group_id,
+					sequence_key: note.sequence_key,
+					author_type: note.author_type,
+					reported_client_name: note.reported_client_name,
+					reported_client_version: note.reported_client_version,
+					protocol_version: note.protocol_version
+				})] as const)).values()]
+				: undefined;
 			messages.push({
 				frameId: row.id,
 				ordinal: row.ordinal,
@@ -1906,7 +2366,8 @@ export class CanonicalQueryService {
 				direction: frameDirectionSummary(row),
 				hidden: Boolean(row.hidden),
 				sequenceMembership: membershipByOrdinal.get(row.ordinal) ?? [],
-				noteReferences: [...new Set(notes)]
+				noteReferences: [...new Set(notes)],
+				...(noteSummaries ? { noteSummaries } : {})
 			});
 			if (timestamp !== null) priorTimestamp = timestamp;
 		}
@@ -1920,6 +2381,143 @@ export class CanonicalQueryService {
 			 ORDER BY ordinal DESC LIMIT 1`
 		).get({ profileId, ordinal }) as { timestamps_json: string } | undefined;
 		return row ? timestampFromFrame(row) : null;
+	}
+
+	queryNotes(input: AgentNoteQueryInput = {}): AgentResponse<AgentNoteQueryResult> {
+		const captureId = input.captureId === undefined ? undefined : requiredText(input.captureId, "captureId");
+		const noteId = input.noteId === undefined ? undefined : requiredText(input.noteId, "noteId");
+		const frameId = input.frameId === undefined ? undefined : requiredText(input.frameId, "frameId");
+		const requestedRawOffsetFrom = optionalNonNegativeInteger(input.rawOffsetFrom, "rawOffsetFrom");
+		const requestedRawOffsetTo = optionalNonNegativeInteger(input.rawOffsetTo, "rawOffsetTo");
+		const rawOffsetFrom = requestedRawOffsetFrom ?? requestedRawOffsetTo;
+		const rawOffsetTo = requestedRawOffsetTo ?? requestedRawOffsetFrom;
+		if (rawOffsetFrom !== undefined && rawOffsetTo !== undefined && rawOffsetFrom > rawOffsetTo) {
+			throw new AgentQueryError("invalid-input", "rawOffsetFrom must not exceed rawOffsetTo", { rawOffsetFrom, rawOffsetTo });
+		}
+		if (input.authorType !== undefined && input.authorType !== "human" && input.authorType !== "agent") {
+			throw new AgentQueryError("invalid-input", "authorType must be human or agent", { authorType: input.authorType });
+		}
+		if (input.createdFrom !== undefined && input.timeFrom !== undefined && input.createdFrom !== input.timeFrom) {
+			throw new AgentQueryError("invalid-input", "createdFrom conflicts with timeFrom", { createdFrom: input.createdFrom, timeFrom: input.timeFrom });
+		}
+		if (input.createdTo !== undefined && input.timeTo !== undefined && input.createdTo !== input.timeTo) {
+			throw new AgentQueryError("invalid-input", "createdTo conflicts with timeTo", { createdTo: input.createdTo, timeTo: input.timeTo });
+		}
+		const createdFrom = optionalNoteTime(input.createdFrom ?? input.timeFrom, "createdFrom");
+		const createdTo = optionalNoteTime(input.createdTo ?? input.timeTo, "createdTo");
+		if (createdFrom !== undefined && createdTo !== undefined && createdFrom > createdTo) {
+			throw new AgentQueryError("invalid-input", "createdFrom must not exceed createdTo", { createdFrom, createdTo });
+		}
+		const textLimit = boundedLimit(input.textLimit, DEFAULT_NOTE_TEXT_LIMIT, MAX_NOTE_TEXT_LIMIT, "textLimit");
+		const filterScope = {
+			...(captureId === undefined ? {} : { captureId }),
+			...(noteId === undefined ? {} : { noteId }),
+			...(frameId === undefined ? {} : { frameId }),
+			...(rawOffsetFrom === undefined ? {} : { rawOffsetFrom }),
+			...(rawOffsetTo === undefined ? {} : { rawOffsetTo }),
+			...(input.authorType === undefined ? {} : { authorType: input.authorType }),
+			...(createdFrom === undefined ? {} : { createdFrom }),
+			...(createdTo === undefined ? {} : { createdTo }),
+			textLimit
+		};
+		const cursorPayload = input.cursor ? decodeAgentCursor(input.cursor, "note-query", ["createdAt", "id"]) : undefined;
+		if (cursorPayload) assertCursorFilters(cursorPayload, filterScope);
+		const limit = boundedLimit(input.limit, DEFAULT_NOTE_QUERY_LIMIT, MAX_NOTE_QUERY_LIMIT);
+		const clauses = ["1 = 1"];
+		const params: Record<string, unknown> = { limit: limit + 1 };
+		if (captureId !== undefined) { clauses.push("notes.capture_id = @captureId"); params.captureId = captureId; }
+		if (noteId !== undefined) { clauses.push("notes.id = @noteId"); params.noteId = noteId; }
+		if (input.authorType !== undefined) { clauses.push("notes.author_type = @authorType"); params.authorType = input.authorType; }
+		if (createdFrom !== undefined) { clauses.push("notes.created_at >= @createdFrom"); params.createdFrom = createdFrom; }
+		if (createdTo !== undefined) { clauses.push("notes.created_at <= @createdTo"); params.createdTo = createdTo; }
+		if (rawOffsetFrom !== undefined && rawOffsetTo !== undefined) {
+			clauses.push(`(
+				notes.raw_offset BETWEEN @rawOffsetFrom AND @rawOffsetTo
+				OR (notes.start_offset IS NOT NULL AND notes.end_offset IS NOT NULL
+					AND notes.end_offset >= @rawOffsetFrom AND notes.start_offset <= @rawOffsetTo)
+				OR EXISTS (
+					SELECT 1 FROM json_each(COALESCE(notes.raw_offsets_json, '[]')) note_offsets
+					WHERE CAST(note_offsets.value AS INTEGER) BETWEEN @rawOffsetFrom AND @rawOffsetTo
+				)
+				OR EXISTS (
+					SELECT 1
+					FROM sequence_occurrences note_occurrences
+					WHERE notes.target_kind = 'sequence-group'
+					  AND note_occurrences.group_id = notes.sequence_group_id
+					  AND note_occurrences.end_raw_offset >= @rawOffsetFrom
+					  AND note_occurrences.start_raw_offset <= @rawOffsetTo
+				)
+				OR EXISTS (
+					SELECT 1
+					FROM sequence_groups note_groups
+					JOIN sequence_occurrences note_pattern_occurrences ON note_pattern_occurrences.group_id = note_groups.id
+					WHERE notes.target_kind = 'pattern'
+					  AND note_groups.capture_id = notes.capture_id
+					  AND note_groups.key_text = notes.sequence_key
+					  AND note_pattern_occurrences.end_raw_offset >= @rawOffsetFrom
+					  AND note_pattern_occurrences.start_raw_offset <= @rawOffsetTo
+				)
+			)`);
+			params.rawOffsetFrom = rawOffsetFrom;
+			params.rawOffsetTo = rawOffsetTo;
+		}
+		if (frameId !== undefined) {
+			clauses.push(`EXISTS (
+				SELECT 1
+				FROM materialized_frames selected_frame
+				WHERE selected_frame.id = @frameId
+				  AND selected_frame.capture_id = notes.capture_id
+				  AND (
+					notes.frame_id = selected_frame.id
+					OR (notes.profile_id = selected_frame.profile_id AND notes.start_row IS NOT NULL AND notes.end_row IS NOT NULL
+						AND notes.start_row <= selected_frame.ordinal AND notes.end_row >= selected_frame.ordinal)
+				  )
+			)`);
+			params.frameId = frameId;
+		}
+		if (cursorPayload) {
+			clauses.push("(notes.created_at < @cursorCreatedAt OR (notes.created_at = @cursorCreatedAt AND notes.id < @cursorId))");
+			params.cursorCreatedAt = cursorPayload.key.createdAt;
+			params.cursorId = cursorPayload.key.id;
+		}
+		const rows = this.database.prepare(
+			`SELECT notes.id, notes.capture_id, notes.text, notes.created_at, notes.updated_at, notes.target_kind,
+			        notes.raw_offset, notes.profile_id, profiles.version AS profile_version,
+			        profiles.source_data_revision AS profile_source_data_revision, notes.raw_offsets_json,
+			        notes.start_offset, notes.end_offset, notes.sequence_key, notes.start_row, notes.end_row,
+			        notes.message_id, notes.byte_position, notes.frame_id, notes.sequence_group_id,
+			        notes.author_type, notes.reported_client_name, notes.reported_client_version, notes.protocol_version
+			 FROM stable_notes notes
+			 LEFT JOIN framing_profiles profiles
+			   ON profiles.id = notes.profile_id AND profiles.capture_id = notes.capture_id
+			 WHERE ${clauses.join(" AND ")}
+			 ORDER BY notes.created_at DESC, notes.id DESC
+			 LIMIT @limit`
+		).all(params) as NoteQueryRow[];
+		return selectSizeBoundedPage(rows, limit, (pageRows, page) => {
+			const notes = pageRows.map(row => noteFromQueryRow(row, textLimit));
+			const hasMore = rows.length > pageRows.length;
+			const last = pageRows.at(-1);
+			const nextCursor = hasMore && last
+				? encodeAgentCursor({ contractVersion: 1, scope: "note-query", filters: filterScope, key: { createdAt: last.created_at, id: last.id } })
+				: undefined;
+			const firstFrameId = notes.find(note => note.anchors.frameId)?.anchors.frameId;
+			return makeAgentResponse({
+				data: { notes },
+				appliedFilters: filterScope,
+				requestedLimit: page.requestedLimit,
+				effectiveLimit: page.effectiveLimit,
+				returned: notes.length,
+				nextCursor,
+				truncationReason: page.truncationReason,
+				truncated: hasMore,
+				suggestedOperations: firstFrameId
+					? [{ tool: "get_message_context", reason: "Inspect the frame anchor for the first returned note", arguments: { frameId: firstFrameId } }]
+					: notes[0]
+						? [{ tool: "get_capture_overview", reason: "Refresh the bounded overview for the first returned note's capture", arguments: { captureId: notes[0].captureId } }]
+						: []
+			});
+		});
 	}
 
 	queryMessages(input: AgentMessageQueryInput): AgentResponse<AgentMessageQueryResult> {
@@ -2041,6 +2639,7 @@ export class CanonicalQueryService {
 		const frameId = requiredText(input.frameId, "frameId");
 		const rowsBefore = boundedLimit(input.rowsBefore, 10, 100, "rowsBefore");
 		const rowsAfter = boundedLimit(input.rowsAfter, 10, 100, "rowsAfter");
+		const includeNoteSummaries = Boolean(input.includeNoteSummaries);
 		const frame = this.database.prepare(
 			`SELECT id, capture_id, profile_id, ordinal, section_id, raw_offsets_json, bytes_json,
 			        timestamps_json, directions_json, hidden, signature
@@ -2066,8 +2665,8 @@ export class CanonicalQueryService {
 		).all({ profileId: profile.id, startOrdinal: Math.max(0, frame.ordinal - rowsBefore), endOrdinal: frame.ordinal + rowsAfter, limit: rowsBefore + rowsAfter + 1 }) as AnalysisFrameRow[];
 		const previousTimestamp = rows.length ? this.previousFrameTimestamp(profile.id, rows[0].ordinal) : null;
 		const response = makeAgentResponse({
-			data: { centerFrameId: frameId, rowsBefore, rowsAfter, messages: this.mapAnalysisMessages(rows, previousTimestamp) },
-			appliedFilters: { frameId, rowsBefore, rowsAfter },
+			data: { centerFrameId: frameId, rowsBefore, rowsAfter, messages: this.mapAnalysisMessages(rows, previousTimestamp, includeNoteSummaries) },
+			appliedFilters: { frameId, rowsBefore, rowsAfter, includeNoteSummaries },
 			snapshot,
 			truncated: false,
 			suggestedOperations: [{ tool: "query_messages", reason: "Search more frames with the same snapshot", arguments: { captureId: frame.capture_id, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision } }]
