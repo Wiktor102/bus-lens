@@ -119,6 +119,7 @@ function archiveCapture(capture: CaptureListItem): ArchiveCapture {
 		folderId: capture.folderId,
 		params: capture.params.map(parameter => ({ key: parameter.key, value: parameter.value })),
 		messageCount: capture.messageCount,
+		isRecording: capture.lifecycle === "recording",
 		storageStatus: capture.storageStatus
 	};
 }
