@@ -51,6 +51,9 @@ export type CaptureControllerDependencies = {
 	publishNotesState: (capture?: Capture) => void;
 	publishDialogCommand: typeof publishDialogCommand;
 	captureWriter?: CaptureWriter;
+	trackCaptureWrite?: (captureId: string, write: Promise<unknown>) => void;
+	markCapturePersisted?: (captureId: string) => void;
+	deleteCapture?: (captureId: string) => Promise<void>;
 	isCanonicalCapture?: (captureId: string) => boolean;
 	waitForCaptureWrite?: (captureId: string) => Promise<void>;
 	isCaptureConversionLocked?: (captureId: string) => boolean;
@@ -107,6 +110,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	const state = dependencies.state as ActiveAppState;
 	const captureWriteQueues = new Map<string, CaptureWriteQueue>();
 	const patternRemarkWriteQueues = new Map<string, Map<string, PatternRemarkWriteQueue>>();
+	const captureCommandWrites = new Map<string, Promise<void>>();
 
 	function capture(): ActiveCapture | undefined {
 		return dependencies.capture() as ActiveCapture | undefined;
@@ -454,12 +458,28 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			const captureQueue = captureWriteQueues.get(captureId);
 			const patternQueues = patternRemarkWriteQueues.get(captureId);
 			const running = [
+				...(captureCommandWrites.get(captureId) ? [captureCommandWrites.get(captureId)!] : []),
 				...(captureQueue?.running ? [captureQueue.running] : []),
 				...(patternQueues ? [...patternQueues.values()].flatMap(queue => queue.running ? [queue.running] : []) : [])
 			];
-			if (!running.length) return;
-			await Promise.all(running);
+			if (running.length) {
+				await Promise.all(running);
+				continue;
+			}
+			if (dependencies.waitForCaptureWrite) await dependencies.waitForCaptureWrite(captureId);
+			return;
 		}
+	}
+
+	function trackCaptureCommand(captureId: string, write: Promise<unknown>): void {
+		const id = String(captureId);
+		const previous = captureCommandWrites.get(id);
+		const tracked = (previous ? Promise.all([previous, write]) : write).then(() => undefined, () => undefined);
+		captureCommandWrites.set(id, tracked);
+		dependencies.trackCaptureWrite?.(id, write);
+		void tracked.then(() => {
+			if (captureCommandWrites.get(id) === tracked) captureCommandWrites.delete(id);
+		});
 	}
 
 	function metadataPatch(item: ActiveCapture): void {
@@ -655,18 +675,25 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		state.captures.unshift(copy);
 		dependencies.setActiveId(copy.id);
 		if (isCanonical(source)) {
-			void dependencies.captureWriter!.duplicate({ captureId: source.id, duplicateCaptureId: String(copy.id) })
-				.then(() => dependencies.refreshCapture?.(String(copy.id)))
+			const copyId = String(copy.id);
+			const duplicateWrite = dependencies.captureWriter!.duplicate({ captureId: source.id, duplicateCaptureId: copyId })
+				.then(() => {
+					dependencies.markCapturePersisted?.(copyId);
+					return dependencies.refreshCapture?.(copyId);
+				})
 				.then(refreshed => {
+					if (!captureById(copyId)) return;
 					if (refreshed) Object.assign(copy, refreshed);
 					dependencies.render();
-				})
-				.catch(error => {
-					state.captures = state.captures.filter(item => item !== copy);
-					dependencies.setActiveId(source.id);
-					reportFailure(source.id, error);
-					dependencies.render();
 				});
+			trackCaptureCommand(String(source.id), duplicateWrite);
+			trackCaptureCommand(copyId, duplicateWrite);
+			void duplicateWrite.catch(error => {
+				state.captures = state.captures.filter(item => item !== copy);
+				dependencies.setActiveId(source.id);
+				reportFailure(source.id, error);
+				dependencies.render();
+			});
 		} else dependencies.saveState();
 		dependencies.render();
 	}
@@ -698,15 +725,27 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		await waitForCaptureWrites(captureId);
 		item = state.captures.find(captureItem => captureItem.id === captureId);
 		if (!item) return;
+		const itemId = String(item.id);
+		const canonical = isCanonical(item);
+		let deleteWrite: Promise<void> | undefined;
+		if (canonical) {
+			try {
+				deleteWrite = dependencies.deleteCapture
+					? dependencies.deleteCapture(itemId)
+					: dependencies.captureWriter!.delete(itemId);
+			} catch (error) {
+				deleteWrite = Promise.reject(error);
+			}
+		}
 		state.captures = state.captures.filter(captureItem => captureItem.id !== captureId);
 		if (deletingActiveCapture) dependencies.setActiveId(state.captures[0]?.id || null);
-		if (isCanonical(item)) {
+		if (deleteWrite) {
 			try {
-				await dependencies.captureWriter!.delete(item.id);
+				await deleteWrite;
 			} catch (error) {
 				state.captures.unshift(item);
-				if (deletingActiveCapture) dependencies.setActiveId(item.id);
-				reportFailure(item.id, error);
+				if (deletingActiveCapture) dependencies.setActiveId(itemId);
+				reportFailure(itemId, error);
 				dependencies.render();
 				return;
 			}
