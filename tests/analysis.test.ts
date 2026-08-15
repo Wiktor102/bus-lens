@@ -8,6 +8,7 @@ import {
 	summarizeRunCadence,
 	transitionFrames
 } from "../src/features/analysis/analysis.ts";
+import { deriveAnalysisStatistics as deriveCanonicalAnalysisStatistics } from "../src/domain/analysis.ts";
 import { makeMessage, type Capture } from "../src/features/capture/capture-framing.ts";
 
 function capture(messages: ReturnType<typeof makeMessage>[]): Capture {
@@ -50,6 +51,20 @@ test("counts signatures and derives sorted analysis card values", () => {
 	assert.deepEqual(snapshot.transitions, [
 		{ from: "AA 01", to: "AA 03", count: 1, diffs: 1 },
 		{ from: "AA 03", to: "AA 01", count: 1, diffs: 1 }
+	]);
+});
+
+test("canonical transition diffs use max width and omit unchanged adjacent pairs", () => {
+	const statistics = deriveCanonicalAnalysisStatistics([
+		{ signature: "01", bytes: [0x01] },
+		{ signature: "01", bytes: [0x01] },
+		{ signature: "01 02", bytes: [0x01, 0x02] },
+		{ signature: "01 03", bytes: [0x01, 0x03] }
+	]);
+
+	assert.deepEqual(statistics.transitions, [
+		{ from: "01", to: "01 02", count: 1, diffs: 1 },
+		{ from: "01 02", to: "01 03", count: 1, diffs: 1 }
 	]);
 });
 

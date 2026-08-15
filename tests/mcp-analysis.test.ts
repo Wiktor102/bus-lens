@@ -100,19 +100,16 @@ test("get_transitions publishes and enforces aggregate/refined query constraints
 
 		const listResponse = await modernCall(baseUrl, "tools/list", {});
 		assert.equal(listResponse.status, 200);
-		const listBody = await listResponse.json() as { result: { tools: Array<{ name: string; description?: string; inputSchema: { anyOf?: Array<{ properties?: Record<string, { not?: unknown }>; required?: string[] }> } }> } };
+		const listBody = await listResponse.json() as { result: { tools: Array<{ name: string; description?: string; inputSchema: { type?: string; properties?: Record<string, { enum?: unknown[] }> }; outputSchema?: { type?: string; properties?: Record<string, { type?: string; properties?: Record<string, { type?: string }> }> } }> } };
 		const transitionsTool = listBody.result.tools.find(tool => tool.name === "get_transitions");
 		assert.ok(transitionsTool);
-		assert.match(transitionsTool.description ?? "", /1,000 transitions/);
-		const branches = transitionsTool.inputSchema.anyOf ?? [];
-		assert.ok(branches.length >= 5);
-		assert.ok(branches.some(branch => branch.required?.includes("sectionId") && branch.required?.includes("sourceSignature")));
-		assert.ok(branches.some(branch => branch.required?.includes("sectionId") && branch.required?.includes("destinationSignature")));
-		assert.ok(branches.some(branch => branch.required?.includes("changedPositions") && branch.required?.includes("sourceSignature")));
-		assert.ok(branches.some(branch => branch.required?.includes("changedPositions") && branch.required?.includes("destinationSignature")));
-		const aggregateBranch = branches.find(branch => branch.properties?.sectionId?.not !== undefined);
-		assert.ok(aggregateBranch?.properties?.changedPositions?.not !== undefined);
-		assert.ok(branches.filter(branch => branch.required?.includes("sectionId") || branch.required?.includes("changedPositions")).every(branch => branch.properties?.cursor?.not !== undefined));
+		assert.equal(transitionsTool.inputSchema.type, "object");
+		assert.match(transitionsTool.description ?? "", /position-only and section-only/i);
+		assert.deepEqual(transitionsTool.inputSchema.properties?.changedPositionMatch?.enum, ["all", "any"]);
+		const differenceTool = listBody.result.tools.find(tool => tool.name === "analyze_capture_difference");
+		assert.ok(differenceTool);
+		assert.equal(differenceTool.outputSchema?.properties?.data?.type, "object");
+		assert.equal(differenceTool.outputSchema?.properties?.data?.properties?.candidateFields?.type, "array");
 
 		const callTool = async (argumentsValue: Record<string, unknown>, id: number): Promise<ToolCallBody> => {
 			const response = await modernCall(baseUrl, "tools/call", { name: "get_transitions", arguments: argumentsValue }, id);
@@ -125,9 +122,9 @@ test("get_transitions publishes and enforces aggregate/refined query constraints
 			assert.match(body.result?.content?.map(item => item.text ?? "").join(" ") ?? "", pattern);
 		};
 
-		await assertValidationFailure({ captureId: "mcp-transition-capture", changedPositions: [0] }, /sourceSignature|destinationSignature/, 2);
-		await assertValidationFailure({ captureId: "mcp-transition-capture", sectionId }, /sourceSignature|destinationSignature/, 3);
 		for (const [argumentsValue, id] of [
+			[{ captureId: "mcp-transition-capture", changedPositions: [0] }, 2],
+			[{ captureId: "mcp-transition-capture", sectionId }, 3],
 			[{ captureId: "mcp-transition-capture", sectionId, sourceSignature }, 4],
 			[{ captureId: "mcp-transition-capture", sectionId, destinationSignature }, 5],
 			[{ captureId: "mcp-transition-capture", sectionId, sourceSignature, destinationSignature }, 6]
@@ -136,7 +133,51 @@ test("get_transitions publishes and enforces aggregate/refined query constraints
 			assert.notEqual(body.result?.isError, true);
 			assert.ok(body.result?.structuredContent?.data?.transitions);
 		}
-		await assertValidationFailure({ captureId: "mcp-transition-capture", sectionId, sourceSignature, cursor: "opaque-cursor" }, /cursor/i, 7);
+		await assertValidationFailure({ captureId: "mcp-transition-capture", sectionId, changedPositions: [0], changedPositionMatch: "invalid" }, /invalid/i, 7);
+	} finally {
+		await service.close();
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
+test("get_protocol_report publishes an explicit-snapshot, non-pageable report contract", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "bus-lens-mcp-protocol-report-schema-test-"));
+	const service = createArchiveHttpService({ databasePath: join(directory, "archive.sqlite"), mcpEndpoint: "http://127.0.0.1:4174/mcp" });
+	try {
+		service.commandService.createCapture({ captureId: "mcp-protocol-report-capture", framing: [{ start: 0, framingMode: "length", frameSize: 2 }], inputFormat: "binary" });
+		service.commandService.startSession({ captureId: "mcp-protocol-report-capture", sessionId: "mcp-protocol-report-session" });
+		const append = service.commandService.appendChunk({ captureId: "mcp-protocol-report-capture", sessionId: "mcp-protocol-report-session", requestId: "mcp-protocol-report-request", sequence: 0, expectedStartOffset: 0, bytes: [0, 1, 1, 1, 0, 1, 1, 2] });
+		const finalized = service.commandService.finalizeSession({ captureId: "mcp-protocol-report-capture", sessionId: "mcp-protocol-report-session", expectedDataRevision: append.dataRevision });
+		await new Promise<void>(resolve => service.server.listen(0, "127.0.0.1", resolve));
+		const address = service.server.address();
+		if (!address || typeof address === "string") throw new Error("test server did not bind to a port");
+		const baseUrl = `http://127.0.0.1:${address.port}`;
+		const listResponse = await modernCall(baseUrl, "tools/list", {});
+		const listBody = await listResponse.json() as { result: { tools: Array<{ name: string; description?: string; inputSchema: { required?: string[]; properties?: Record<string, unknown> } }> } };
+		const reportTool = listBody.result.tools.find(tool => tool.name === "get_protocol_report");
+		assert.ok(reportTool);
+		assert.match(reportTool.description ?? "", /non-pageable|explicit-snapshot/i);
+		assert.ok(reportTool.inputSchema.required?.includes("snapshot"));
+		assert.ok(reportTool.inputSchema.properties?.include);
+
+		const response = await modernCall(baseUrl, "tools/call", {
+			name: "get_protocol_report",
+			arguments: {
+				snapshot: {
+					captureId: "mcp-protocol-report-capture",
+					profileId: finalized.profileId,
+					profileVersion: finalized.profileVersion,
+					sourceDataRevision: finalized.dataRevision
+				},
+				include: ["frame-families", "invariants"],
+				detail: "compact"
+			}
+		}, 11);
+		assert.equal(response.status, 200);
+		const body = await response.json() as { result: { structuredContent: { data: { snapshot: { profileId: string }; evidenceQuality: { applicableFrameCount: number } }; meta: { page?: unknown } } } };
+		assert.equal(body.result.structuredContent.data.snapshot.profileId, finalized.profileId);
+		assert.equal(body.result.structuredContent.data.evidenceQuality.applicableFrameCount, 4);
+		assert.equal(body.result.structuredContent.meta.page, undefined);
 	} finally {
 		await service.close();
 		await rm(directory, { recursive: true, force: true });

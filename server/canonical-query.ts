@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import type { SqliteDatabase } from "./database.ts";
 import {
 	AGENT_NORMAL_RESPONSE_BYTES,
@@ -15,6 +16,84 @@ import {
 	type AgentResponse,
 	type AgentSnapshotReference
 } from "./agent-contracts.ts";
+import {
+	AGENT_DIFFERENTIAL_ALIGNMENT_MODES,
+	MAX_DIFFERENTIAL_ANALYZED_ELEMENTS,
+	MAX_DIFFERENTIAL_FRAMES,
+	MAX_SIGNATURE_ALIGNMENT_FRAMES,
+	alignRawRelative,
+	alignOrdinal,
+	alignSignatureSequence,
+	alignTimestampNearest,
+	calculateDifferentialEvidence,
+	differentialFramePredicate,
+	makeDifferentialFrame,
+	normalizeDifferentialMessageFilters,
+	normalizeDifferentialScope,
+	type AgentCaptureDifferenceInput,
+	type AgentCaptureDifferenceResult,
+	type AgentDifferentialAlignmentMode,
+	type AgentDifferentialScope,
+	type DifferentialAlignedPair,
+	type DifferentialFrame,
+	type NormalizedDifferentialMessageFilters,
+	type NormalizedDifferentialScope
+} from "./differential-analysis.ts";
+import { deriveTransitionPositionAggregates } from "./transition-positions.ts";
+import type {
+	AgentEvidenceClassification,
+	AgentHiddenPolicy,
+	AgentProtocolFrameFamily,
+	AgentProtocolInvariantBit,
+	AgentProtocolInvariantByte,
+	AgentProtocolReportInput,
+	AgentProtocolReportResult,
+	AgentProtocolReportScope,
+	AgentProtocolReportSection,
+	AgentProtocolCandidate,
+	AgentProtocolSequence,
+	AgentProtocolTransition,
+	AgentProtocolVariableBit,
+	AgentProtocolVariableByte
+} from "./protocol-report.ts";
+
+export type {
+	AgentCaptureDifferenceInput,
+	AgentCaptureDifferenceResult,
+	AgentDifferentialAlignmentMode,
+	AgentDifferentialAlignmentSummary,
+	AgentDifferentialCandidate,
+	AgentDifferentialDifferenceSummary,
+	AgentDifferentialLengthChange,
+	AgentDifferentialMessageFilters,
+	AgentDifferentialPositionSummary,
+	AgentDifferentialScope,
+	AgentDifferentialSnapshotSummary,
+	AgentDifferentialEvidence,
+	AgentDifferentialPairCompatibility,
+	AgentDifferentialScoreComponents,
+	AgentMaskCount,
+	AgentValueCount
+} from "./differential-analysis.ts";
+export type {
+	AgentEvidenceClassification,
+	AgentHiddenPolicy,
+	AgentProtocolFrameFamily,
+	AgentProtocolInvariantBit,
+	AgentProtocolInvariantByte,
+	AgentProtocolInvariantSummary,
+	AgentProtocolReportDifferentialInput,
+	AgentProtocolReportDetail,
+	AgentProtocolReportInput,
+	AgentProtocolReportResult,
+	AgentProtocolReportScope,
+	AgentProtocolCandidate,
+	AgentProtocolSequence,
+	AgentProtocolTransition,
+	AgentProtocolVariableBit,
+	AgentProtocolVariableByte,
+	AgentProtocolVariableBitSummary
+} from "./protocol-report.ts";
 
 export const DEFAULT_FRAME_WINDOW_LIMIT = 50;
 export const MAX_FRAME_WINDOW_LIMIT = 200;
@@ -22,6 +101,18 @@ export const DEFAULT_CAPTURE_DISCOVERY_LIMIT = 20;
 export const MAX_CAPTURE_DISCOVERY_LIMIT = 100;
 export const MAX_CONTEXT_PARAMETER_FILTERS = 64;
 const MAX_BYTE_STATISTICS_COMPARISON_POSITIONS = 1;
+const MAX_TRANSITION_CHANGED_POSITION_SET = 128;
+const MAX_PROTOCOL_REPORT_FRAMES = 4_000;
+const MAX_PROTOCOL_REPORT_FAMILIES = 64;
+const MAX_PROTOCOL_REPORT_INVARIANTS = 96;
+const MAX_PROTOCOL_REPORT_VARIABLES = 96;
+const MAX_PROTOCOL_REPORT_TRANSITIONS = 64;
+const MAX_PROTOCOL_REPORT_SEQUENCES = 32;
+const MAX_PROTOCOL_REPORT_CANDIDATES = 24;
+const MAX_PROTOCOL_REPORT_COMPACT_TEXT = 96;
+const MAX_PROTOCOL_REPORT_STANDARD_TEXT = 256;
+const MAX_PROTOCOL_REPORT_COMPACT_SEQUENCE_SIGNATURES = 16;
+const MAX_PROTOCOL_REPORT_STANDARD_SEQUENCE_SIGNATURES = 64;
 
 export type CanonicalCaptureStatus = "canonical" | "legacy-not-canonicalized" | "converting" | "canonicalization-failed";
 
@@ -203,6 +294,7 @@ export type AgentMessageQueryInput = Readonly<{
 	timestampFrom?: number;
 	timestampTo?: number;
 	sectionId?: string;
+	frameLength?: number;
 	direction?: string;
 	exactSignature?: string;
 	signature?: string;
@@ -210,6 +302,7 @@ export type AgentMessageQueryInput = Readonly<{
 	hidden?: "include" | "visible-only" | "hidden-only";
 	notePresence?: "any" | "with-note" | "without-note";
 	sequenceGroupId?: string;
+	scope?: AgentDifferentialScope;
 	cursor?: string;
 	limit?: number;
 }>;
@@ -268,6 +361,8 @@ export type AgentSequenceOccurrencesInput = Readonly<{
 	profileId?: string;
 	profileVersion?: number;
 	sourceDataRevision?: number;
+	scope?: AgentDifferentialScope;
+	hidden?: AgentHiddenPolicy;
 	cursor?: string;
 	limit?: number;
 	includeContext?: boolean;
@@ -295,6 +390,7 @@ export type AgentByteStatisticsInput = Readonly<{
 	sourceDataRevision?: number;
 	positions: readonly number[];
 	scope?: AgentByteStatisticsScope;
+	hidden?: AgentHiddenPolicy;
 }>;
 
 export type AgentByteStatisticsScope = Readonly<{
@@ -330,17 +426,33 @@ export type AgentTransitionsInput = Readonly<{
 	toSignature?: string;
 	sectionId?: string;
 	changedPositions?: readonly number[];
+	changedPositionMatch?: "all" | "any";
 	minimumCount?: number;
 	cursor?: string;
 	limit?: number;
+}>;
+
+export type AgentTransitionPositionCount = Readonly<{
+	position: number;
+	changedCount: number;
+}>;
+
+export type AgentTransitionPercentage = Readonly<{
+	position: number;
+	percentage: number;
 }>;
 
 export type AgentTransition = Readonly<{
 	fromSignature: string;
 	toSignature: string;
 	count: number;
+	transitionCount: number;
+	requestedPositions: readonly number[];
+	changedPositionCounts: readonly AgentTransitionPositionCount[];
+	changedPercentages: readonly AgentTransitionPercentage[];
 	changedPositions: readonly number[];
 	changedPositionCount: number;
+	changedPositionSetTruncated?: boolean;
 	sectionId?: string;
 }>;
 
@@ -481,6 +593,24 @@ type FrameRow = {
 	signature: string;
 };
 
+type ProtocolReportFrameRow = FrameRow & {
+	capture_id: string;
+	profile_id: string;
+};
+
+type ProtocolReportPositionStats = {
+	applicableFrameCount: number;
+	values: Map<number, number>;
+	oneCounts: number[];
+};
+
+type ProtocolReportFrameBucket = {
+	sectionId: string;
+	frameLength: number;
+	frameCount: number;
+	positions: Map<number, ProtocolReportPositionStats>;
+};
+
 type DiscoveryRow = {
 	id: string;
 	name: unknown;
@@ -536,6 +666,7 @@ type NormalizedMessageFilters = Readonly<{
 	timestampFrom?: number;
 	timestampTo?: number;
 	sectionId?: string;
+	frameLength?: number;
 	direction?: string;
 	exactSignature?: string;
 	wildcardHexPattern?: string;
@@ -575,6 +706,48 @@ type RawChunkRow = {
 	directions_json: string;
 	hidden_json: string;
 };
+
+type DifferentialSectionRow = {
+	id: string;
+	position: number;
+	start_offset: number;
+	framing_mode: string;
+	frame_length: number | null;
+	marker_bytes: string | null;
+	marker_position: string | null;
+	time_gap_ms: number | null;
+	collapse_runs: number;
+	collapsed: number;
+};
+
+type DifferentialFramePlan = Readonly<{
+	profileId: string;
+	parameterPrefix: string;
+	predicates: string;
+	predicateParameters: Readonly<Record<string, unknown>>;
+	totalFrameCount: number;
+	filteredFrameCount: number;
+	analyzedElementCount: number;
+	excludedFrameCount: number;
+	rawOrigin: number | null;
+	sectionKeys: ReadonlyMap<string, string>;
+}>;
+
+function differentialSectionKey(section: DifferentialSectionRow, rawOrigin: number | null): string {
+	// This value is comparison-local metadata. It intentionally does not enter
+	// canonical storage, identity allocation, joins, or foreign-key lookups.
+	return JSON.stringify({
+		position: section.position,
+		startOffset: section.start_offset - (rawOrigin ?? 0),
+		framingMode: section.framing_mode,
+		frameLength: section.frame_length,
+		markerBytes: section.marker_bytes,
+		markerPosition: section.marker_position,
+		timeGapMs: section.time_gap_ms,
+		collapseRuns: Boolean(section.collapse_runs),
+		collapsed: Boolean(section.collapsed)
+	});
+}
 
 function optionalString(value: unknown): string | null {
 	return typeof value === "string" && value ? value : null;
@@ -773,6 +946,18 @@ function normalizedSignature(value: unknown, label: string): string | undefined 
 	return text;
 }
 
+function normalizedChangedPositions(value: readonly number[] | undefined): number[] {
+	const positions = value?.map((position, index) => optionalNonNegativeInteger(position, `changedPositions[${index}]`)) ?? [];
+	if (positions.length > 32) throw new AgentQueryError("invalid-input", "At most 32 changed positions may be requested", { maximum: 32 });
+	return [...new Set(positions.filter((position): position is number => position !== undefined))].sort((left, right) => left - right);
+}
+
+function normalizedChangedPositionMatch(value: unknown): "all" | "any" {
+	if (value === undefined || value === "all") return "all";
+	if (value === "any") return "any";
+	throw new AgentQueryError("invalid-input", "changedPositionMatch must be all or any", { value });
+}
+
 function parseWildcardPattern(value: unknown): { pattern: string; tokens: readonly WildcardToken[] } | undefined {
 	if (value === undefined) return undefined;
 	const pattern = requiredText(value, "wildcardHexPattern");
@@ -798,6 +983,7 @@ function assertWildcardPatternIsBounded(
 }
 
 function normalizeMessageFilters(input: AgentMessageQueryInput): NormalizedMessageFilters {
+	const reportScope = normalizeDifferentialScope(input.scope);
 	const ordinalFrom = optionalNonNegativeInteger(input.ordinalFrom ?? input.frameOrdinalFrom, "ordinalFrom");
 	const ordinalTo = optionalNonNegativeInteger(input.ordinalTo ?? input.frameOrdinalTo, "ordinalTo");
 	const requestedRawOffsetFrom = optionalNonNegativeInteger(input.rawOffsetFrom, "rawOffsetFrom");
@@ -817,6 +1003,28 @@ function normalizeMessageFilters(input: AgentMessageQueryInput): NormalizedMessa
 	}
 	const wildcard = parseWildcardPattern(input.wildcardHexPattern);
 	assertWildcardPatternIsBounded(wildcard, ordinalFrom !== undefined && ordinalTo !== undefined || timestampFrom !== undefined && timestampTo !== undefined);
+	const directSectionId = input.sectionId === undefined ? undefined : requiredText(input.sectionId, "sectionId");
+	const directFrameLength = input.frameLength === undefined ? undefined : optionalNonNegativeInteger(input.frameLength, "frameLength");
+	if (directFrameLength === 0) throw new AgentQueryError("invalid-input", "frameLength must be a positive integer", { label: "frameLength" });
+	const directDirection = input.direction === undefined ? undefined : requiredText(input.direction, "direction").toLowerCase();
+	const directSignature = normalizedSignature(input.exactSignature ?? input.signature, "exactSignature");
+	const mergeScopedValue = <T>(direct: T | undefined, scoped: T | undefined, label: string): T | undefined => {
+		if (direct !== undefined && scoped !== undefined && direct !== scoped) {
+			throw new AgentQueryError("invalid-input", `${label} conflicts with scope.${label}`, { [label]: direct, [`scope.${label}`]: scoped });
+		}
+		return direct ?? scoped;
+	};
+	if (wildcard && reportScope.wildcardHexPattern !== undefined && wildcard.pattern !== reportScope.wildcardHexPattern) {
+		throw new AgentQueryError("invalid-input", "wildcardHexPattern conflicts with scope.wildcardHexPattern");
+	}
+	const sectionId = mergeScopedValue(directSectionId, reportScope.sectionId, "sectionId");
+	const frameLength = mergeScopedValue(directFrameLength, reportScope.frameLength, "frameLength");
+	const direction = mergeScopedValue(directDirection, reportScope.direction, "direction");
+	const exactSignature = mergeScopedValue(directSignature, reportScope.exactSignature, "exactSignature");
+	const effectiveWildcard = wildcard ?? (reportScope.wildcardHexPattern === undefined ? undefined : {
+		pattern: reportScope.wildcardHexPattern,
+		tokens: reportScope.wildcardTokens ?? []
+	});
 	const hidden = input.hidden ?? "include";
 	const notePresence = input.notePresence ?? "any";
 	return {
@@ -826,10 +1034,11 @@ function normalizeMessageFilters(input: AgentMessageQueryInput): NormalizedMessa
 		...(rawOffsetTo === undefined ? {} : { rawOffsetTo }),
 		...(timestampFrom === undefined ? {} : { timestampFrom }),
 		...(timestampTo === undefined ? {} : { timestampTo }),
-		...(input.sectionId ? { sectionId: requiredText(input.sectionId, "sectionId") } : {}),
-		...(input.direction ? { direction: requiredText(input.direction, "direction").toLowerCase() } : {}),
-		...(normalizedSignature(input.exactSignature ?? input.signature, "exactSignature") ? { exactSignature: normalizedSignature(input.exactSignature ?? input.signature, "exactSignature") } : {}),
-		...(wildcard ? { wildcardHexPattern: wildcard.pattern, wildcardTokens: wildcard.tokens } : {}),
+		...(sectionId === undefined ? {} : { sectionId }),
+		...(frameLength === undefined ? {} : { frameLength }),
+		...(direction === undefined ? {} : { direction }),
+		...(exactSignature === undefined ? {} : { exactSignature }),
+		...(effectiveWildcard ? { wildcardHexPattern: effectiveWildcard.pattern, wildcardTokens: effectiveWildcard.tokens } : {}),
 		hidden,
 		notePresence,
 		...(input.sequenceGroupId ? { sequenceGroupId: requiredText(input.sequenceGroupId, "sequenceGroupId") } : {})
@@ -859,9 +1068,99 @@ function normalizeByteStatisticsScope(input: AgentByteStatisticsInput["scope"]):
 	return { scope, ...(wildcard ? { wildcardTokens: wildcard.tokens } : {}) };
 }
 
+function normalizedProtocolReportScope(input: AgentProtocolReportInput["scope"]): NormalizedDifferentialScope {
+	return normalizeDifferentialScope(input);
+}
+
+function publicProtocolReportScope(scope: NormalizedDifferentialScope): AgentProtocolReportScope {
+	return {
+		...(scope.sectionId === undefined ? {} : { sectionId: scope.sectionId }),
+		...(scope.frameLength === undefined ? {} : { frameLength: scope.frameLength }),
+		...(scope.exactSignature === undefined ? {} : { exactSignature: scope.exactSignature }),
+		...(scope.wildcardHexPattern === undefined ? {} : { wildcardHexPattern: scope.wildcardHexPattern }),
+		...(scope.direction === undefined ? {} : { direction: scope.direction })
+	};
+}
+
+function protocolReportSections(
+	input: AgentProtocolReportInput["include"],
+	hasDifferentialAnalysis = false
+): readonly AgentProtocolReportSection[] {
+	const sections = (input === undefined
+		? ["frame-families", "invariants", "variable-bits", "transitions", "sequences", "differential-candidates"]
+		: [...new Set(input)]) as AgentProtocolReportSection[];
+	const allowed = new Set(["frame-families", "invariants", "variable-bits", "transitions", "sequences", "differential-candidates"]);
+	if (!sections.length) throw new AgentQueryError("invalid-input", "include must contain at least one report section");
+	if (sections.some(section => !allowed.has(section))) {
+		throw new AgentQueryError("invalid-input", "include contains an unsupported report section", { include: sections });
+	}
+	if (hasDifferentialAnalysis && !sections.includes("differential-candidates")) sections.push("differential-candidates");
+	if (sections.length > 6) throw new AgentQueryError("invalid-input", "include contains too many report sections", { maximum: 6 });
+	return sections as readonly AgentProtocolReportSection[];
+}
+
+function reportFrameMatches(row: Pick<ProtocolReportFrameRow, "section_id" | "bytes_json" | "directions_json" | "signature">, scope: NormalizedDifferentialScope): boolean {
+	if (scope.sectionId !== undefined && row.section_id !== scope.sectionId) return false;
+	const bytes = jsonArray<number>(row.bytes_json).map(Number);
+	if (scope.frameLength !== undefined && bytes.length !== scope.frameLength) return false;
+	if (scope.exactSignature !== undefined && row.signature !== scope.exactSignature) return false;
+	if (scope.wildcardTokens && !wildcardMatches(bytes, scope.wildcardTokens)) return false;
+	if (scope.direction !== undefined && !jsonArray<string>(row.directions_json).some(direction => String(direction).trim().toLowerCase() === scope.direction)) return false;
+	return true;
+}
+
+function reportFrameHiddenMatches(hidden: boolean, policy: AgentHiddenPolicy): boolean {
+	if (policy === "visible-only") return !hidden;
+	if (policy === "hidden-only") return hidden;
+	return true;
+}
+
+function reportValueCounts(values: Map<number, number>): Array<{ value: number; count: number }> {
+	return [...values.entries()]
+		.sort((left, right) => right[1] - left[1] || left[0] - right[0])
+		.map(([value, count]) => ({ value, count }));
+}
+
+function reportClassificationText(): Readonly<Record<AgentEvidenceClassification, string>> {
+	return {
+		observed: "Directly counted from the pinned snapshot evidence.",
+		stable: "Unchanged across all applicable sampled frames with sufficient support.",
+		variable: "Multiple observed values or bit states were counted in the applicable evidence.",
+		candidate: "A differential correlation only; no semantic field claim is made.",
+		"insufficient-evidence": "The applicable support is below the report threshold or the bounded sample was truncated."
+	};
+}
+
+function reportPercentage(count: number, total: number): number {
+	return total ? Math.round((count / total) * 100) : 0;
+}
+
+function boundedProtocolReportText(value: string, maximum: number): { value: string; length: number; digest?: string; truncated: boolean } {
+	if (value.length <= maximum) return { value, length: value.length, truncated: false };
+	const digest = createHash("sha256").update(value, "utf8").digest("hex").slice(0, 16);
+	return { value: `[sha256:${digest};length:${value.length}]`, length: value.length, digest, truncated: true };
+}
+
+function protocolReportScopeArguments(scope: AgentProtocolReportScope): Record<string, unknown> {
+	return Object.keys(scope).length ? { scope } : {};
+}
+
+function protocolReportFollowUpContext(
+	snapshotArguments: Readonly<Record<string, unknown>>,
+	scope: AgentProtocolReportScope,
+	hiddenPolicy: AgentHiddenPolicy
+): Record<string, unknown> {
+	return {
+		...snapshotArguments,
+		...protocolReportScopeArguments(scope),
+		hidden: hiddenPolicy
+	};
+}
+
 function byteStatisticsFramePredicate(
 	normalizedScope: NormalizedByteStatisticsScope,
-	alias = "frames"
+	alias = "frames",
+	hiddenPolicy: AgentHiddenPolicy = "include"
 ): { sql: string; params: Record<string, unknown> } {
 	const clauses: string[] = [];
 	const params: Record<string, unknown> = {};
@@ -891,6 +1190,8 @@ function byteStatisticsFramePredicate(
 			params[`scopeWildcard${index}`] = token;
 		});
 	}
+	if (hiddenPolicy === "visible-only") clauses.push(`${alias}.hidden = 0`);
+	if (hiddenPolicy === "hidden-only") clauses.push(`${alias}.hidden = 1`);
 	return { sql: clauses.length ? ` AND ${clauses.join(" AND ")}` : "", params };
 }
 
@@ -1649,6 +1950,7 @@ export class CanonicalQueryService {
 			params.rawOffsetTo = filters.rawOffsetTo;
 		}
 		if (filters.sectionId) { clauses.push("section_id = @sectionId"); params.sectionId = filters.sectionId; }
+		if (filters.frameLength !== undefined) { clauses.push("json_array_length(bytes_json) = @frameLength"); params.frameLength = filters.frameLength; }
 		if (filters.exactSignature) { clauses.push("signature = @exactSignature"); params.exactSignature = filters.exactSignature; }
 		if (filters.hidden === "visible-only") clauses.push("hidden = 0");
 		if (filters.hidden === "hidden-only") clauses.push("hidden = 1");
@@ -1902,6 +2204,12 @@ export class CanonicalQueryService {
 		if (!group) throw new AgentQueryError("evidence-missing", "The requested sequence group is no longer available", { groupId });
 		if (input.captureId && input.captureId !== group.capture_id) throw new AgentQueryError("snapshot-mismatch", "The sequence group does not belong to the requested capture", { groupId, captureId: input.captureId });
 		const captureId = group.capture_id;
+		const normalizedScope = normalizeDifferentialScope(input.scope);
+		const publicScope = publicProtocolReportScope(normalizedScope);
+		const hiddenPolicy = input.hidden ?? "include";
+		if (hiddenPolicy !== "include" && hiddenPolicy !== "visible-only" && hiddenPolicy !== "hidden-only") {
+			throw new AgentQueryError("invalid-input", "hidden must be include, visible-only, or hidden-only", { hidden: hiddenPolicy });
+		}
 		const requestedSnapshot: Partial<AgentSnapshotReference> = {
 			profileId: input.profileId ?? group.profile_id,
 			...(input.profileVersion === undefined ? {} : { profileVersion: optionalNonNegativeInteger(input.profileVersion, "profileVersion") }),
@@ -1910,7 +2218,7 @@ export class CanonicalQueryService {
 		const includeContext = Boolean(input.includeContext);
 		const contextBefore = includeContext ? boundedLimit(input.contextBefore, 3, 10, "contextBefore") : 0;
 		const contextAfter = includeContext ? boundedLimit(input.contextAfter, 3, 10, "contextAfter") : 0;
-		const filterScope = { captureId, groupId, includeContext, contextBefore, contextAfter, requestedSnapshot };
+		const filterScope = { captureId, groupId, scope: publicScope, hidden: hiddenPolicy, includeContext, contextBefore, contextAfter, requestedSnapshot };
 		const cursorPayload = input.cursor ? decodeAgentCursor(input.cursor, "sequence-occurrences", ["occurrenceNumber", "id"]) : undefined;
 		if (cursorPayload) assertCursorFilters(cursorPayload, filterScope, cursorPayload.snapshot);
 		const requested = cursorPayload?.snapshot ? { ...cursorPayload.snapshot, ...requestedSnapshot } : requestedSnapshot;
@@ -1918,7 +2226,25 @@ export class CanonicalQueryService {
 		if (profile.id !== group.profile_id) throw new AgentQueryError("snapshot-mismatch", "The sequence group belongs to a different profile revision", { groupId, profileId: group.profile_id });
 		if (cursorPayload && stableJson(cursorPayload.snapshot) !== stableJson(snapshot)) throw new AgentQueryError("invalid-cursor", "The pagination cursor is bound to a different profile revision", { reason: "snapshot-mismatch" });
 		const limit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT);
-		const params: Record<string, unknown> = { groupId, limit: limit + 1 };
+		const scopePredicate = differentialFramePredicate(normalizedScope, "sequenceOccurrenceScope", "frames");
+		const hiddenPredicate = hiddenPolicy === "visible-only"
+			? " AND frames.hidden = 0"
+			: hiddenPolicy === "hidden-only"
+				? " AND frames.hidden = 1"
+				: "";
+		const occurrenceFrameCount = `(SELECT COUNT(*)
+			FROM materialized_frames frames
+			WHERE frames.profile_id = @profileId
+			  AND frames.ordinal >= sequence_occurrences.start_frame_ordinal
+			  AND frames.ordinal < sequence_occurrences.start_frame_ordinal + sequence_occurrences.length)`;
+		const matchingOccurrenceFrameCount = `(SELECT COUNT(*)
+			FROM materialized_frames frames
+			WHERE frames.profile_id = @profileId
+			  AND frames.ordinal >= sequence_occurrences.start_frame_ordinal
+			  AND frames.ordinal < sequence_occurrences.start_frame_ordinal + sequence_occurrences.length
+			  ${scopePredicate.sql}${hiddenPredicate})`;
+		const safeOccurrence = `${occurrenceFrameCount} = sequence_occurrences.length AND ${matchingOccurrenceFrameCount} = sequence_occurrences.length`;
+		const params: Record<string, unknown> = { groupId, profileId: profile.id, ...scopePredicate.params, limit: limit + 1 };
 		const cursorSql = cursorPayload ? " AND occurrence_index > @cursorOccurrenceNumber" : "";
 		if (cursorPayload) params.cursorOccurrenceNumber = cursorPayload.key.occurrenceNumber;
 		const rows = this.database.prepare(
@@ -1928,6 +2254,7 @@ export class CanonicalQueryService {
 			        MAX(end_raw_offset) AS end_raw_offset
 			 FROM sequence_occurrences
 			 WHERE group_id = @groupId${cursorSql}
+			   AND ${safeOccurrence}
 			 GROUP BY occurrence_index
 			 ORDER BY occurrence_index ASC
 			 LIMIT @limit`
@@ -1939,13 +2266,26 @@ export class CanonicalQueryService {
 				if (firstStartingFrameId === undefined && frame) firstStartingFrameId = frame.id;
 				let context: readonly AgentMessage[] | undefined;
 				if (input.includeContext) {
+					const contextPredicate = differentialFramePredicate(normalizedScope, "sequenceContext", "frames");
+					const contextHiddenPredicate = hiddenPolicy === "visible-only"
+						? " AND frames.hidden = 0"
+						: hiddenPolicy === "hidden-only"
+							? " AND frames.hidden = 1"
+							: "";
 					const contextRows = this.database.prepare(
 						`SELECT id, capture_id, profile_id, ordinal, section_id, raw_offsets_json, bytes_json,
 						        timestamps_json, directions_json, hidden, signature
-						 FROM materialized_frames
-						 WHERE profile_id = @profileId AND ordinal BETWEEN @startOrdinal AND @endOrdinal
+						 FROM materialized_frames AS frames
+						 WHERE frames.profile_id = @profileId AND frames.ordinal BETWEEN @startOrdinal AND @endOrdinal
+						   ${contextPredicate.sql}${contextHiddenPredicate}
 						 ORDER BY ordinal ASC, id ASC LIMIT @limit`
-					).all({ profileId: profile.id, startOrdinal: Math.max(0, row.starting_ordinal - contextBefore), endOrdinal: row.starting_ordinal + contextAfter, limit: contextBefore + contextAfter + 1 }) as AnalysisFrameRow[];
+					).all({
+						profileId: profile.id,
+						startOrdinal: Math.max(0, row.starting_ordinal - contextBefore),
+						endOrdinal: row.starting_ordinal + contextAfter,
+						limit: contextBefore + contextAfter + 1,
+						...contextPredicate.params
+					}) as AnalysisFrameRow[];
 					context = this.mapAnalysisMessages(contextRows, contextRows.length ? this.previousFrameTimestamp(profile.id, contextRows[0].ordinal) : null);
 				}
 				return {
@@ -1971,9 +2311,498 @@ export class CanonicalQueryService {
 				nextCursor,
 				truncationReason: page.truncationReason,
 				truncated: hasMore,
-				suggestedOperations: firstStartingFrameId ? [{ tool: "get_message_context", reason: "Inspect a frame near this occurrence", arguments: { frameId: firstStartingFrameId } }] : []
+				suggestedOperations: firstStartingFrameId && hiddenPolicy === "include" && Object.keys(publicScope).length === 0
+					? [{ tool: "get_message_context", reason: "Inspect a frame near this occurrence", arguments: { frameId: firstStartingFrameId } }]
+					: []
 			});
 		});
+	}
+
+	private readProtocolReportFrames(
+		profileId: string,
+		scope: NormalizedDifferentialScope,
+		hiddenPolicy: AgentHiddenPolicy
+	): {
+		totalFrameCount: number;
+		scopeMatchedFrameCount: number;
+		applicableFrameCount: number;
+		hiddenExcludedFrameCount: number;
+		rows: ProtocolReportFrameRow[];
+		truncated: boolean;
+	} {
+		const predicate = differentialFramePredicate(scope, "protocolReport", "frames");
+		const baseParameters = { profileId, ...predicate.params };
+		const totalFrameCount = (this.database.prepare(
+			"SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId"
+		).get({ profileId }) as { count: number }).count;
+		const scopeMatchedFrameCount = (this.database.prepare(
+			`SELECT COUNT(*) AS count FROM materialized_frames AS frames
+			 WHERE frames.profile_id = @profileId${predicate.sql}`
+		).get(baseParameters) as { count: number }).count;
+		const hiddenPredicate = hiddenPolicy === "visible-only"
+			? " AND frames.hidden = 0"
+			: hiddenPolicy === "hidden-only"
+				? " AND frames.hidden = 1"
+				: "";
+		const applicableFrameCount = (this.database.prepare(
+			`SELECT COUNT(*) AS count FROM materialized_frames AS frames
+			 WHERE frames.profile_id = @profileId${predicate.sql}${hiddenPredicate}`
+		).get(baseParameters) as { count: number }).count;
+		const rows = this.database.prepare(
+			`SELECT id, capture_id, profile_id, ordinal, section_id, raw_offsets_json, bytes_json,
+			        timestamps_json, directions_json, hidden, signature
+			 FROM materialized_frames AS frames
+			 WHERE frames.profile_id = @profileId${predicate.sql}${hiddenPredicate}
+			 ORDER BY ordinal ASC, id ASC
+			 LIMIT @limit`
+		).all({ ...baseParameters, limit: MAX_PROTOCOL_REPORT_FRAMES + 1 }) as ProtocolReportFrameRow[];
+		return {
+			totalFrameCount,
+			scopeMatchedFrameCount,
+			applicableFrameCount,
+			hiddenExcludedFrameCount: scopeMatchedFrameCount - applicableFrameCount,
+			rows: rows.slice(0, MAX_PROTOCOL_REPORT_FRAMES),
+			truncated: rows.length > MAX_PROTOCOL_REPORT_FRAMES
+		};
+	}
+
+	private readProtocolReportSequences(
+		profileId: string,
+		scope: NormalizedDifferentialScope,
+		hiddenPolicy: AgentHiddenPolicy,
+		minimumSupport: number,
+		limit: number,
+		textMaximum: number,
+		signatureMaximum: number
+	): { sequences: AgentProtocolSequence[]; truncated: boolean } {
+		const predicate = differentialFramePredicate(scope, "protocolSequence", "frames");
+		const hiddenPredicate = hiddenPolicy === "visible-only"
+			? " AND frames.hidden = 0"
+			: hiddenPolicy === "hidden-only"
+				? " AND frames.hidden = 1"
+				: "";
+		// A sequence key and signature list describe the complete group, not just
+		// the frames that happen to match a report filter. Emit a group only when
+		// every frame in every occurrence satisfies the scope and hidden policy;
+		// otherwise a partial summary could disclose excluded identities/content.
+		const occurrenceFrameCountSql = `(
+			SELECT COUNT(*)
+			 FROM materialized_frames frames
+			 WHERE frames.profile_id = @profileId
+			   AND frames.ordinal >= occurrences.start_frame_ordinal
+			   AND frames.ordinal < occurrences.start_frame_ordinal + occurrences.length
+		)`;
+		const matchingOccurrenceFrameCountSql = `(
+			SELECT COUNT(*)
+			 FROM materialized_frames frames
+			 WHERE frames.profile_id = @profileId
+			   AND frames.ordinal >= occurrences.start_frame_ordinal
+			   AND frames.ordinal < occurrences.start_frame_ordinal + occurrences.length
+			   ${predicate.sql}${hiddenPredicate}
+		)`;
+		const safeOccurrenceSql = `${occurrenceFrameCountSql} = occurrences.length AND ${matchingOccurrenceFrameCountSql} = occurrences.length`;
+		const occurrenceCountSql = `(
+			SELECT COUNT(DISTINCT occurrences.occurrence_index)
+			 FROM sequence_occurrences occurrences
+			 WHERE occurrences.group_id = groups.id
+			   AND ${safeOccurrenceSql}
+		)`;
+		const groupHasOnlySafeOccurrencesSql = `NOT EXISTS (
+			SELECT 1
+			 FROM sequence_occurrences occurrences
+			 WHERE occurrences.group_id = groups.id
+			   AND NOT (${safeOccurrenceSql})
+		)`;
+		const rows = this.database.prepare(
+			`SELECT groups.id, groups.key_text, groups.signatures_json, groups.length,
+			        ${occurrenceCountSql} AS occurrence_count, groups.score
+			 FROM sequence_groups groups
+			 WHERE groups.profile_id = @profileId
+			   AND ${occurrenceCountSql} > 0
+			   AND ${groupHasOnlySafeOccurrencesSql}
+			 ORDER BY occurrence_count DESC, groups.score DESC, groups.id ASC
+			 LIMIT @limit`
+		).all({ profileId, ...predicate.params, limit: limit + 1 }) as Array<{
+			id: string;
+			key_text: string;
+			signatures_json: string;
+			length: number;
+			occurrence_count: number;
+			score: number;
+		}>;
+		const pageRows = rows.slice(0, limit);
+		let textTruncated = false;
+		const sequences: AgentProtocolSequence[] = pageRows.map(row => {
+			const occurrenceCount = row.occurrence_count;
+			const sections = this.database.prepare(
+				`SELECT DISTINCT frames.section_id
+				 FROM sequence_occurrences occurrences
+				 JOIN materialized_frames frames
+				   ON frames.profile_id = @profileId
+				  AND frames.ordinal >= occurrences.start_frame_ordinal
+				  AND frames.ordinal < occurrences.start_frame_ordinal + occurrences.length
+				 WHERE occurrences.group_id = @groupId
+				   AND frames.profile_id = @profileId${predicate.sql}${hiddenPredicate}
+				 ORDER BY frames.section_id`
+			).all({ profileId, groupId: row.id, ...predicate.params }) as Array<{ section_id: string }>;
+			const key = boundedProtocolReportText(row.key_text, textMaximum);
+			const rawSignatures = jsonArray<string>(row.signatures_json);
+			const signatureValues = rawSignatures.slice(0, signatureMaximum).map(signature => boundedProtocolReportText(String(signature), textMaximum));
+			const signaturesTruncated = rawSignatures.length > signatureValues.length || signatureValues.some(signature => signature.truncated);
+			textTruncated ||= key.truncated || signaturesTruncated;
+			return {
+				id: row.id,
+				key: key.value,
+				...(key.truncated ? { keyLength: key.length, keyDigest: key.digest } : {}),
+				signatures: signatureValues.map(signature => signature.value),
+				signatureCount: rawSignatures.length,
+				...(signaturesTruncated ? { signaturesTruncated: true } : {}),
+				length: row.length,
+				occurrenceCount,
+				sections: sections.map(section => section.section_id),
+				classification: occurrenceCount >= minimumSupport ? "observed" : "insufficient-evidence"
+			};
+		});
+		return { sequences, truncated: rows.length > pageRows.length || textTruncated };
+	}
+
+	getProtocolReport(input: AgentProtocolReportInput): AgentResponse<AgentProtocolReportResult> {
+		const reportInputRecord = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+		for (const field of ["cursor", "limit"] as const) {
+			if (field in reportInputRecord) {
+				throw new AgentQueryError("invalid-input", `get_protocol_report is non-pageable; ${field} is not accepted`, { field });
+			}
+		}
+		const snapshot = this.resolveDifferentialSnapshot(input?.snapshot);
+		const normalizedScope = normalizedProtocolReportScope(input.scope);
+		const scope = publicProtocolReportScope(normalizedScope);
+		const include = protocolReportSections(input.include, input.differentialAnalysis !== undefined);
+		const detail = input.detail ?? "standard";
+		if (detail !== "compact" && detail !== "standard") {
+			throw new AgentQueryError("invalid-input", "detail must be compact or standard", { detail });
+		}
+		const hiddenPolicy = input.hidden ?? "include";
+		if (hiddenPolicy !== "include" && hiddenPolicy !== "visible-only" && hiddenPolicy !== "hidden-only") {
+			throw new AgentQueryError("invalid-input", "hidden must be include, visible-only, or hidden-only", { hidden: hiddenPolicy });
+		}
+		const minimumSupport = boundedLimit(input.minimumSupport, 2, 1_000, "minimumSupport");
+		const caps = detail === "compact"
+			? { families: 32, positions: 48, transitions: 24, sequences: 16, candidates: 8 }
+			: { families: MAX_PROTOCOL_REPORT_FAMILIES, positions: MAX_PROTOCOL_REPORT_INVARIANTS, transitions: MAX_PROTOCOL_REPORT_TRANSITIONS, sequences: MAX_PROTOCOL_REPORT_SEQUENCES, candidates: MAX_PROTOCOL_REPORT_CANDIDATES };
+		const reportTextMaximum = detail === "compact" ? MAX_PROTOCOL_REPORT_COMPACT_TEXT : MAX_PROTOCOL_REPORT_STANDARD_TEXT;
+		const sequenceSignatureMaximum = detail === "compact" ? MAX_PROTOCOL_REPORT_COMPACT_SEQUENCE_SIGNATURES : MAX_PROTOCOL_REPORT_STANDARD_SEQUENCE_SIGNATURES;
+		const read = this.readProtocolReportFrames(snapshot.profileId, normalizedScope, hiddenPolicy);
+		const sampledFrames = read.rows.map(row => ({
+			row,
+			bytes: jsonArray<number>(row.bytes_json).map(Number),
+			eligible: reportFrameMatches(row, normalizedScope) && reportFrameHiddenMatches(Boolean(row.hidden), hiddenPolicy)
+		}));
+		const applicableFrames = sampledFrames.filter(frame => frame.eligible);
+
+		const buckets = new Map<string, ProtocolReportFrameBucket>();
+		for (const frame of applicableFrames) {
+			const sectionId = frame.row.section_id;
+			const frameLength = frame.bytes.length;
+			const key = `${sectionId}\u0000${frameLength}`;
+			const bucket = buckets.get(key) ?? { sectionId, frameLength, frameCount: 0, positions: new Map() };
+			bucket.frameCount += 1;
+			for (let position = 0; position < frame.bytes.length; position += 1) {
+				const value = frame.bytes[position];
+				if (value === undefined) continue;
+				const stats = bucket.positions.get(position) ?? { applicableFrameCount: 0, values: new Map(), oneCounts: Array<number>(8).fill(0) };
+				stats.applicableFrameCount += 1;
+				stats.values.set(value, (stats.values.get(value) ?? 0) + 1);
+				for (let bit = 0; bit < 8; bit += 1) {
+					if (((value >> bit) & 1) === 1) stats.oneCounts[bit] = (stats.oneCounts[bit] ?? 0) + 1;
+				}
+				bucket.positions.set(position, stats);
+			}
+			buckets.set(key, bucket);
+		}
+
+		const orderedBuckets = [...buckets.values()].sort((left, right) => left.sectionId.localeCompare(right.sectionId) || left.frameLength - right.frameLength);
+		const bucketHasSufficientEvidence = (bucket: ProtocolReportFrameBucket): boolean => !read.truncated && bucket.frameCount >= minimumSupport;
+		const frameFamilies: AgentProtocolFrameFamily[] = [];
+		const invariantBytes: AgentProtocolInvariantByte[] = [];
+		const invariantBits: AgentProtocolInvariantBit[] = [];
+		const variableBytes: AgentProtocolVariableByte[] = [];
+		const variableBits: AgentProtocolVariableBit[] = [];
+		let reportTextTruncated = false;
+
+		for (const bucket of orderedBuckets) {
+			const signatures = new Map<string, number>();
+			for (const frame of applicableFrames) {
+				if (frame.row.section_id !== bucket.sectionId || frame.bytes.length !== bucket.frameLength) continue;
+				signatures.set(frame.row.signature, (signatures.get(frame.row.signature) ?? 0) + 1);
+			}
+			for (const [signature, count] of [...signatures.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))) {
+				const boundedSignature = boundedProtocolReportText(signature, reportTextMaximum);
+				reportTextTruncated ||= boundedSignature.truncated;
+				frameFamilies.push({
+					sectionId: bucket.sectionId,
+					frameLength: bucket.frameLength,
+					signature: boundedSignature.value,
+					...(boundedSignature.truncated ? {
+						signatureLength: boundedSignature.length,
+						signatureDigest: boundedSignature.digest,
+						signatureTruncated: true
+					} : {}),
+					count,
+					percentage: reportPercentage(count, bucket.frameCount),
+					classification: bucketHasSufficientEvidence(bucket) ? "observed" : "insufficient-evidence"
+				});
+			}
+			for (const [position, stats] of bucket.positions) {
+				const sufficient = bucketHasSufficientEvidence(bucket) && stats.applicableFrameCount >= minimumSupport;
+				const values = reportValueCounts(stats.values);
+				if (values.length === 1) {
+					invariantBytes.push({
+						sectionId: bucket.sectionId,
+						frameLength: bucket.frameLength,
+						position,
+						value: values[0]!.value,
+						count: values[0]!.count,
+						applicableFrameCount: stats.applicableFrameCount,
+						classification: sufficient ? "stable" : "insufficient-evidence"
+					});
+				} else {
+					variableBytes.push({
+						sectionId: bucket.sectionId,
+						frameLength: bucket.frameLength,
+						position,
+						values,
+						applicableFrameCount: stats.applicableFrameCount,
+						classification: sufficient ? "variable" : "insufficient-evidence"
+					});
+				}
+				for (let bit = 0; bit < 8; bit += 1) {
+					const oneCount = stats.oneCounts[bit] ?? 0;
+					const onePercentage = reportPercentage(oneCount, stats.applicableFrameCount);
+					const rawBitIsStable = oneCount === 0 || oneCount === stats.applicableFrameCount;
+					if (rawBitIsStable) {
+						invariantBits.push({
+							sectionId: bucket.sectionId,
+							frameLength: bucket.frameLength,
+							position,
+							bit,
+							onePercentage,
+							applicableFrameCount: stats.applicableFrameCount,
+							classification: sufficient ? "stable" : "insufficient-evidence"
+						});
+					} else {
+						variableBits.push({
+							sectionId: bucket.sectionId,
+							frameLength: bucket.frameLength,
+							position,
+							bit,
+							onePercentage,
+							applicableFrameCount: stats.applicableFrameCount,
+							classification: sufficient ? "variable" : "insufficient-evidence"
+						});
+					}
+				}
+			}
+		}
+
+		frameFamilies.sort((left, right) => right.count - left.count || left.sectionId.localeCompare(right.sectionId) || left.frameLength - right.frameLength || left.signature.localeCompare(right.signature));
+		const positionSort = (left: { sectionId: string; frameLength: number; position: number }, right: { sectionId: string; frameLength: number; position: number }): number => left.sectionId.localeCompare(right.sectionId) || left.frameLength - right.frameLength || left.position - right.position;
+		invariantBytes.sort(positionSort);
+		invariantBits.sort((left, right) => positionSort(left, right) || left.bit - right.bit);
+		variableBytes.sort(positionSort);
+		variableBits.sort((left, right) => positionSort(left, right) || left.bit - right.bit);
+
+		let transitions: AgentProtocolTransition[] | undefined;
+		let transitionTruncated = false;
+		if (include.includes("transitions")) {
+			const transitionRows = deriveTransitionPositionAggregates(sampledFrames.map(frame => ({
+				ordinal: frame.row.ordinal,
+				sectionId: frame.row.section_id,
+				signature: frame.row.signature,
+				bytes: frame.bytes,
+				eligible: frame.eligible
+			})));
+			const transitionGroups = new Map<string, { sectionId: string; fromSignature: string; toSignature: string; transitionCount: number; positions: Map<number, number> }>();
+			for (const row of transitionRows) {
+				const key = `${row.sectionId}\u0000${row.fromSignature}\u0000${row.toSignature}`;
+				const group = transitionGroups.get(key) ?? { sectionId: row.sectionId, fromSignature: row.fromSignature, toSignature: row.toSignature, transitionCount: row.transitionCount, positions: new Map() };
+				group.transitionCount = row.transitionCount;
+				group.positions.set(row.position, row.changedCount);
+				transitionGroups.set(key, group);
+			}
+			const allTransitionGroups = [...transitionGroups.values()].sort((left, right) => right.transitionCount - left.transitionCount || left.fromSignature.localeCompare(right.fromSignature) || left.toSignature.localeCompare(right.toSignature) || left.sectionId.localeCompare(right.sectionId));
+			transitionTruncated = allTransitionGroups.length > caps.transitions;
+			transitions = allTransitionGroups.slice(0, caps.transitions).map(group => {
+				const positions = [...group.positions.entries()].sort((left, right) => left[0] - right[0]);
+				const boundedPositions = positions.slice(0, MAX_TRANSITION_CHANGED_POSITION_SET);
+				const boundedFromSignature = boundedProtocolReportText(group.fromSignature, reportTextMaximum);
+				const boundedToSignature = boundedProtocolReportText(group.toSignature, reportTextMaximum);
+				reportTextTruncated ||= boundedFromSignature.truncated || boundedToSignature.truncated;
+				return {
+					sectionId: group.sectionId,
+					fromSignature: boundedFromSignature.value,
+					...(boundedFromSignature.truncated ? {
+						fromSignatureLength: boundedFromSignature.length,
+						fromSignatureDigest: boundedFromSignature.digest,
+						fromSignatureTruncated: true
+					} : {}),
+					toSignature: boundedToSignature.value,
+					...(boundedToSignature.truncated ? {
+						toSignatureLength: boundedToSignature.length,
+						toSignatureDigest: boundedToSignature.digest,
+						toSignatureTruncated: true
+					} : {}),
+					count: group.transitionCount,
+					transitionCount: group.transitionCount,
+					changedPositionCounts: boundedPositions.map(([position, changedCount]) => ({ position, changedCount })),
+					changedPercentages: boundedPositions.map(([position, changedCount]) => ({ position, percentage: reportPercentage(changedCount, group.transitionCount) })),
+					changedPositions: boundedPositions.map(([position]) => position),
+					changedPositionCount: positions.length,
+					...(positions.length > boundedPositions.length ? { changedPositionSetTruncated: true } : {}),
+					classification: group.transitionCount >= minimumSupport && !read.truncated ? "observed" : "insufficient-evidence"
+				};
+			});
+		}
+
+		let sequences: AgentProtocolSequence[] | undefined;
+		let sequenceTruncated = false;
+		if (include.includes("sequences")) {
+			const sequenceResult = this.readProtocolReportSequences(snapshot.profileId, normalizedScope, hiddenPolicy, minimumSupport, caps.sequences, reportTextMaximum, sequenceSignatureMaximum);
+			sequences = sequenceResult.sequences;
+			sequenceTruncated = sequenceResult.truncated;
+		}
+
+		let differentialCandidates: AgentProtocolReportResult["differentialCandidates"];
+		let differential: AgentProtocolReportResult["differential"];
+		let differentialTruncated = false;
+		let differentialFollowUpInput: AgentCaptureDifferenceInput | undefined;
+		const differentialInput = input.differentialAnalysis;
+		if (include.includes("differential-candidates")) {
+			differentialCandidates = [];
+			if (differentialInput) {
+				const differentialScope = normalizeDifferentialScope(differentialInput.scope === undefined ? normalizedScope : differentialInput.scope);
+				const differentialMinimumSupport = differentialInput.minimumSupport === undefined
+					? minimumSupport
+					: boundedLimit(differentialInput.minimumSupport, 1, MAX_DIFFERENTIAL_FRAMES, "differentialAnalysis.minimumSupport");
+				const normalizeDifferentialSide = (side: NonNullable<AgentProtocolReportInput["differentialAnalysis"]>["baseline"]): AgentCaptureDifferenceInput["baseline"] => {
+					const sideHidden = side.filters?.hidden;
+					if (sideHidden !== undefined && sideHidden !== hiddenPolicy) {
+						throw new AgentQueryError("invalid-input", "Differential hidden policy must match the report hidden policy", { reportHidden: hiddenPolicy, differentialHidden: sideHidden });
+					}
+					const filters = normalizeDifferentialMessageFilters({ ...(side.filters ?? {}), hidden: hiddenPolicy });
+					return { snapshot: this.resolveDifferentialSnapshot(side.snapshot), label: side.label, filters };
+				};
+				differentialFollowUpInput = {
+					baseline: normalizeDifferentialSide(differentialInput.baseline),
+					changed: normalizeDifferentialSide(differentialInput.changed),
+					alignment: differentialInput.alignment,
+					scope: differentialScope,
+					minimumSupport: differentialMinimumSupport
+				};
+				const differentialResponse = this.analyzeCaptureDifference({ ...differentialFollowUpInput, limit: caps.candidates });
+				differentialCandidates = differentialResponse.data.candidateFields.slice(0, caps.candidates).map(candidate => ({ ...candidate, classification: "candidate" as const })) as AgentProtocolCandidate[];
+				differential = {
+					baseline: differentialResponse.data.baseline,
+					changed: differentialResponse.data.changed,
+					pairedFrameCount: differentialResponse.data.alignment.pairedFrameCount,
+					baselineUnpairedFrameCount: differentialResponse.data.alignment.baselineUnpairedFrameCount,
+					changedUnpairedFrameCount: differentialResponse.data.alignment.changedUnpairedFrameCount,
+					insertedFrameCount: differentialResponse.data.alignment.insertedFrameCount,
+					deletedFrameCount: differentialResponse.data.alignment.deletedFrameCount,
+					minimumSupport: differentialMinimumSupport,
+					truncated: differentialResponse.meta.truncated || differentialResponse.data.differenceSummary.truncated
+				};
+				differentialTruncated = differential.truncated;
+			}
+		}
+
+		const evidenceTruncated = read.truncated || reportTextTruncated || transitionTruncated || sequenceTruncated || differentialTruncated
+			|| frameFamilies.length > caps.families || invariantBytes.length > caps.positions || invariantBits.length > caps.positions
+			|| variableBytes.length > caps.positions || variableBits.length > caps.positions;
+		const evidenceQuality = {
+			totalFrameCount: read.totalFrameCount,
+			scopeMatchedFrameCount: read.scopeMatchedFrameCount,
+			applicableFrameCount: read.applicableFrameCount,
+			excludedFrameCount: Math.max(0, read.totalFrameCount - read.applicableFrameCount),
+			hiddenExcludedFrameCount: read.hiddenExcludedFrameCount,
+			sampledFrameCount: applicableFrames.length,
+			minimumSupport,
+			sampleSufficiency: read.truncated ? "truncated" : read.applicableFrameCount >= minimumSupport ? "sufficient" : "insufficient-evidence",
+			hiddenPolicy,
+			truncated: evidenceTruncated,
+			classifications: reportClassificationText()
+		} as const;
+		const snapshotArguments = {
+			captureId: snapshot.captureId,
+			profileId: snapshot.profileId,
+			profileVersion: snapshot.profileVersion,
+			sourceDataRevision: snapshot.sourceDataRevision
+		};
+		const reportFollowUpContext = protocolReportFollowUpContext(snapshotArguments, scope, hiddenPolicy);
+		const directScopeArguments = scope as Record<string, unknown>;
+		const transitionFollowUpAllowed = include.includes("transitions")
+			&& hiddenPolicy === "include"
+			&& Object.keys(scope).every(key => key === "sectionId");
+		const followUpOperations = [
+			{ tool: "query_messages", reason: "Inspect bounded frames that produced this snapshot report", arguments: { ...reportFollowUpContext, ...directScopeArguments, limit: 50 } },
+			...(transitionFollowUpAllowed ? [{ tool: "get_transitions", reason: "Inspect common adjacent transitions from the pinned profile", arguments: { ...snapshotArguments, ...(scope.sectionId ? { sectionId: scope.sectionId } : {}), minimumCount: minimumSupport, limit: 50 } }] : []),
+			...(include.includes("variable-bits") && variableBytes.length ? [{ tool: "get_byte_statistics", reason: "Inspect exact vocabulary and bit percentages for the bounded variable positions", arguments: { ...reportFollowUpContext, positions: [...new Set(variableBytes.slice(0, 32).map(item => item.position))] } }] : []),
+			...(include.includes("sequences") && sequences?.length ? [{ tool: "get_sequence_occurrences", reason: "Inspect occurrences of the first repeated sequence summary", arguments: { ...reportFollowUpContext, groupId: sequences[0]!.id, limit: 50 } }] : []),
+			...(differentialFollowUpInput ? [{
+				tool: "analyze_capture_difference",
+				reason: "Inspect the bounded differential candidate page with the same labelled snapshots",
+				arguments: {
+					baseline: differentialFollowUpInput.baseline,
+					changed: differentialFollowUpInput.changed,
+					alignment: differentialFollowUpInput.alignment,
+					...(Object.keys(differentialFollowUpInput.scope ?? {}).length ? { scope: differentialFollowUpInput.scope } : {}),
+					minimumSupport: differentialFollowUpInput.minimumSupport,
+					limit: caps.candidates
+				}
+			}] : [])
+		].slice(0, 6) as AgentProtocolReportResult["followUpOperations"];
+		const baseData: AgentProtocolReportResult = {
+			snapshot,
+			scope,
+			detail,
+			hiddenPolicy,
+			include,
+			...(include.includes("frame-families") ? { frameFamilies: frameFamilies.slice(0, caps.families) } : {}),
+			...(include.includes("invariants") ? { invariants: { bytes: invariantBytes.slice(0, caps.positions), bits: invariantBits.slice(0, caps.positions) } } : {}),
+			...(include.includes("variable-bits") ? { variableBits: { bytes: variableBytes.slice(0, caps.positions), bits: variableBits.slice(0, caps.positions) } } : {}),
+			...(transitions ? { transitions } : {}),
+			...(sequences ? { sequences } : {}),
+			...(differentialCandidates ? { differentialCandidates } : {}),
+			...(differential ? { differential } : {}),
+			evidenceQuality,
+			followUpOperations
+		};
+		const appliedFilters = { snapshot, scope, include, detail, hidden: hiddenPolicy, minimumSupport };
+		const renderResponse = (data: AgentProtocolReportResult): AgentResponse<AgentProtocolReportResult> => makeAgentResponse({
+			data,
+			appliedFilters,
+			snapshot,
+			truncated: data.evidenceQuality.truncated,
+			suggestedOperations: [...data.followUpOperations]
+		});
+		let response = renderResponse(baseData);
+		for (let attempt = 0; attempt < 7 && !responseFitsNormalLimit(response); attempt += 1) {
+			const factor = Math.pow(0.5, attempt + 1);
+			const trim = <T,>(values: readonly T[] | undefined, maximum: number): readonly T[] | undefined => values ? values.slice(0, Math.max(1, Math.floor(maximum * factor))) : undefined;
+			const trimmedData: AgentProtocolReportResult = {
+				...baseData,
+				...(baseData.frameFamilies ? { frameFamilies: trim(baseData.frameFamilies, caps.families) } : {}),
+				...(baseData.invariants ? { invariants: { bytes: trim(baseData.invariants.bytes, caps.positions) ?? [], bits: trim(baseData.invariants.bits, caps.positions) ?? [] } } : {}),
+				...(baseData.variableBits ? { variableBits: { bytes: trim(baseData.variableBits.bytes, caps.positions) ?? [], bits: trim(baseData.variableBits.bits, caps.positions) ?? [] } } : {}),
+				...(baseData.transitions ? { transitions: trim(baseData.transitions, caps.transitions) } : {}),
+				...(baseData.sequences ? { sequences: trim(baseData.sequences, caps.sequences) } : {}),
+				...(baseData.differentialCandidates ? { differentialCandidates: trim(baseData.differentialCandidates, caps.candidates) } : {}),
+				evidenceQuality: { ...baseData.evidenceQuality, truncated: true, sampleSufficiency: baseData.evidenceQuality.sampleSufficiency === "sufficient" ? "truncated" : baseData.evidenceQuality.sampleSufficiency },
+				followUpOperations: baseData.followUpOperations.slice(0, 4)
+			};
+			response = renderResponse(trimmedData);
+		}
+		assertEncodedResponseSize(response);
+		return response;
 	}
 
 	getByteStatistics(input: AgentByteStatisticsInput): AgentResponse<AgentByteStatisticsResult> {
@@ -1982,7 +2811,11 @@ export class CanonicalQueryService {
 		if (input.positions.length > 32) throw new AgentQueryError("invalid-input", "At most 32 byte positions may be requested", { maximum: 32 });
 		const positions = [...new Set(input.positions.map((position, index) => optionalNonNegativeInteger(position, `positions[${index}]`) as number))].sort((left, right) => left - right);
 		const normalizedScope = normalizeByteStatisticsScope(input.scope);
-		const scoped = Object.keys(normalizedScope.scope).length > 0;
+		const hiddenPolicy = input.hidden ?? "include";
+		if (hiddenPolicy !== "include" && hiddenPolicy !== "visible-only" && hiddenPolicy !== "hidden-only") {
+			throw new AgentQueryError("invalid-input", "hidden must be include, visible-only, or hidden-only", { hidden: hiddenPolicy });
+		}
+		const scoped = Object.keys(normalizedScope.scope).length > 0 || hiddenPolicy !== "include";
 		const requested: Partial<AgentSnapshotReference> = {
 			...(input.profileId ? { profileId: requiredText(input.profileId, "profileId") } : {}),
 			...(input.profileVersion === undefined ? {} : { profileVersion: optionalNonNegativeInteger(input.profileVersion, "profileVersion") }),
@@ -2016,7 +2849,7 @@ export class CanonicalQueryService {
 				varianceByPosition.set(row.position, row.variance);
 			}
 		} else {
-			const predicate = byteStatisticsFramePredicate(normalizedScope, "frames");
+			const predicate = byteStatisticsFramePredicate(normalizedScope, "frames", hiddenPolicy);
 			const frameParameters = { profileId: profile.id, ...predicate.params };
 			matchedFrameCount = (this.database.prepare(
 				`SELECT COUNT(*) AS count FROM materialized_frames AS frames
@@ -2080,75 +2913,219 @@ export class CanonicalQueryService {
 		};
 		const response = makeAgentResponse({
 			data,
-			appliedFilters: { captureId, positions, scope: normalizedScope.scope },
+			appliedFilters: {
+				captureId,
+				positions,
+				scope: normalizedScope.scope,
+				hidden: hiddenPolicy
+			},
 			snapshot,
 			requestedLimit: positions.length,
 			effectiveLimit: positions.length,
 			returned: positions.length,
 			truncated: false,
-			suggestedOperations: [{ tool: "query_messages", reason: "Relate byte variation to the bounded frames that contain it", arguments: { captureId, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision } }]
+			suggestedOperations: [{
+				tool: "query_messages",
+				reason: "Relate byte variation to the bounded frames that contain it",
+				arguments: {
+					captureId,
+					profileId: snapshot.profileId,
+					profileVersion: snapshot.profileVersion,
+					sourceDataRevision: snapshot.sourceDataRevision,
+					...(Object.keys(normalizedScope.scope).length ? { scope: normalizedScope.scope } : {}),
+					hidden: hiddenPolicy
+				}
+			}]
 		});
 		assertEncodedResponseSize(response);
 		return response;
 	}
 
-	private readComputedTransitions(profileId: string, filters: AgentTransitionsInput): AgentTransition[] {
+	private readIndexedTransitions(
+		profileId: string,
+		filters: AgentTransitionsInput,
+		minimumCount: number,
+		requestedLimit: number,
+		cursor?: AgentCursorPayload
+	): AgentTransition[] {
 		const sourceSignature = normalizedSignature(filters.sourceSignature ?? filters.fromSignature, "sourceSignature");
 		const destinationSignature = normalizedSignature(filters.destinationSignature ?? filters.toSignature, "destinationSignature");
-		const changedPositions = filters.changedPositions?.map((position, index) => optionalNonNegativeInteger(position, `changedPositions[${index}]`) as number) ?? [];
-		if (changedPositions.length > 32) throw new AgentQueryError("invalid-input", "At most 32 changed positions may be requested", { maximum: 32 });
-		if (!sourceSignature && !destinationSignature && (filters.sectionId || changedPositions.length)) {
-			throw new AgentQueryError(
-				"invalid-input",
-				"Section or changed-position transition filters require at least one signature bound; retry with sourceSignature or destinationSignature",
-				{
-					reason: "bounded-transition-scan",
-					missingSignatureAlternatives: ["sourceSignature", "destinationSignature"],
-					suggestedRequest: {
-						captureId: filters.captureId,
-						...(filters.profileId ? { profileId: filters.profileId } : {}),
-						...(filters.profileVersion === undefined ? {} : { profileVersion: filters.profileVersion }),
-						...(filters.sourceDataRevision === undefined ? {} : { sourceDataRevision: filters.sourceDataRevision }),
-						sourceSignature: "<signature from get_capture_overview>",
-						...(filters.sectionId ? { sectionId: filters.sectionId } : {}),
-						...(changedPositions.length ? { changedPositions } : {})
-					}
-				}
-			);
+		const sectionId = filters.sectionId === undefined ? undefined : requiredText(filters.sectionId, "sectionId");
+		const requestedPositions = normalizedChangedPositions(filters.changedPositions);
+		const changedPositionMatch = normalizedChangedPositionMatch(filters.changedPositionMatch);
+		const positionClauses = ["profile_id = @profileId"];
+		const params: Record<string, unknown> = {
+			profileId,
+			minimumCount,
+			familyLimit: requestedLimit + 1,
+			maxChangedPositions: MAX_TRANSITION_CHANGED_POSITION_SET,
+			requestedPositionCount: requestedPositions.length
+		};
+		if (sourceSignature) {
+			positionClauses.push("from_signature = @sourceSignature");
+			params.sourceSignature = sourceSignature;
 		}
-		const clauses = ["source.profile_id = @profileId", "destination.profile_id = @profileId", "destination.ordinal = source.ordinal + 1"];
-		const params: Record<string, unknown> = { profileId, limit: 1001 };
-		if (sourceSignature) { clauses.push("source.signature = @sourceSignature"); params.sourceSignature = sourceSignature; }
-		if (destinationSignature) { clauses.push("destination.signature = @destinationSignature"); params.destinationSignature = destinationSignature; }
-		if (filters.sectionId) { clauses.push("source.section_id = @sectionId"); params.sectionId = requiredText(filters.sectionId, "sectionId"); }
+		if (destinationSignature) {
+			positionClauses.push("to_signature = @destinationSignature");
+			params.destinationSignature = destinationSignature;
+		}
+		if (sectionId) {
+			positionClauses.push("section_id = @sectionId");
+			params.sectionId = sectionId;
+		}
+		if (requestedPositions.length) params.requestedPositionsJson = JSON.stringify(requestedPositions);
+		if (cursor) {
+			params.cursorCount = cursor.key.count;
+			params.cursorFromSignature = cursor.key.fromSignature;
+			params.cursorToSignature = cursor.key.toSignature;
+			params.cursorSectionId = cursor.key.sectionId;
+		}
+
+		const requestedPositionSet = requestedPositions.length
+			? "position IN (SELECT CAST(value AS INTEGER) FROM json_each(@requestedPositionsJson))"
+			: "0";
+		const matchingCte = requestedPositions.length
+			? `,
+		matching_families AS (
+			SELECT section_id, from_signature, to_signature
+			FROM position_rows
+			GROUP BY section_id, from_signature, to_signature
+			HAVING COUNT(DISTINCT CASE WHEN ${requestedPositionSet} THEN position END) ${changedPositionMatch === "all" ? "= @requestedPositionCount" : "> 0"}
+		)`
+			: "";
+		const matchingJoin = requestedPositions.length
+			? `JOIN matching_families matches
+				ON matches.section_id = stats.section_id
+			   AND matches.from_signature = stats.from_signature
+			   AND matches.to_signature = stats.to_signature`
+			: "";
+		const cursorSql = cursor
+			? `AND (
+				stats.transition_count < @cursorCount
+				OR (stats.transition_count = @cursorCount AND (
+					stats.from_signature > @cursorFromSignature
+					OR (stats.from_signature = @cursorFromSignature AND (
+						stats.to_signature > @cursorToSignature
+						OR (stats.to_signature = @cursorToSignature AND stats.section_id > @cursorSectionId)
+					))
+				))
+			)`
+			: "";
+		const positionSelection = requestedPositions.length
+			? `ranked.position_rank <= @maxChangedPositions OR ranked.position IN (SELECT CAST(value AS INTEGER) FROM json_each(@requestedPositionsJson))`
+			: "ranked.position_rank <= @maxChangedPositions";
 		const rows = this.database.prepare(
-			`SELECT source.signature AS from_signature, destination.signature AS to_signature,
-			        source.section_id, source.bytes_json AS from_bytes_json, destination.bytes_json AS to_bytes_json
-			 FROM materialized_frames source
-			 JOIN materialized_frames destination ON destination.profile_id = source.profile_id AND destination.ordinal = source.ordinal + 1
-			 WHERE ${clauses.join(" AND ")}
-			 ORDER BY source.signature ASC, destination.signature ASC, source.ordinal ASC
-			 LIMIT @limit`
-		).all(params) as Array<{ from_signature: string; to_signature: string; section_id: string; from_bytes_json: string; to_bytes_json: string }>;
-		if (rows.length > 1000) throw new AgentQueryError("invalid-input", "The refined transition scan is too broad; narrow the signature or section filter", { maximumScannedTransitions: 1000 });
-		const groups = new Map<string, { fromSignature: string; toSignature: string; sectionId: string; count: number; positions: Set<number> }>();
+			`WITH position_rows AS (
+				SELECT section_id, from_signature, to_signature, position, changed_count, transition_count
+				FROM frame_transition_positions
+				WHERE ${positionClauses.join(" AND ")}
+			), family_stats AS (
+				SELECT section_id, from_signature, to_signature,
+				       MAX(transition_count) AS transition_count,
+				       COUNT(*) AS changed_position_count
+				FROM position_rows
+				GROUP BY section_id, from_signature, to_signature
+			)${matchingCte}, top_families AS (
+				SELECT stats.section_id, stats.from_signature, stats.to_signature,
+				       stats.transition_count, stats.changed_position_count
+				FROM family_stats stats
+				${matchingJoin}
+				WHERE stats.transition_count >= @minimumCount
+				${cursorSql}
+				ORDER BY stats.transition_count DESC, stats.from_signature ASC, stats.to_signature ASC, stats.section_id ASC
+				LIMIT @familyLimit
+			), ranked_positions AS (
+				SELECT positions.section_id, positions.from_signature, positions.to_signature,
+				       positions.position, positions.changed_count,
+				       ROW_NUMBER() OVER (
+					       PARTITION BY positions.section_id, positions.from_signature, positions.to_signature
+					       ORDER BY positions.position ASC
+				       ) AS position_rank
+				FROM position_rows positions
+				JOIN top_families families
+				  ON families.section_id = positions.section_id
+				 AND families.from_signature = positions.from_signature
+				 AND families.to_signature = positions.to_signature
+			)
+			SELECT families.section_id, families.from_signature, families.to_signature,
+			       families.transition_count, families.changed_position_count,
+			       ranked.position, ranked.changed_count, ranked.position_rank
+			FROM top_families families
+			LEFT JOIN ranked_positions ranked
+			  ON ranked.section_id = families.section_id
+			 AND ranked.from_signature = families.from_signature
+			 AND ranked.to_signature = families.to_signature
+			 AND (${positionSelection})
+			ORDER BY families.transition_count DESC, families.from_signature ASC, families.to_signature ASC,
+			         families.section_id ASC, ranked.position ASC`
+		).all(params) as Array<{
+			section_id: string;
+			from_signature: string;
+			to_signature: string;
+			transition_count: number;
+			changed_position_count: number;
+			position: number | null;
+			changed_count: number | null;
+			position_rank: number | null;
+		}>;
+
+		type TransitionGroup = {
+			fromSignature: string;
+			toSignature: string;
+			sectionId: string;
+			count: number;
+			changedPositionCount: number;
+			boundedChangedPositions: Set<number>;
+			changedCounts: Map<number, number>;
+		};
+		const groups = new Map<string, TransitionGroup>();
 		for (const row of rows) {
-			const key = `${row.from_signature}\u0000${row.to_signature}\u0000${row.section_id}`;
-			const group = groups.get(key) ?? { fromSignature: row.from_signature, toSignature: row.to_signature, sectionId: row.section_id, count: 0, positions: new Set<number>() };
-			const fromBytes = jsonArray<number>(row.from_bytes_json);
-			const toBytes = jsonArray<number>(row.to_bytes_json);
-			const changed = new Set<number>();
-			for (let index = 0; index < Math.max(fromBytes.length, toBytes.length); index += 1) if (fromBytes[index] !== toBytes[index]) changed.add(index);
-			if (changedPositions.length && !changedPositions.every(position => changed.has(position))) continue;
-			group.count += 1;
-			for (const position of changed) group.positions.add(position);
+			const key = `${row.section_id}\u0000${row.from_signature}\u0000${row.to_signature}`;
+			const group = groups.get(key) ?? {
+				fromSignature: row.from_signature,
+				toSignature: row.to_signature,
+				sectionId: row.section_id,
+				count: row.transition_count,
+				changedPositionCount: row.changed_position_count,
+				boundedChangedPositions: new Set<number>(),
+				changedCounts: new Map<number, number>()
+			};
+			if (row.position !== null) {
+				group.changedCounts.set(row.position, row.changed_count ?? 0);
+				if ((row.position_rank ?? MAX_TRANSITION_CHANGED_POSITION_SET + 1) <= MAX_TRANSITION_CHANGED_POSITION_SET) {
+					group.boundedChangedPositions.add(row.position);
+				}
+			}
 			groups.set(key, group);
 		}
-		const minimumCount = filters.minimumCount === undefined ? 1 : boundedLimit(filters.minimumCount, 1, Number.MAX_SAFE_INTEGER, "minimumCount");
-		return [...groups.values()]
-			.filter(group => group.count >= minimumCount)
-			.sort((left, right) => right.count - left.count || left.fromSignature.localeCompare(right.fromSignature) || left.toSignature.localeCompare(right.toSignature))
-			.map(group => ({ fromSignature: group.fromSignature, toSignature: group.toSignature, count: group.count, changedPositions: [...group.positions].sort((left, right) => left - right), changedPositionCount: group.positions.size, sectionId: group.sectionId }));
+
+		return [...groups.values()].map(group => {
+			const boundedChangedPositions = [...group.boundedChangedPositions].sort((left, right) => left - right);
+			const positionsForCounts = requestedPositions.length
+				? requestedPositions
+				: boundedChangedPositions;
+			const changedPositionCounts = positionsForCounts.map(position => ({
+				position,
+				changedCount: group.changedCounts.get(position) ?? 0
+			}));
+			const changedPercentages = changedPositionCounts.map(item => ({
+				position: item.position,
+				percentage: group.count ? Math.round((item.changedCount / group.count) * 100) : 0
+			}));
+			return {
+				fromSignature: group.fromSignature,
+				toSignature: group.toSignature,
+				count: group.count,
+				transitionCount: group.count,
+				requestedPositions,
+				changedPositionCounts,
+				changedPercentages,
+				changedPositions: boundedChangedPositions,
+				changedPositionCount: group.changedPositionCount,
+				...(group.changedPositionCount > boundedChangedPositions.length ? { changedPositionSetTruncated: true } : {}),
+				sectionId: group.sectionId
+			};
+		});
 	}
 
 	getTransitions(input: AgentTransitionsInput): AgentResponse<AgentTransitionsResult> {
@@ -2158,49 +3135,427 @@ export class CanonicalQueryService {
 			...(input.profileVersion === undefined ? {} : { profileVersion: optionalNonNegativeInteger(input.profileVersion, "profileVersion") }),
 			...(input.sourceDataRevision === undefined ? {} : { sourceDataRevision: optionalNonNegativeInteger(input.sourceDataRevision, "sourceDataRevision") })
 		};
-		const cursor = input.cursor ? decodeAgentCursor(input.cursor, "transitions", ["count", "fromSignature", "toSignature"]) : undefined;
+		const sourceSignature = normalizedSignature(input.sourceSignature ?? input.fromSignature, "sourceSignature");
+		const destinationSignature = normalizedSignature(input.destinationSignature ?? input.toSignature, "destinationSignature");
+		const sectionId = input.sectionId === undefined ? undefined : requiredText(input.sectionId, "sectionId");
+		const changedPositions = normalizedChangedPositions(input.changedPositions);
+		const changedPositionMatch = normalizedChangedPositionMatch(input.changedPositionMatch);
 		const minimumCount = input.minimumCount === undefined ? 1 : boundedLimit(input.minimumCount, 1, Number.MAX_SAFE_INTEGER, "minimumCount");
-		const hasRefinedFilters = Boolean(input.sectionId || input.changedPositions?.length);
-		if (hasRefinedFilters && cursor) throw new AgentQueryError("invalid-cursor", "Refined transition scans do not support a cursor; narrow the signature or section request", { reason: "refined-transition-cursor" });
+		const hasIndexedFilters = Boolean(sectionId || changedPositions.length);
+		const cursor = input.cursor
+			? decodeAgentCursor(input.cursor, "transitions", hasIndexedFilters ? ["count", "fromSignature", "toSignature", "sectionId"] : ["count", "fromSignature", "toSignature"])
+			: undefined;
+		const cursorFilters = {
+			captureId,
+			sourceSignature,
+			destinationSignature,
+			sectionId,
+			changedPositions,
+			changedPositionMatch,
+			minimumCount
+		};
+		const appliedFilters = { ...cursorFilters, requested };
+		if (cursor?.snapshot) {
+			for (const field of ["profileId", "profileVersion", "sourceDataRevision"] as const) {
+				const requestedValue = requested[field];
+				if (requestedValue !== undefined && requestedValue !== cursor.snapshot[field]) {
+					throw new AgentQueryError("invalid-cursor", "The pagination cursor is bound to a different profile revision", { reason: "snapshot-mismatch", field });
+				}
+			}
+		}
 		const resolvedRequest = cursor?.snapshot ? { ...cursor.snapshot, ...requested } : requested;
 		const { profile, snapshot } = this.resolveAnalysisProfile(captureId, resolvedRequest);
-		if (cursor && stableJson(cursor.snapshot) !== stableJson(snapshot)) throw new AgentQueryError("invalid-cursor", "The pagination cursor is bound to a different profile revision", { reason: "snapshot-mismatch" });
-		let transitions: AgentTransition[];
-		if (!hasRefinedFilters) {
-			const sourceSignature = normalizedSignature(input.sourceSignature ?? input.fromSignature, "sourceSignature");
-			const destinationSignature = normalizedSignature(input.destinationSignature ?? input.toSignature, "destinationSignature");
-			const clauses = ["profile_id = @profileId", "count >= @minimumCount"];
-			const requestedLimit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT);
-			const params: Record<string, unknown> = { profileId: profile.id, minimumCount, limit: requestedLimit + 1 };
-			if (sourceSignature) { clauses.push("from_signature = @sourceSignature"); params.sourceSignature = sourceSignature; }
-			if (destinationSignature) { clauses.push("to_signature = @destinationSignature"); params.destinationSignature = destinationSignature; }
-			const cursorSql = cursor ? " AND (count < @cursorCount OR (count = @cursorCount AND (from_signature > @cursorFromSignature OR (from_signature = @cursorFromSignature AND to_signature > @cursorToSignature))))" : "";
-			if (cursor) {
-				assertCursorFilters(cursor, { captureId, requested, sourceSignature, destinationSignature, minimumCount }, cursor.snapshot);
-				params.cursorCount = cursor.key.count;
-				params.cursorFromSignature = cursor.key.fromSignature;
-				params.cursorToSignature = cursor.key.toSignature;
+		if (cursor) {
+			assertCursorFilters(cursor, cursorFilters, cursor.snapshot);
+			if (stableJson(cursor.snapshot) !== stableJson(snapshot)) {
+				throw new AgentQueryError("invalid-cursor", "The pagination cursor is bound to a different profile revision", { reason: "snapshot-mismatch" });
 			}
-			const rows = this.database.prepare(
-				`SELECT from_signature, to_signature, count, diffs
-				 FROM frame_transitions WHERE ${clauses.join(" AND ")}${cursorSql}
-				 ORDER BY count DESC, from_signature ASC, to_signature ASC LIMIT @limit`
-			).all(params) as Array<{ from_signature: string; to_signature: string; count: number; diffs: number }>;
-			const pageRows = rows.slice(0, requestedLimit);
-			const hasMore = rows.length > pageRows.length;
-			transitions = pageRows.map(row => ({ fromSignature: row.from_signature, toSignature: row.to_signature, count: row.count, changedPositions: [], changedPositionCount: row.diffs }));
-			const last = pageRows.at(-1);
-			const nextCursor = hasMore && last ? encodeAgentCursor({ contractVersion: 1, scope: "transitions", filters: { captureId, requested, sourceSignature, destinationSignature, minimumCount }, snapshot, key: { count: last.count, fromSignature: last.from_signature, toSignature: last.to_signature } }) : undefined;
-			const response = makeAgentResponse({ data: { transitions }, appliedFilters: { captureId, requested, sourceSignature, destinationSignature, minimumCount }, snapshot, requestedLimit, effectiveLimit: transitions.length, returned: transitions.length, nextCursor, truncationReason: hasMore ? "page-limit" : undefined, truncated: hasMore, suggestedOperations: transitions.length ? [{ tool: "query_messages", reason: "Inspect frames that participate in a selected transition", arguments: { captureId, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision, exactSignature: transitions[0].fromSignature } }] : [] });
-			assertEncodedResponseSize(response);
+		}
+
+		const requestedLimit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT);
+		if (hasIndexedFilters) {
+			const pageTransitions = this.readIndexedTransitions(profile.id, {
+				...input,
+				captureId,
+				...(sourceSignature ? { sourceSignature } : {}),
+				...(destinationSignature ? { destinationSignature } : {}),
+				...(sectionId ? { sectionId } : {}),
+				changedPositions,
+				changedPositionMatch
+			}, minimumCount, requestedLimit, cursor);
+			const response = selectSizeBoundedPage(pageTransitions, requestedLimit, (pageRows, page) => {
+				const last = pageRows.at(-1);
+				const hasMore = pageTransitions.length > pageRows.length;
+				const nextCursor = hasMore && last
+					? encodeAgentCursor({
+						contractVersion: 1,
+						scope: "transitions",
+						filters: cursorFilters,
+						snapshot,
+						key: { count: last.count, fromSignature: last.fromSignature, toSignature: last.toSignature, sectionId: last.sectionId ?? null }
+					})
+					: undefined;
+				return makeAgentResponse({
+					data: { transitions: pageRows },
+					appliedFilters,
+					snapshot,
+					requestedLimit: page.requestedLimit,
+					effectiveLimit: page.effectiveLimit,
+					returned: pageRows.length,
+					nextCursor,
+					truncationReason: page.truncationReason,
+					truncated: Boolean(page.truncationReason),
+					suggestedOperations: pageRows.length ? [{ tool: "query_messages", reason: "Inspect frames that participate in a selected transition", arguments: { captureId, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision, exactSignature: pageRows[0].fromSignature } }] : []
+				});
+			});
 			return response;
 		}
-		const refinedLimit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT);
-		transitions = this.readComputedTransitions(profile.id, input);
-		if (transitions.length > refinedLimit) throw new AgentQueryError("response-too-large", "The refined transition result is larger than one bounded page; narrow the signature or changed-position request", { returned: transitions.length, limit: refinedLimit });
-		const response = makeAgentResponse({ data: { transitions }, appliedFilters: { captureId, requested, minimumCount, sectionId: input.sectionId, changedPositions: input.changedPositions ?? [] }, snapshot, requestedLimit: refinedLimit, effectiveLimit: transitions.length, returned: transitions.length, truncated: false, suggestedOperations: transitions.length ? [{ tool: "query_messages", reason: "Inspect one side of a selected transition", arguments: { captureId, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision, exactSignature: transitions[0].fromSignature } }] : [] });
+
+		const clauses = ["profile_id = @profileId", "count >= @minimumCount"];
+		const params: Record<string, unknown> = { profileId: profile.id, minimumCount, limit: requestedLimit + 1 };
+		if (sourceSignature) { clauses.push("from_signature = @sourceSignature"); params.sourceSignature = sourceSignature; }
+		if (destinationSignature) { clauses.push("to_signature = @destinationSignature"); params.destinationSignature = destinationSignature; }
+		const cursorSql = cursor ? " AND (count < @cursorCount OR (count = @cursorCount AND (from_signature > @cursorFromSignature OR (from_signature = @cursorFromSignature AND to_signature > @cursorToSignature))))" : "";
+		if (cursor) {
+			params.cursorCount = cursor.key.count;
+			params.cursorFromSignature = cursor.key.fromSignature;
+			params.cursorToSignature = cursor.key.toSignature;
+		}
+		const rows = this.database.prepare(
+			`SELECT from_signature, to_signature, count, diffs
+			 FROM frame_transitions WHERE ${clauses.join(" AND ")}${cursorSql}
+			 ORDER BY count DESC, from_signature ASC, to_signature ASC LIMIT @limit`
+		).all(params) as Array<{ from_signature: string; to_signature: string; count: number; diffs: number }>;
+		const pageRows = rows.slice(0, requestedLimit);
+		const hasMore = rows.length > pageRows.length;
+		const transitions = pageRows.map(row => ({
+			fromSignature: row.from_signature,
+			toSignature: row.to_signature,
+			count: row.count,
+			transitionCount: row.count,
+			requestedPositions: [],
+			changedPositionCounts: [],
+			changedPercentages: [],
+			changedPositions: [],
+			changedPositionCount: row.diffs
+		}));
+		const last = pageRows.at(-1);
+		const nextCursor = hasMore && last
+			? encodeAgentCursor({ contractVersion: 1, scope: "transitions", filters: cursorFilters, snapshot, key: { count: last.count, fromSignature: last.from_signature, toSignature: last.to_signature } })
+			: undefined;
+		const response = makeAgentResponse({
+			data: { transitions },
+			appliedFilters,
+			snapshot,
+			requestedLimit,
+			effectiveLimit: transitions.length,
+			returned: transitions.length,
+			nextCursor,
+			truncationReason: hasMore ? "page-limit" : undefined,
+			truncated: hasMore,
+			suggestedOperations: transitions.length ? [{ tool: "query_messages", reason: "Inspect frames that participate in a selected transition", arguments: { captureId, profileId: snapshot.profileId, profileVersion: snapshot.profileVersion, sourceDataRevision: snapshot.sourceDataRevision, exactSignature: transitions[0].fromSignature } }] : []
+		});
 		assertEncodedResponseSize(response);
 		return response;
+	}
+
+	private resolveDifferentialSnapshot(reference: AgentSnapshotReference): AgentSnapshotReference {
+		const captureId = requiredText(reference?.captureId, "snapshot.captureId");
+		const profileId = requiredText(reference?.profileId, "snapshot.profileId");
+		const profileVersion = optionalNonNegativeInteger(reference?.profileVersion, "snapshot.profileVersion");
+		const sourceDataRevision = optionalNonNegativeInteger(reference?.sourceDataRevision, "snapshot.sourceDataRevision");
+		if (profileVersion === undefined || sourceDataRevision === undefined) {
+			throw new AgentQueryError("invalid-input", "Differential snapshots require captureId, profileId, profileVersion, and sourceDataRevision");
+		}
+		return this.resolveAnalysisProfile(captureId, { profileId, profileVersion, sourceDataRevision }).snapshot;
+	}
+
+	private assertDifferentialScopeExists(
+		scope: NormalizedDifferentialScope,
+		baselineProfileId: string,
+		changedProfileId: string
+	): void {
+		if (scope.sectionId === undefined) return;
+		const exists = (profileId: string): boolean => Boolean(this.database.prepare(
+			"SELECT 1 FROM framing_sections WHERE profile_id = @profileId AND id = @sectionId LIMIT 1"
+		).get({ profileId, sectionId: scope.sectionId }));
+		const baselineExists = exists(baselineProfileId);
+		const changedExists = exists(changedProfileId);
+		if (!baselineExists || !changedExists) {
+			throw new AgentQueryError(
+				"invalid-input",
+				"scope.sectionId must identify a section in both pinned snapshots; use baseline.filters.sectionId and changed.filters.sectionId for snapshot-local section IDs",
+				{ sectionId: scope.sectionId, baselineExists, changedExists }
+			);
+		}
+	}
+
+	private prepareDifferentialFrames(
+		profileId: string,
+		filters: NormalizedDifferentialMessageFilters,
+		scope: NormalizedDifferentialScope,
+		parameterPrefix: string
+	): DifferentialFramePlan {
+		const filterPredicate = differentialFramePredicate(filters, `${parameterPrefix}Filter`);
+		const scopePredicate = differentialFramePredicate(scope, `${parameterPrefix}Scope`);
+		const predicates = `${filterPredicate.sql}${scopePredicate.sql}`;
+		const predicateParameters = {
+			profileId,
+			...filterPredicate.params,
+			...scopePredicate.params
+		};
+		const totalFrameCount = (this.database.prepare(
+			"SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId"
+		).get({ profileId }) as { count: number }).count;
+		const filteredFrameCount = (this.database.prepare(
+			`SELECT COUNT(*) AS count FROM materialized_frames AS frames WHERE frames.profile_id = @profileId${predicates}`
+		).get(predicateParameters) as { count: number }).count;
+		if (filteredFrameCount > MAX_DIFFERENTIAL_FRAMES) {
+			throw new AgentQueryError(
+				"invalid-input",
+				`Differential alignment accepts at most ${MAX_DIFFERENTIAL_FRAMES} filtered frames per side`,
+				{ maximumFramesPerSide: MAX_DIFFERENTIAL_FRAMES, filteredFrameCount, parameterPrefix }
+			);
+		}
+		const analyzedElementCount = (this.database.prepare(
+			`SELECT COALESCE(SUM(
+				json_array_length(frames.bytes_json)
+				+ json_array_length(frames.timestamps_json)
+				+ json_array_length(frames.raw_offsets_json)
+				+ json_array_length(frames.directions_json)
+			), 0) AS count
+			 FROM materialized_frames AS frames
+			 WHERE frames.profile_id = @profileId${predicates}`
+		).get(predicateParameters) as { count: number }).count;
+		const rawOrigin = (this.database.prepare(
+			`SELECT MIN(CAST(json_extract(raw_offsets_json, '$[0]') AS INTEGER)) AS raw_origin
+			 FROM materialized_frames WHERE profile_id = @profileId`
+		).get({ profileId }) as { raw_origin: number | null }).raw_origin;
+		const sectionRows = this.database.prepare(
+			`SELECT id, position, start_offset, framing_mode, frame_length, marker_bytes,
+					marker_position, time_gap_ms, collapse_runs, collapsed
+			 FROM framing_sections WHERE profile_id = @profileId ORDER BY position`
+		).all({ profileId }) as DifferentialSectionRow[];
+		const sectionKeys = new Map(sectionRows.map(section => [section.id, differentialSectionKey(section, rawOrigin)]));
+		return {
+			profileId,
+			parameterPrefix,
+			predicates,
+			predicateParameters,
+			totalFrameCount,
+			filteredFrameCount,
+			analyzedElementCount,
+			excludedFrameCount: Math.max(0, totalFrameCount - filteredFrameCount),
+			rawOrigin,
+			sectionKeys
+		};
+	}
+
+	private readDifferentialFrames(plan: DifferentialFramePlan): { frames: DifferentialFrame[]; totalFrameCount: number; filteredFrameCount: number; excludedFrameCount: number; analyzedElementCount: number } {
+		if (plan.analyzedElementCount > MAX_DIFFERENTIAL_ANALYZED_ELEMENTS) {
+			throw new AgentQueryError(
+				"invalid-input",
+				`Differential analysis exceeds the ${MAX_DIFFERENTIAL_ANALYZED_ELEMENTS}-element byte/position budget`,
+				{ maximumAnalyzedElements: MAX_DIFFERENTIAL_ANALYZED_ELEMENTS, analyzedElements: plan.analyzedElementCount, parameterPrefix: plan.parameterPrefix }
+			);
+		}
+		const rows = this.database.prepare(
+			`SELECT id, ordinal, section_id, raw_offsets_json, bytes_json, timestamps_json,
+			        directions_json, hidden, signature
+			 FROM materialized_frames AS frames
+			 WHERE frames.profile_id = @profileId${plan.predicates}
+			 ORDER BY ordinal ASC, id ASC
+			 LIMIT @differentialLimit`
+		).all({ ...plan.predicateParameters, differentialLimit: MAX_DIFFERENTIAL_FRAMES + 1 }) as Array<{
+			id: string;
+			ordinal: number;
+			section_id: string;
+			raw_offsets_json: string;
+			bytes_json: string;
+			timestamps_json: string;
+			directions_json: string;
+			hidden: number;
+			signature: string;
+		}>;
+		const frames = rows.map(row => makeDifferentialFrame({
+			id: row.id,
+			ordinal: row.ordinal,
+			sectionId: row.section_id,
+			sectionKey: plan.sectionKeys.get(row.section_id),
+			bytes: jsonArray<number>(row.bytes_json).map(Number),
+			timestamps: jsonArray<number>(row.timestamps_json).map(Number),
+			directions: jsonArray<string>(row.directions_json).map(String),
+			hidden: Boolean(row.hidden),
+			signature: row.signature,
+			rawOffsets: jsonArray<number>(row.raw_offsets_json).map(Number)
+		}));
+		return {
+			frames,
+			totalFrameCount: plan.totalFrameCount,
+			filteredFrameCount: plan.filteredFrameCount,
+			excludedFrameCount: plan.excludedFrameCount,
+			analyzedElementCount: plan.analyzedElementCount
+		};
+	}
+
+	analyzeCaptureDifference(input: AgentCaptureDifferenceInput): AgentResponse<AgentCaptureDifferenceResult> {
+		const baselineLabel = requiredText(input?.baseline?.label, "baseline.label");
+		const changedLabel = requiredText(input?.changed?.label, "changed.label");
+		const baselineSnapshot = this.resolveDifferentialSnapshot(input?.baseline?.snapshot);
+		const changedSnapshot = this.resolveDifferentialSnapshot(input?.changed?.snapshot);
+		const baselineFilters = normalizeDifferentialMessageFilters(input.baseline.filters);
+		const changedFilters = normalizeDifferentialMessageFilters(input.changed.filters);
+		const scope = normalizeDifferentialScope(input.scope);
+		if (!input.alignment || typeof input.alignment !== "object") {
+			throw new AgentQueryError("invalid-input", "alignment is required", { label: "alignment" });
+		}
+		const requestedMode = input.alignment.mode;
+		if (!AGENT_DIFFERENTIAL_ALIGNMENT_MODES.includes(requestedMode as AgentDifferentialAlignmentMode)) {
+			throw new AgentQueryError("invalid-input", "alignment.mode must be ordinal, raw-relative, timestamp-nearest, or signature-sequence", { mode: requestedMode });
+		}
+		const mode = requestedMode as AgentDifferentialAlignmentMode;
+		if (mode !== "timestamp-nearest" && input.alignment.maximumTimestampDeltaMs !== undefined) {
+			throw new AgentQueryError("invalid-input", "maximumTimestampDeltaMs is only valid for timestamp-nearest alignment", { mode });
+		}
+		const requestedTimestampDelta = optionalFiniteNumber(input.alignment.maximumTimestampDeltaMs, "maximumTimestampDeltaMs");
+		if (requestedTimestampDelta !== undefined && requestedTimestampDelta < 0) {
+			throw new AgentQueryError("invalid-input", "maximumTimestampDeltaMs must be non-negative", { maximumTimestampDeltaMs: requestedTimestampDelta });
+		}
+		if (requestedTimestampDelta !== undefined && requestedTimestampDelta > 60_000) {
+			throw new AgentQueryError("invalid-input", "maximumTimestampDeltaMs must not exceed 60000", { maximum: 60_000 });
+		}
+		const maximumTimestampDeltaMs = mode === "timestamp-nearest" ? requestedTimestampDelta ?? 1_000 : undefined;
+		const minimumSupport = boundedLimit(input.minimumSupport, 1, MAX_DIFFERENTIAL_FRAMES, "minimumSupport");
+		const requestedLimit = boundedLimit(input.limit, DEFAULT_CAPTURE_DISCOVERY_LIMIT, MAX_CAPTURE_DISCOVERY_LIMIT, "limit");
+		const cursorFilters = {
+			baseline: { snapshot: baselineSnapshot, label: baselineLabel, filters: baselineFilters },
+			changed: { snapshot: changedSnapshot, label: changedLabel, filters: changedFilters },
+			alignment: { mode, ...(maximumTimestampDeltaMs === undefined ? {} : { maximumTimestampDeltaMs }) },
+			scope,
+			minimumSupport
+		};
+		const cursor = input.cursor ? decodeAgentCursor(input.cursor, "capture-difference", ["score", "sectionId", "frameFamily", "changedFrameFamily", "bytePosition", "bitMask"]) : undefined;
+		if (cursor) {
+			assertCursorFilters(cursor, cursorFilters, baselineSnapshot);
+			if (stableJson(cursor.snapshot) !== stableJson(baselineSnapshot)) {
+				throw new AgentQueryError("invalid-cursor", "The pagination cursor is bound to a different baseline snapshot", { reason: "snapshot-mismatch" });
+			}
+		}
+
+		this.assertDifferentialScopeExists(scope, baselineSnapshot.profileId, changedSnapshot.profileId);
+		// Prepare both sides before materializing any JSON arrays. The aggregate
+		// budget is intentionally total across the pinned snapshots, not merely a
+		// per-side frame-count check.
+		const baselinePlan = this.prepareDifferentialFrames(baselineSnapshot.profileId, baselineFilters, scope, "baseline");
+		const changedPlan = this.prepareDifferentialFrames(changedSnapshot.profileId, changedFilters, scope, "changed");
+		const analyzedElementCount = baselinePlan.analyzedElementCount + changedPlan.analyzedElementCount;
+		if (analyzedElementCount > MAX_DIFFERENTIAL_ANALYZED_ELEMENTS) {
+			throw new AgentQueryError(
+				"invalid-input",
+				`Differential analysis exceeds the ${MAX_DIFFERENTIAL_ANALYZED_ELEMENTS}-element total byte/position budget`,
+				{
+					maximumAnalyzedElements: MAX_DIFFERENTIAL_ANALYZED_ELEMENTS,
+					analyzedElements: analyzedElementCount,
+					baselineAnalyzedElements: baselinePlan.analyzedElementCount,
+					changedAnalyzedElements: changedPlan.analyzedElementCount
+				}
+			);
+		}
+		const baselineRead = this.readDifferentialFrames(baselinePlan);
+		const changedRead = this.readDifferentialFrames(changedPlan);
+		if (mode === "signature-sequence" && (baselineRead.frames.length > MAX_SIGNATURE_ALIGNMENT_FRAMES || changedRead.frames.length > MAX_SIGNATURE_ALIGNMENT_FRAMES)) {
+			throw new AgentQueryError(
+				"invalid-input",
+				`signature-sequence alignment accepts at most ${MAX_SIGNATURE_ALIGNMENT_FRAMES} filtered frames per side`,
+				{ maximumFramesPerSide: MAX_SIGNATURE_ALIGNMENT_FRAMES, baselineFrames: baselineRead.frames.length, changedFrames: changedRead.frames.length }
+			);
+		}
+		let alignmentResult: {
+			pairs: readonly DifferentialAlignedPair[];
+			baselineUnpaired: readonly DifferentialFrame[];
+			changedUnpaired: readonly DifferentialFrame[];
+			insertedFrameCount: number;
+			deletedFrameCount: number;
+		};
+		switch (mode) {
+			case "ordinal":
+				alignmentResult = alignOrdinal(baselineRead.frames, changedRead.frames, mode);
+				break;
+			case "raw-relative":
+				alignmentResult = alignRawRelative(baselineRead.frames, changedRead.frames, baselinePlan.rawOrigin, changedPlan.rawOrigin);
+				break;
+			case "timestamp-nearest":
+				alignmentResult = alignTimestampNearest(baselineRead.frames, changedRead.frames, maximumTimestampDeltaMs!);
+				break;
+			case "signature-sequence":
+				alignmentResult = alignSignatureSequence(baselineRead.frames, changedRead.frames);
+				break;
+		}
+		const evidence = calculateDifferentialEvidence(alignmentResult.pairs, minimumSupport);
+		const alignmentSummary = {
+			mode,
+			pairedFrameCount: alignmentResult.pairs.length,
+			baselineUnpairedFrameCount: alignmentResult.baselineUnpaired.length,
+			changedUnpairedFrameCount: alignmentResult.changedUnpaired.length,
+			insertedFrameCount: alignmentResult.insertedFrameCount,
+			deletedFrameCount: alignmentResult.deletedFrameCount,
+			excludedFrameCount: { baseline: baselineRead.excludedFrameCount, changed: changedRead.excludedFrameCount },
+			unpairedFrameCount: { baseline: alignmentResult.baselineUnpaired.length, changed: alignmentResult.changedUnpaired.length },
+			pairCompatibility: evidence.pairCompatibility,
+			...(maximumTimestampDeltaMs === undefined ? {} : { maximumTimestampDeltaMs })
+		};
+		const afterCursor = cursor
+			? evidence.candidateFields.filter(candidate => {
+				const score = Number(cursor.key.score);
+				const sectionId = String(cursor.key.sectionId ?? "");
+				const frameFamily = String(cursor.key.frameFamily ?? "");
+				const changedFrameFamily = String(cursor.key.changedFrameFamily ?? "");
+				const bytePosition = Number(cursor.key.bytePosition);
+				const mask = String(cursor.key.bitMask ?? "");
+				if (candidate.score < score) return true;
+				if (candidate.score > score) return false;
+				if (candidate.sectionId !== sectionId) return candidate.sectionId > sectionId;
+				if (candidate.frameFamily !== frameFamily) return candidate.frameFamily > frameFamily;
+				if (candidate.changedFrameFamily !== changedFrameFamily) return candidate.changedFrameFamily > changedFrameFamily;
+				if (candidate.bytePosition !== bytePosition) return candidate.bytePosition > bytePosition;
+				return candidate.bitMask > mask;
+			})
+			: [...evidence.candidateFields];
+		return selectSizeBoundedPage(afterCursor, requestedLimit, (pageRows, page) => {
+			const hasMore = afterCursor.length > pageRows.length;
+			const last = pageRows.at(-1);
+			const nextCursor = hasMore && last
+				? encodeAgentCursor({
+					contractVersion: 1,
+					scope: "capture-difference",
+					filters: cursorFilters,
+					snapshot: baselineSnapshot,
+					key: { score: last.score, sectionId: last.sectionId, frameFamily: last.frameFamily, changedFrameFamily: last.changedFrameFamily, bytePosition: last.bytePosition, bitMask: last.bitMask }
+				})
+				: undefined;
+			const responseData: AgentCaptureDifferenceResult = {
+				baseline: { label: baselineLabel, snapshot: baselineSnapshot, totalFrameCount: baselineRead.totalFrameCount, filteredFrameCount: baselineRead.filteredFrameCount, excludedFrameCount: baselineRead.excludedFrameCount, analyzedElementCount: baselineRead.analyzedElementCount },
+				changed: { label: changedLabel, snapshot: changedSnapshot, totalFrameCount: changedRead.totalFrameCount, filteredFrameCount: changedRead.filteredFrameCount, excludedFrameCount: changedRead.excludedFrameCount, analyzedElementCount: changedRead.analyzedElementCount },
+				alignment: alignmentSummary,
+				differenceSummary: evidence.differenceSummary,
+				candidateFields: pageRows
+			};
+			return makeAgentResponse({
+				data: responseData,
+				appliedFilters: cursorFilters,
+				snapshot: baselineSnapshot,
+				requestedLimit: page.requestedLimit,
+				effectiveLimit: page.effectiveLimit,
+				returned: pageRows.length,
+				nextCursor,
+				truncationReason: page.truncationReason,
+				truncated: hasMore || evidence.differenceSummary.truncated || Boolean(page.truncationReason),
+				suggestedOperations: pageRows.length ? [
+					{ tool: "get_message_context", reason: "Inspect the bounded baseline evidence IDs for the highest-ranked candidate", arguments: { frameId: pageRows[0]!.evidence.baselineFrameIds[0], captureId: baselineSnapshot.captureId, profileId: baselineSnapshot.profileId, profileVersion: baselineSnapshot.profileVersion, sourceDataRevision: baselineSnapshot.sourceDataRevision } },
+					{ tool: "get_message_context", reason: "Inspect the bounded changed evidence IDs for the highest-ranked candidate", arguments: { frameId: pageRows[0]!.evidence.changedFrameIds[0], captureId: changedSnapshot.captureId, profileId: changedSnapshot.profileId, profileVersion: changedSnapshot.profileVersion, sourceDataRevision: changedSnapshot.sourceDataRevision } }
+				] : []
+			});
+		});
 	}
 
 	readRawBytes(input: AgentRawReadInput): AgentResponse<AgentRawRead> {

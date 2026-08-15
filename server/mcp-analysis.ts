@@ -5,12 +5,16 @@ import { agentResponseSchema } from "./mcp-server.ts";
 import type {
 	AgentByteStatisticsInput,
 	AgentByteStatisticsResult,
+	AgentCaptureDifferenceInput,
+	AgentCaptureDifferenceResult,
 	AgentMessageContext,
 	AgentMessageContextInput,
 	AgentMessageQueryInput,
 	AgentMessageQueryResult,
 	AgentRawRead,
 	AgentRawReadInput,
+	AgentProtocolReportInput,
+	AgentProtocolReportResult,
 	AgentSequenceGroupsInput,
 	AgentSequenceGroupsResult,
 	AgentSequenceOccurrencesInput,
@@ -22,6 +26,14 @@ import type { McpQueryExecutor } from "./mcp-query-executor.ts";
 
 type RecordClient = (context: unknown, server: McpServer) => void;
 
+const differentialScopeSchema = z.object({
+	sectionId: z.string().min(1).optional(),
+	frameLength: z.number().int().positive().optional(),
+	exactSignature: z.string().min(1).optional(),
+	wildcardHexPattern: z.string().min(1).optional(),
+	direction: z.string().min(1).optional()
+});
+
 const transitionCommonInputShape = {
 	captureId: z.string().min(1),
 	profileId: z.string().optional(),
@@ -32,55 +44,14 @@ const transitionCommonInputShape = {
 };
 const transitionSignature = z.string().min(1);
 const transitionChangedPositions = z.array(z.number().int().nonnegative()).min(1).max(32);
-const refinedTransitionCursor = z.never({ error: "Refined transition scans do not support a cursor; omit cursor" }).optional();
-const transitionInputSchema = z.union([
-	// Aggregate queries can use signature bounds and pagination, but never the
-	// row-level refinement fields that require a bounded computed scan.
-	z.object({
-		...transitionCommonInputShape,
-		sourceSignature: transitionSignature.optional(),
-		destinationSignature: transitionSignature.optional(),
-		sectionId: z.never({ error: "Aggregate transition queries do not support sectionId; add a signature for a refined scan" }).optional(),
-		changedPositions: z.never({ error: "Aggregate transition queries do not support changedPositions; add a signature for a refined scan" }).optional(),
-		cursor: z.string().optional()
-	}),
-	// A refined scan is valid when either signature side is present. These two
-	// branches make that conditional requirement visible in the published JSON
-	// schema instead of hiding it in a runtime refinement.
-	z.object({
-		...transitionCommonInputShape,
-		sourceSignature: transitionSignature,
-		destinationSignature: transitionSignature.optional(),
-		sectionId: z.string().min(1),
-		changedPositions: transitionChangedPositions.optional(),
-		cursor: refinedTransitionCursor
-	}),
-	z.object({
-		...transitionCommonInputShape,
-		sourceSignature: transitionSignature.optional(),
-		destinationSignature: transitionSignature,
-		sectionId: z.string().min(1),
-		changedPositions: transitionChangedPositions.optional(),
-		cursor: refinedTransitionCursor
-	}),
-	z.object({
-		...transitionCommonInputShape,
-		sourceSignature: transitionSignature,
-		destinationSignature: transitionSignature.optional(),
-		sectionId: z.string().min(1).optional(),
-		changedPositions: transitionChangedPositions,
-		cursor: refinedTransitionCursor
-	}),
-	z.object({
-		...transitionCommonInputShape,
-		sourceSignature: transitionSignature.optional(),
-		destinationSignature: transitionSignature,
-		sectionId: z.string().min(1).optional(),
-		changedPositions: transitionChangedPositions,
-		cursor: refinedTransitionCursor
-	})
-], {
-	error: "Invalid get_transitions request: aggregate queries omit sectionId and changedPositions; refined scans require sourceSignature or destinationSignature and do not support cursor"
+const transitionInputSchema = z.object({
+	...transitionCommonInputShape,
+	sourceSignature: transitionSignature.optional(),
+	destinationSignature: transitionSignature.optional(),
+	sectionId: z.string().min(1).optional(),
+	changedPositions: transitionChangedPositions.optional(),
+	changedPositionMatch: z.enum(["all", "any"]).optional(),
+	cursor: z.string().optional()
 });
 
 const byteStatisticsScopeFields = {
@@ -98,6 +69,201 @@ const byteStatisticsScopeSchema = z.union([
 	z.object({ ...byteStatisticsScopeFields, direction: z.string().min(1) })
 ], {
 	error: "scope must contain at least one of sectionId, frameLength, exactSignature, wildcardHexPattern, or direction"
+});
+
+const differentialSnapshotSchema = z.object({
+	captureId: z.string().min(1),
+	profileId: z.string().min(1),
+	profileVersion: z.number().int().positive(),
+	sourceDataRevision: z.number().int().nonnegative()
+});
+
+const differentialMessageFiltersSchema = z.object({
+	ordinalFrom: z.number().int().nonnegative().optional(),
+	ordinalTo: z.number().int().nonnegative().optional(),
+	frameOrdinalFrom: z.number().int().nonnegative().optional(),
+	frameOrdinalTo: z.number().int().nonnegative().optional(),
+	rawOffsetFrom: z.number().int().nonnegative().optional(),
+	rawOffsetTo: z.number().int().nonnegative().optional(),
+	timestampFrom: z.number().finite().optional(),
+	timestampTo: z.number().finite().optional(),
+	sectionId: z.string().min(1).optional(),
+	direction: z.string().min(1).optional(),
+	exactSignature: z.string().min(1).optional(),
+	signature: z.string().min(1).optional(),
+	wildcardHexPattern: z.string().min(1).optional(),
+	hidden: z.enum(["include", "visible-only", "hidden-only"]).optional(),
+	notePresence: z.enum(["any", "with-note", "without-note"]).optional(),
+	sequenceGroupId: z.string().min(1).optional()
+});
+
+const differentialInputSchema = z.object({
+	baseline: z.object({
+		snapshot: differentialSnapshotSchema,
+		label: z.string().min(1),
+		filters: differentialMessageFiltersSchema.optional()
+	}),
+	changed: z.object({
+		snapshot: differentialSnapshotSchema,
+		label: z.string().min(1),
+		filters: differentialMessageFiltersSchema.optional()
+	}),
+	alignment: z.object({
+		mode: z.enum(["ordinal", "raw-relative", "timestamp-nearest", "signature-sequence"]),
+		maximumTimestampDeltaMs: z.number().finite().nonnegative().max(60_000).optional()
+	}),
+	scope: differentialScopeSchema.optional(),
+	minimumSupport: z.number().int().positive().max(1_000).optional(),
+	cursor: z.string().optional(),
+	limit: z.number().int().positive().max(100).optional()
+});
+
+const differentialSnapshotOutputSchema = z.object({
+	captureId: z.string(),
+	profileId: z.string(),
+	profileVersion: z.number().int().nonnegative(),
+	sourceDataRevision: z.number().int().nonnegative()
+});
+const differentialValueCountSchema = z.object({ value: z.number().int().nonnegative(), count: z.number().int().nonnegative() });
+const differentialMaskCountSchema = z.object({ mask: z.string(), count: z.number().int().nonnegative() });
+const differentialEvidenceSchema = z.object({
+	baselineFrameIds: z.array(z.string()),
+	changedFrameIds: z.array(z.string()),
+	evidenceTruncated: z.boolean()
+});
+const differentialScoreComponentsSchema = z.object({
+	supportFactor: z.number().finite(),
+	changeConsistency: z.number().finite(),
+	directionConsistency: z.number().finite(),
+	familySpecificity: z.number().finite(),
+	alignmentQuality: z.number().finite()
+});
+const differentialCandidateSchema = z.object({
+	sectionId: z.string(),
+	baselineSectionId: z.string(),
+	changedSectionId: z.string(),
+	sectionFingerprint: z.string(),
+	frameFamily: z.string(),
+	changedFrameFamily: z.string(),
+	bytePosition: z.number().int().nonnegative(),
+	bitMask: z.string(),
+	baselineValues: z.array(differentialValueCountSchema),
+	changedValues: z.array(differentialValueCountSchema),
+	xorMasks: z.array(differentialMaskCountSchema),
+	setCount: z.number().int().nonnegative(),
+	clearCount: z.number().int().nonnegative(),
+	support: z.number().int().nonnegative(),
+	pairedFrameCount: z.number().int().nonnegative(),
+	changeConsistency: z.number().finite(),
+	directionConsistency: z.number().finite(),
+	score: z.number().finite(),
+	scoreComponents: differentialScoreComponentsSchema,
+	evidence: differentialEvidenceSchema
+});
+const differentialPositionSummarySchema = z.object({
+	sectionId: z.string(),
+	baselineSectionId: z.string(),
+	changedSectionId: z.string(),
+	sectionFingerprint: z.string(),
+	frameFamily: z.string(),
+	bytePosition: z.number().int().nonnegative(),
+	pairedFrameCount: z.number().int().nonnegative(),
+	observedFrameCount: z.number().int().nonnegative(),
+	changedPairCount: z.number().int().nonnegative(),
+	changeConsistency: z.number().finite()
+});
+const differentialLengthChangeSchema = z.object({
+	sectionId: z.string(),
+	baselineSectionId: z.string(),
+	changedSectionId: z.string(),
+	sectionFingerprint: z.string(),
+	frameFamily: z.string(),
+	changedFrameFamily: z.string(),
+	baselineLength: z.number().int().nonnegative(),
+	changedLength: z.number().int().nonnegative(),
+	support: z.number().int().nonnegative(),
+	pairedFrameCount: z.number().int().nonnegative()
+});
+const differentialResultSchema = z.object({
+	baseline: z.object({
+		label: z.string(),
+		snapshot: differentialSnapshotOutputSchema,
+		totalFrameCount: z.number().int().nonnegative(),
+		filteredFrameCount: z.number().int().nonnegative(),
+		excludedFrameCount: z.number().int().nonnegative(),
+		analyzedElementCount: z.number().int().nonnegative()
+	}),
+	changed: z.object({
+		label: z.string(),
+		snapshot: differentialSnapshotOutputSchema,
+		totalFrameCount: z.number().int().nonnegative(),
+		filteredFrameCount: z.number().int().nonnegative(),
+		excludedFrameCount: z.number().int().nonnegative(),
+		analyzedElementCount: z.number().int().nonnegative()
+	}),
+	alignment: z.object({
+		mode: z.enum(["ordinal", "raw-relative", "timestamp-nearest", "signature-sequence"]),
+		pairedFrameCount: z.number().int().nonnegative(),
+		baselineUnpairedFrameCount: z.number().int().nonnegative(),
+		changedUnpairedFrameCount: z.number().int().nonnegative(),
+		insertedFrameCount: z.number().int().nonnegative(),
+		deletedFrameCount: z.number().int().nonnegative(),
+		excludedFrameCount: z.object({ baseline: z.number().int().nonnegative(), changed: z.number().int().nonnegative() }),
+		unpairedFrameCount: z.object({ baseline: z.number().int().nonnegative(), changed: z.number().int().nonnegative() }),
+		pairCompatibility: z.object({
+			compatiblePairCount: z.number().int().nonnegative(),
+			incompatiblePairCount: z.number().int().nonnegative(),
+			sectionMismatchCount: z.number().int().nonnegative(),
+			frameFamilyMismatchCount: z.number().int().nonnegative(),
+			lengthMismatchCount: z.number().int().nonnegative()
+		}),
+		maximumTimestampDeltaMs: z.number().finite().nonnegative().optional()
+	}),
+	differenceSummary: z.object({
+		invariantPositions: z.array(differentialPositionSummarySchema),
+		conditionallyChangingPositions: z.array(differentialPositionSummarySchema),
+		alwaysChangingPositions: z.array(differentialPositionSummarySchema),
+		lengthChanges: z.array(differentialLengthChangeSchema),
+		truncated: z.boolean()
+	}),
+	candidateFields: z.array(differentialCandidateSchema)
+});
+const differentialOutputSchema = agentResponseSchema.extend({ data: differentialResultSchema });
+
+const protocolReportSectionSchema = z.enum([
+	"frame-families",
+	"invariants",
+	"variable-bits",
+	"transitions",
+	"sequences",
+	"differential-candidates"
+]);
+const protocolReportDifferentialSchema = z.object({
+	baseline: z.object({
+		snapshot: differentialSnapshotSchema,
+		label: z.string().min(1),
+		filters: differentialMessageFiltersSchema.optional()
+	}),
+	changed: z.object({
+		snapshot: differentialSnapshotSchema,
+		label: z.string().min(1),
+		filters: differentialMessageFiltersSchema.optional()
+	}),
+	alignment: z.object({
+		mode: z.enum(["ordinal", "raw-relative", "timestamp-nearest", "signature-sequence"]),
+		maximumTimestampDeltaMs: z.number().finite().nonnegative().max(60_000).optional()
+	}),
+	scope: differentialScopeSchema.optional(),
+	minimumSupport: z.number().int().positive().max(1_000).optional()
+});
+const protocolReportInputSchema = z.object({
+	snapshot: differentialSnapshotSchema,
+	scope: differentialScopeSchema.optional(),
+	include: z.array(protocolReportSectionSchema).min(1).max(6).optional(),
+	differentialAnalysis: protocolReportDifferentialSchema.optional(),
+	detail: z.enum(["compact", "standard"]).optional(),
+	hidden: z.enum(["include", "visible-only", "hidden-only"]).optional(),
+	minimumSupport: z.number().int().positive().max(1_000).optional()
 });
 
 function errorResult(error: unknown): { isError: true; structuredContent: AgentResponse<unknown>; content: [{ type: "text"; text: string }] } {
@@ -136,9 +302,10 @@ function registerAnalysisTool<TInput extends object>(
 	inputSchema: z.ZodType<TInput>,
 	call: (input: TInput) => Promise<AgentResponse<unknown>>,
 	synopsis: (response: AgentResponse<unknown>) => string,
-	recordClient: RecordClient
+	recordClient: RecordClient,
+	outputSchema: z.ZodTypeAny = agentResponseSchema
 ): void {
-	server.registerTool(name, { description, inputSchema, outputSchema: agentResponseSchema }, async (input, context) => {
+	server.registerTool(name, { description, inputSchema, outputSchema }, async (input, context) => {
 		recordClient(context, server);
 		try {
 			const response = await call(input as TInput);
@@ -166,9 +333,11 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 			timestampFrom: z.number().finite().optional(),
 			timestampTo: z.number().finite().optional(),
 			sectionId: z.string().optional(),
+			frameLength: z.number().int().positive().optional(),
 			direction: z.string().optional(),
 			exactSignature: z.string().optional(),
 			wildcardHexPattern: z.string().optional(),
+			scope: differentialScopeSchema.optional(),
 			hidden: z.enum(["include", "visible-only", "hidden-only"]).optional(),
 			notePresence: z.enum(["any", "with-note", "without-note"]).optional(),
 			sequenceGroupId: z.string().optional(),
@@ -225,6 +394,8 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 			profileId: z.string().optional(),
 			profileVersion: z.number().int().nonnegative().optional(),
 			sourceDataRevision: z.number().int().nonnegative().optional(),
+			scope: differentialScopeSchema.optional(),
+			hidden: z.enum(["include", "visible-only", "hidden-only"]).optional(),
 			cursor: z.string().optional(),
 			limit: z.number().int().positive().max(100).optional(),
 			includeContext: z.boolean().optional(),
@@ -244,9 +415,10 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 			captureId: z.string().min(1),
 			profileId: z.string().optional(),
 			profileVersion: z.number().int().nonnegative().optional(),
-			sourceDataRevision: z.number().int().nonnegative().optional(),
-			positions: z.array(z.number().int().nonnegative()).min(1).max(32),
-			scope: byteStatisticsScopeSchema.optional()
+				sourceDataRevision: z.number().int().nonnegative().optional(),
+				positions: z.array(z.number().int().nonnegative()).min(1).max(32),
+				scope: byteStatisticsScopeSchema.optional(),
+				hidden: z.enum(["include", "visible-only", "hidden-only"]).optional()
 		}),
 		input => queries.getByteStatistics(input as AgentByteStatisticsInput),
 		response => `Returned byte statistics for ${(response.data as AgentByteStatisticsResult).positions.length} requested position${(response.data as AgentByteStatisticsResult).positions.length === 1 ? "" : "s"}.`,
@@ -256,10 +428,37 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 	registerAnalysisTool(
 		server,
 		"get_transitions",
-		"Return bounded signature-transition aggregates or refined scans. A refined scan is bounded to 1,000 transitions, requires a source or destination signature, and does not support cursors.",
+		"Return bounded signature-transition aggregates, section-scoped results, or indexed changed-position matches. Position-only and section-only requests are supported with all/any matching, minimum-count filtering, and opaque keyset cursors.",
 		transitionInputSchema,
 		input => queries.getTransitions(input as AgentTransitionsInput),
 		response => `Returned ${(response.data as AgentTransitionsResult).transitions.length} bounded transition result${(response.data as AgentTransitionsResult).transitions.length === 1 ? "" : "s"}.`,
+		recordClient
+	);
+
+	registerAnalysisTool(
+		server,
+		"analyze_capture_difference",
+		"Compare two explicitly pinned, labelled experiments with bounded ordinal, raw-relative, timestamp-nearest, or structural-fingerprint-aware signature-sequence alignment. Returns ranked candidateFields with byte/bit evidence and score components only; it never names or persists inferred protocol fields. Both snapshots are subject to a total bounded byte/timestamp/raw-position/direction array budget before materialization. Signature substitutions pair only equal ordinals with equal comparison-local section fingerprints, while exact-signature LCS anchors retain priority; candidate results retain baselineSectionId, changedSectionId, and sectionFingerprint. The fingerprint may be shared by structurally equivalent sections and is not a database identity or lookup key without its snapshot. Raw-relative pairs only equal relative retained-raw starts; shifted boundaries remain explicit unpaired evidence. A shared scope.sectionId must exist in both snapshots; use side-specific filters for profile-local section IDs.",
+		differentialInputSchema,
+		input => queries.analyzeCaptureDifference(input as AgentCaptureDifferenceInput),
+		response => {
+			const result = response as AgentResponse<AgentCaptureDifferenceResult>;
+			return `Compared ${result.data.alignment.pairedFrameCount} aligned frame pair${result.data.alignment.pairedFrameCount === 1 ? "" : "s"} with ${result.data.candidateFields.length} bounded candidate field${result.data.candidateFields.length === 1 ? "" : "s"} using ${result.data.alignment.mode} alignment.`;
+		},
+		recordClient,
+		differentialOutputSchema
+	);
+
+	registerAnalysisTool(
+		server,
+		"get_protocol_report",
+		"Return a compact, non-pageable evidence report for one explicit profile snapshot. Results separate frame families by section and length, classify stable and variable bytes/bits, summarize common transitions and repeated sequences, and optionally include labelled differential candidate fields. Scope, hidden policy, detail, and differential alignment are bounded and returned in the report; no semantic field names or inferred-field persistence are performed.",
+		protocolReportInputSchema,
+		input => queries.getProtocolReport(input as AgentProtocolReportInput),
+		response => {
+			const result = response as AgentResponse<AgentProtocolReportResult>;
+			return `Returned a bounded protocol report for ${result.data.evidenceQuality.applicableFrameCount} applicable frame${result.data.evidenceQuality.applicableFrameCount === 1 ? "" : "s"}${result.data.evidenceQuality.truncated ? " with truncation" : ""}.`;
+		},
 		recordClient
 	);
 

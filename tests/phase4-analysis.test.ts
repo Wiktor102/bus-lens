@@ -3,6 +3,15 @@ import test from "node:test";
 import { CanonicalCaptureCommandService } from "../server/canonical-capture-command-service.ts";
 import { CanonicalQueryService } from "../server/canonical-query.ts";
 import { openDatabase } from "../server/database.ts";
+import { deriveTransitionPositionAggregates } from "../server/transition-positions.ts";
+
+test("indexed transitions do not bridge filtered ordinal gaps", () => {
+	const rows = deriveTransitionPositionAggregates([
+		{ ordinal: 0, sectionId: "section", signature: "00", bytes: [0] },
+		{ ordinal: 2, sectionId: "section", signature: "01", bytes: [1] }
+	]);
+	assert.deepEqual(rows, []);
+});
 
 const framing = [{ start: 0, framingMode: "length", frameSize: 2, collapseRuns: false, collapsed: false }] as const;
 
@@ -303,16 +312,13 @@ test("analysis groups, occurrences, statistics, transitions, and raw reads remai
 		const transitions = query.getTransitions({ captureId: "analysis-capture", profileId, minimumCount: 1 });
 		assert.ok(transitions.data.transitions.length);
 		const sectionId = (database.prepare("SELECT section_id FROM materialized_frames WHERE profile_id = @profileId ORDER BY ordinal LIMIT 1").get({ profileId }) as { section_id: string }).section_id;
-		assert.throws(
-			() => query.getTransitions({ captureId: "analysis-capture", profileId, sectionId }),
-			error => {
-				const typed = error as { code?: string; details?: Record<string, unknown> };
-				assert.equal(typed.code, "invalid-input");
-				assert.deepEqual(typed.details?.missingSignatureAlternatives, ["sourceSignature", "destinationSignature"]);
-				assert.equal((typed.details?.suggestedRequest as { sourceSignature?: string } | undefined)?.sourceSignature, "<signature from get_capture_overview>");
-				return true;
-			}
-		);
+		const sectionOnly = query.getTransitions({ captureId: "analysis-capture", profileId, sectionId });
+		assert.ok(sectionOnly.data.transitions.length);
+		assert.ok(sectionOnly.data.transitions.every(transition => transition.sectionId === sectionId));
+		assert.ok(sectionOnly.data.transitions.every(transition => transition.changedPositionCount > 0));
+		assert.ok(sectionOnly.data.transitions.every(transition => transition.fromSignature !== transition.toSignature));
+		const positionOnly = query.getTransitions({ captureId: "analysis-capture", profileId, changedPositions: [0] });
+		assert.ok(positionOnly.data.transitions.length);
 		const aliasRefined = query.getTransitions({ captureId: "analysis-capture", profileId, sectionId, fromSignature: transitions.data.transitions[0]!.fromSignature });
 		assert.ok(aliasRefined.data.transitions.length);
 		const snapshot = query.queryCaptureOverview("analysis-capture").meta.snapshot;
@@ -337,6 +343,95 @@ test("analysis groups, occurrences, statistics, transitions, and raw reads remai
 	} finally {
 		database.close();
 	}
+});
+
+test("indexed transitions match aggregate max-width diffs and use bounded position pagination", () => {
+		const { database, profileId, sections } = seedMixedFrameAnalysisCapture();
+		try {
+			const query = new CanonicalQueryService(database);
+			const aggregate = query.getTransitions({ captureId: "mixed-frame-analysis-capture", profileId, limit: 20 });
+			const unequal = aggregate.data.transitions.find(transition => transition.fromSignature === "10 02" && transition.toSignature === "A0 01 02");
+			assert.deepEqual(unequal && {
+				changedPositionCount: unequal.changedPositionCount,
+				changedPositions: unequal.changedPositions
+			}, { changedPositionCount: 3, changedPositions: [] });
+
+			const indexed = query.getTransitions({
+				captureId: "mixed-frame-analysis-capture",
+				profileId,
+				sectionId: sections[0]!.id,
+				sourceSignature: "10 02",
+				destinationSignature: "A0 01 02"
+			});
+			assert.deepEqual(indexed.data.transitions[0]?.changedPositions, [0, 1, 2]);
+			assert.equal(indexed.data.transitions[0]?.changedPositionCount, unequal?.changedPositionCount);
+			assert.deepEqual(indexed.data.transitions[0]?.changedPositionCounts, [
+				{ position: 0, changedCount: 1 },
+				{ position: 1, changedCount: 1 },
+				{ position: 2, changedCount: 1 }
+			]);
+			assert.deepEqual(indexed.data.transitions[0]?.changedPercentages, [
+				{ position: 0, percentage: 100 },
+				{ position: 1, percentage: 100 },
+				{ position: 2, percentage: 100 }
+			]);
+
+			assert.ok(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'frame_transition_positions_profile_section_position_changed_count'").get());
+			const plan = database.prepare(
+				`EXPLAIN QUERY PLAN
+				 SELECT section_id, from_signature, to_signature, changed_count
+				 FROM frame_transition_positions
+				 WHERE profile_id = @profileId AND section_id = @sectionId AND position = @position`
+			).all({ profileId, sectionId: sections[0]!.id, position: 2 }) as Array<{ detail: string }>;
+			assert.ok(plan.some(row => row.detail.includes("frame_transition_positions_profile_section_position_changed_count")));
+		} finally {
+			database.close();
+		}
+});
+
+test("indexed transition cursors are bounded, snapshot-pinned, and accept omitted snapshot fields", () => {
+		const { database, commands, profileId, dataRevision } = seedAnalysisCapture();
+		try {
+			const query = new CanonicalQueryService(database);
+			const sectionId = (database.prepare("SELECT section_id FROM materialized_frames WHERE profile_id = @profileId LIMIT 1").get({ profileId }) as { section_id: string }).section_id;
+			const first = query.getTransitions({ captureId: "analysis-capture", sectionId, limit: 1 });
+			assert.equal(first.data.transitions.length, 1);
+			assert.ok(first.meta.page?.nextCursor);
+			assert.equal(first.meta.page?.effectiveLimit, 1);
+			const snapshot = first.meta.snapshot!;
+
+			commands.reframe({
+				captureId: "analysis-capture",
+				expectedActiveProfileId: profileId,
+				expectedDataRevision: dataRevision,
+				sections: [{ start: 0, framingMode: "length", frameSize: 1 }]
+			});
+
+			const continued = query.getTransitions({ captureId: "analysis-capture", sectionId, limit: 1, cursor: first.meta.page?.nextCursor });
+			assert.equal(continued.data.transitions.length, 1);
+			assert.equal(continued.meta.snapshot?.profileId, snapshot.profileId);
+			assert.notEqual(continued.data.transitions[0]?.fromSignature, first.data.transitions[0]?.fromSignature);
+
+			assert.doesNotThrow(() => query.getTransitions({
+				captureId: "analysis-capture",
+				sectionId,
+				profileId: snapshot.profileId,
+				profileVersion: snapshot.profileVersion,
+				sourceDataRevision: snapshot.sourceDataRevision,
+				limit: 1,
+				cursor: first.meta.page?.nextCursor
+			}));
+			assert.throws(
+				() => query.getTransitions({ captureId: "analysis-capture", sectionId, profileVersion: snapshot.profileVersion + 1, limit: 1, cursor: first.meta.page?.nextCursor }),
+				error => (error as { code?: string }).code === "invalid-cursor"
+			);
+			assert.throws(
+				() => query.getTransitions({ captureId: "analysis-capture", sectionId: "different-section", limit: 1, cursor: first.meta.page?.nextCursor }),
+				error => (error as { code?: string }).code === "invalid-cursor"
+			);
+		} finally {
+			database.close();
+		}
 });
 
 test("sequence occurrence suggestions use a stable starting frame without context", () => {
