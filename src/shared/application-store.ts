@@ -212,6 +212,7 @@ export type ApplicationCommand =
 	| { type: "capture/commit-description"; value: string }
 	| { type: "capture/open-context" }
 	| { type: "capture/duplicate" }
+	| { type: "capture/duplicate-archive"; captureId: string }
 	| { type: "capture/clear-messages" }
 	| { type: "capture/delete-active" }
 	| { type: "capture/upgrade-active" }

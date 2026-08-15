@@ -789,8 +789,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		dependencies.render();
 	}
 
-	function duplicateActiveCapture() {
-		const source = capture();
+	function duplicateCapture(source: ActiveCapture | undefined) {
 		if (!source || rejectLockedMutation(source)) return;
 		const copy = structuredClone(source);
 		copy.id = crypto.randomUUID();
@@ -827,6 +826,14 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		} else persistLegacyCapture(copy);
 		persistArchiveIndex();
 		dependencies.render();
+	}
+
+	function duplicateArchiveCapture(captureId: string) {
+		duplicateCapture(captureById(captureId));
+	}
+
+	function duplicateActiveCapture() {
+		duplicateCapture(capture());
 	}
 
 	async function deleteArchiveCapture(captureId: string): Promise<void> {
@@ -1292,6 +1299,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		commitCaptureTitle,
 		setCaptureDescription,
 		commitCaptureDescription,
+		duplicateArchiveCapture,
 		duplicateActiveCapture,
 		clearActiveCaptureMessages,
 		deleteActiveCapture,

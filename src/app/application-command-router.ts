@@ -60,6 +60,9 @@ export function subscribeToApplicationCommands(dependencies: ApplicationCommandR
 			case "capture/duplicate":
 				dependencies.captureController.duplicateActiveCapture();
 				break;
+			case "capture/duplicate-archive":
+				dependencies.captureController.duplicateArchiveCapture(command.captureId);
+				break;
 			case "capture/clear-messages":
 				dependencies.captureController.clearActiveCaptureMessages();
 				break;
