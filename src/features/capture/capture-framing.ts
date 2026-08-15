@@ -373,6 +373,204 @@ export function frameSectionRanges(
 	});
 }
 
+function messageRawPositions(message: CaptureMessage): number[] {
+	return message.rawOffsets || message._rawPositions || [];
+}
+
+function messageRawStart(message: CaptureMessage): number | undefined {
+	return messageRawPositions(message)[0] ?? (Number.isInteger(message._byteStart) ? message._byteStart : undefined);
+}
+
+function liveMessageFromRecords(
+	records: PreviewByteRecord[],
+	sectionId: string,
+	index: number,
+	byteStart: number,
+	generateId: () => string
+): CaptureMessage {
+	const rawPositions = records.map(record => record.rawPosition);
+	return {
+		id: generateId(),
+		timestamp: records[0].timestamp,
+		byteTimestamps: records.map(record => record.timestamp),
+		bytes: records.map(record => record.value),
+		directions: records.map(record => record.direction || "rx"),
+		hidden: false,
+		hiddenBytes: records.map(() => false),
+		sourceIndex: index,
+		sectionId,
+		_byteStart: byteStart,
+		_byteEnd: byteStart + records.length,
+		rawOffsets: rawPositions,
+		_rawPositions: rawPositions
+	};
+}
+
+function appendRecordsToLiveMessage(message: CaptureMessage, records: PreviewByteRecord[]): void {
+	if (!records.length) return;
+	const previousLength = message.bytes.length;
+	const rawPositions = messageRawPositions(message).slice();
+	message.bytes.push(...records.map(record => record.value));
+	message.byteTimestamps = [...(message.byteTimestamps || message.bytes.slice(0, previousLength).map(() => message.timestamp)), ...records.map(record => record.timestamp)];
+	message.directions = [...(message.directions || message.bytes.slice(0, previousLength).map(() => "rx")), ...records.map(record => record.direction || "rx")];
+	message.hiddenBytes = [...(message.hiddenBytes || message.bytes.slice(0, previousLength).map(() => false)), ...records.map(() => false)];
+	rawPositions.push(...records.map(record => record.rawPosition));
+	message.rawOffsets = rawPositions;
+	message._rawPositions = rawPositions;
+	message._byteEnd = (message._byteEnd ?? message._byteStart ?? 0) + records.length;
+}
+
+function appendLengthFramedPreview(
+	capture: Capture,
+	section: CaptureSection,
+	records: PreviewByteRecord[],
+	sectionMessages: CaptureMessage[],
+	generateId: () => string
+): boolean {
+	const messages = capture.messages || (capture.messages = []);
+	const settings = normalizeSectionFramingSettings(section, DEFAULT_FRAME_SIZE);
+	let last = sectionMessages.at(-1);
+	let byteStart = last?._byteEnd ?? 0;
+	let offset = 0;
+	if (last && last.bytes.length < settings.frameSize) {
+		const take = Math.min(settings.frameSize - last.bytes.length, records.length);
+		appendRecordsToLiveMessage(last, records.slice(0, take));
+		byteStart = last._byteEnd ?? byteStart;
+		offset = take;
+	}
+	while (offset < records.length) {
+		const chunk = records.slice(offset, offset + settings.frameSize);
+		messages.push(liveMessageFromRecords(chunk, String(section.id), messages.length, byteStart, generateId));
+		byteStart += chunk.length;
+		offset += chunk.length;
+	}
+	return true;
+}
+
+function appendTimeFramedPreview(
+	capture: Capture,
+	section: CaptureSection,
+	records: PreviewByteRecord[],
+	sectionMessages: CaptureMessage[],
+	generateId: () => string
+): boolean {
+	const messages = capture.messages || (capture.messages = []);
+	const settings = normalizeSectionFramingSettings(section, DEFAULT_FRAME_SIZE);
+	let current = sectionMessages.at(-1);
+	let byteStart = current?._byteEnd ?? 0;
+	let previousTimestamp = current?.byteTimestamps?.at(-1) ?? current?.timestamp;
+	for (const record of records) {
+		if (!current || (previousTimestamp !== undefined && record.timestamp - previousTimestamp >= settings.frameTimeGap)) {
+			current = liveMessageFromRecords([record], String(section.id), messages.length, byteStart, generateId);
+			messages.push(current);
+			byteStart += 1;
+		} else {
+			appendRecordsToLiveMessage(current, [record]);
+			byteStart = current._byteEnd ?? byteStart;
+		}
+		previousTimestamp = record.timestamp;
+	}
+	return true;
+}
+
+function endsWithMarker(message: CaptureMessage, marker: number[]): boolean {
+	return marker.length > 0 && marker.every((value, index) => message.bytes.at(-marker.length + index) === value);
+}
+
+function appendMarkerEndFramedPreview(
+	capture: Capture,
+	section: CaptureSection,
+	records: PreviewByteRecord[],
+	sectionMessages: CaptureMessage[],
+	generateId: () => string
+): boolean {
+	const messages = capture.messages || (capture.messages = []);
+	const settings = normalizeSectionFramingSettings(section, DEFAULT_FRAME_SIZE);
+	const marker = parseMarkerBytes(settings.frameMarker);
+	if (!marker.length) return true;
+	let current = sectionMessages.at(-1);
+	let byteStart = current?._byteEnd ?? 0;
+	if (current && endsWithMarker(current, marker)) current = undefined;
+	for (const record of records) {
+		if (!current) {
+			current = liveMessageFromRecords([record], String(section.id), messages.length, byteStart, generateId);
+			messages.push(current);
+			byteStart += 1;
+		} else {
+			appendRecordsToLiveMessage(current, [record]);
+			byteStart = current._byteEnd ?? byteStart;
+		}
+		if (endsWithMarker(current, marker)) current = undefined;
+	}
+	return true;
+}
+
+/**
+ * Extends a normalized capture after an append-only live write. The existing
+ * full rebuild remains the fallback for framing states that need historical
+ * context, such as a marker-start section or a newly introduced section.
+ */
+export function appendLivePreview(capture: Capture, previousByteStreamLength: number, generateId = createId): boolean {
+	const stream = capture.byteStream || [];
+	if (previousByteStreamLength < 0 || previousByteStreamLength > stream.length) return false;
+	const sections = capture.frameSections || [];
+	const section = sections.at(-1);
+	if (!section) return false;
+	const appended = stream
+		.slice(previousByteStreamLength)
+		.map((record, index) => ({ ...record, rawPosition: record.rawOffset ?? previousByteStreamLength + index }));
+	if (!appended.length) return true;
+	if (appended.some(record => record.hidden)) return false;
+	const previousLastRawOffset = stream[previousByteStreamLength - 1]?.rawOffset ?? previousByteStreamLength - 1;
+	const lastRawOffset = appended.at(-1)?.rawPosition ?? previousLastRawOffset;
+	if (previousByteStreamLength > 0 && sections.some(item => {
+		const start = Number(item.start ?? 0);
+		return start > previousLastRawOffset && start <= lastRawOffset;
+	})) return false;
+	const sectionStart = Number(section.start ?? 0);
+	if (appended.some(record => record.rawPosition < sectionStart)) return false;
+	const sectionId = String(section.id ?? "");
+	const sectionMessages = (capture.messages || []).filter(message => {
+		const start = messageRawStart(message);
+		return String(message.sectionId ?? "") === sectionId || (start !== undefined && start >= sectionStart);
+	});
+	const settings = normalizeSectionFramingSettings(section, DEFAULT_FRAME_SIZE);
+	if (settings.framingMode === "marker" && settings.markerPosition === "start") return false;
+	if (settings.framingMode === "length") {
+		if (!sectionMessages.length && stream.slice(0, previousByteStreamLength).some(record => {
+			const rawPosition = record.rawOffset ?? 0;
+			return rawPosition >= sectionStart;
+		})) return false;
+		return appendLengthFramedPreview(capture, section, appended, sectionMessages, generateId);
+	}
+	if (settings.framingMode === "time") {
+		if (!sectionMessages.length && stream.slice(0, previousByteStreamLength).some(record => {
+			const rawPosition = record.rawOffset ?? 0;
+			return rawPosition >= sectionStart;
+		})) return false;
+		return appendTimeFramedPreview(capture, section, appended, sectionMessages, generateId);
+	}
+	if (!sectionMessages.length) {
+		// A marker-end section has no visible messages until its first marker.
+		// Once one appears, use the full path so any pre-marker bytes are kept
+		// exactly as the established framing implementation defines them.
+		const marker = parseMarkerBytes(settings.frameMarker);
+		const previousSectionRecords = marker.length > 1
+			? stream
+					.slice(0, previousByteStreamLength)
+					.filter(record => (record.rawOffset ?? 0) >= sectionStart && !record.hidden)
+					.slice(-(marker.length - 1))
+			: [];
+		const markerCandidate = [...previousSectionRecords, ...appended];
+		if (marker.length && markerCandidate.some((record, index) => marker.every((value, markerIndex) => {
+			const candidate = markerCandidate[index + markerIndex]?.value;
+			return candidate === value;
+		}))) return false;
+		return true;
+	}
+	return appendMarkerEndFramedPreview(capture, section, appended, sectionMessages, generateId);
+}
+
 export function rebuildPreview(capture: Capture, generateId = createId): void {
 	normalizeCapture(capture, generateId);
 	// A hidden byte is omitted before framing, rather than merely omitted while

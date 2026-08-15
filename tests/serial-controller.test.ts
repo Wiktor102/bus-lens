@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createSerialController, MAX_CAPTURE_BYTES } from "../src/features/transport/serial-controller.ts";
+import type { AppendCaptureChunkRequest } from "../src/features/transport/capture-append-queue.ts";
 import type { Capture } from "../src/features/capture/capture-framing.ts";
 import type { AppState } from "../src/shared/app-state.ts";
 
@@ -82,6 +83,7 @@ test("retaining a rolling capture preserves the framing active at the rollover b
 test("canonical stop drains acknowledged appends before finalizing exactly once", async () => {
 	const capture: Capture = { id: "canonical", byteStream: [], frameSections: [{ id: "section", start: 0, framingMode: "length", frameSize: 2 }], messages: [], notes: [], annotations: {} };
 	const events: string[] = [];
+	const appendRequests: AppendCaptureChunkRequest[] = [];
 	let finalizeCount = 0;
 	const controller = createSerialController({
 		capture: () => capture,
@@ -99,8 +101,9 @@ test("canonical stop drains acknowledged appends before finalizing exactly once"
 				events.push("start");
 				return { sessionId, nextChunkSequence: 0, nextRawOffset: 0, dataRevision: 0 };
 			},
-			appendChunk: async request => {
-				events.push(`append:${request.sequence}:${request.expectedStartOffset}`);
+				appendChunk: async request => {
+					appendRequests.push(request);
+					events.push(`append:${request.sequence}:${request.expectedStartOffset}`);
 				const count = request.segments.reduce((total, segment) => total + segment.bytes.length, 0);
 				return { acceptedStartOffset: request.expectedStartOffset, acceptedEndOffset: request.expectedStartOffset + count, nextRawOffset: request.expectedStartOffset + count, nextSequence: request.sequence + 1, dataRevision: 1 };
 			},
@@ -124,6 +127,10 @@ test("canonical stop drains acknowledged appends before finalizing exactly once"
 
 	assert.equal(finalizeCount, 1);
 	assert.deepEqual(events.filter(event => /^(start|append|finalize|refresh)/.test(event)), ["start", "append:0:0", "finalize:1", "refresh"]);
+	assert.equal(appendRequests.length, 1);
+	assert.deepEqual(appendRequests[0].segments.map(segment => ({ direction: segment.direction, bytes: segment.bytes })), [
+		{ direction: "rx", bytes: [0x10, 0x11] }
+	]);
 	assert.equal(events.at(-1), "toast:Capture finalized and stored");
 	assert.equal(controller.hasUnacknowledgedBytes(), false);
 	assert.equal((capture as Capture & { lifecycle?: string }).lifecycle, "finalized");
