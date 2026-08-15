@@ -31,7 +31,7 @@ export const archiveQueryKeys = {
 	snapshot: () => [...archiveRoot, "snapshot"] as const,
 	index: () => [...archiveRoot, "index"] as const,
 	captures: () => [...archiveRoot, "captures"] as const,
-	capture: (captureId: string) => [...archiveQueryKeys.captures(), captureId] as const,
+	capture: (captureId: string) => [...archiveQueryKeys.captures(), "detail", captureId] as const,
 	captureSummaries: () => [...archiveQueryKeys.captures(), "summaries"] as const,
 	folders: () => [...archiveRoot, "folders"] as const,
 	queue: () => [...archiveRoot, "queue"] as const,
@@ -189,31 +189,10 @@ export const archiveMutationCachePolicy: ArchiveMutationCachePolicy = {
 		archiveQueryKeys.history()
 	],
 	saveSettings: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.settings()],
-	createCapture: (_command, result) => [
-		archiveQueryKeys.snapshot(),
-		archiveQueryKeys.captures(),
-		archiveQueryKeys.captureSummaries(),
-		archiveQueryKeys.capture(result.captureId)
-	],
-	patchMetadata: command => [
-		archiveQueryKeys.snapshot(),
-		archiveQueryKeys.capture(command.captureId),
-		archiveQueryKeys.captures(),
-		archiveQueryKeys.captureSummaries()
-	],
-	startCanonicalization: (captureId, job) => [
-		archiveQueryKeys.snapshot(),
-		archiveQueryKeys.capture(captureId),
-		archiveQueryKeys.captureSummaries(),
-		archiveQueryKeys.canonicalization(captureId),
-		archiveQueryKeys.canonicalizationJob(captureId, job.id)
-	],
-	deleteCapture: captureId => [
-		archiveQueryKeys.snapshot(),
-		archiveQueryKeys.captures(),
-		archiveQueryKeys.captureSummaries(),
-		archiveQueryKeys.capture(captureId)
-	]
+	createCapture: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.captures()],
+	patchMetadata: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.captures()],
+	startCanonicalization: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.captures()],
+	deleteCapture: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.captures()]
 };
 
 export async function invalidateArchiveMutationCache<Name extends ArchiveMutationName>(
