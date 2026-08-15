@@ -365,7 +365,7 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		toggleFolder: captureController.toggleArchiveFolder,
 		moveCapture: captureController.moveArchiveCapture,
 		upgradeCapture: captureController.upgradeCapture,
-		duplicateCapture: captureController.duplicateArchiveCapture,
+		duplicateCapture: () => captureController.duplicateActiveCapture(),
 		deleteCapture: captureController.deleteArchiveCapture,
 		openNewCapture: () => captureController.publishContextDialog(true),
 		openExport: () => publishDialogCommand({ type: "export" }),
