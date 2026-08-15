@@ -85,6 +85,54 @@ test("canonical optimistic mutations route through dedicated commands", async ()
 	assert.deepEqual(capture.byteStream, []);
 });
 
+test("canonical storage state wins when the status lookup is stale during rename", async () => {
+	const capture: Capture = {
+		id: "canonical-rename",
+		name: "Before",
+		storageStatus: "canonical",
+		metadataRevision: 1,
+		messages: [],
+		byteStream: [],
+		frameSections: [],
+		params: [],
+		notes: [],
+		annotations: {},
+		patternRemarks: {}
+	};
+	const calls: string[] = [];
+	const writer = {
+		patchMetadata: async () => {
+			calls.push("metadata");
+			return { metadataRevision: 2, updatedAt: "now" };
+		}
+	} as unknown as CaptureWriter;
+	const state = { captures: [capture], folders: [], unfiledCollapsed: false } as unknown as AppState;
+	const controller = createCaptureController({
+		state,
+		capture: () => capture,
+		getActiveId: () => capture.id,
+		setActiveId: () => {},
+		saveState: () => { throw new Error("canonical rename used legacy persistence"); },
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => false, stopRecording: async () => {} },
+		publishArchiveState: () => {},
+		publishCaptureHeaderState: () => {},
+		publishNotesState: () => {},
+		publishDialogCommand: () => {},
+		captureWriter: writer,
+		isCanonicalCapture: () => false
+	});
+
+	controller.commitCaptureTitle("After");
+	await new Promise(resolve => setTimeout(resolve, 0));
+
+	assert.deepEqual(calls, ["metadata"]);
+	assert.equal(capture.metadataRevision, 2);
+});
+
 test("serializes metadata and framing revisions while coalescing the latest optimistic state", async () => {
 	const capture: Capture = {
 		id: "queued-capture",

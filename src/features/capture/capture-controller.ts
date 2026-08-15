@@ -113,11 +113,15 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	}
 
 	function isCanonical(item: Capture | undefined): item is Capture & { id: string } {
-		return Boolean(item?.id && dependencies.captureWriter && dependencies.isCanonicalCapture?.(String(item.id)));
+		if (!item?.id || !dependencies.captureWriter) return false;
+		if (item.storageStatus === "canonical") return true;
+		return item.storageStatus === undefined && Boolean(dependencies.isCanonicalCapture?.(String(item.id)));
 	}
 
 	function isConversionLocked(item: Capture | undefined): boolean {
-		return Boolean(item?.id && dependencies.isCaptureConversionLocked?.(String(item.id)));
+		if (!item?.id) return false;
+		if (item.storageStatus === "converting") return true;
+		return item.storageStatus === undefined && Boolean(dependencies.isCaptureConversionLocked?.(String(item.id)));
 	}
 
 	function rejectLockedMutation(item: Capture | undefined): boolean {
