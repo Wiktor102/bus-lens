@@ -152,6 +152,7 @@ export function createArchiveDataLayer(
 	storage?: ArchiveDataLayerStorage
 ): ArchiveDataLayer {
 	const queries = createArchiveQueryOptions(client);
+	let settingsWriteChain: Promise<void> = Promise.resolve();
 	const mutationSuccess = <Name extends ArchiveMutationName>(
 		name: Name,
 		result: Parameters<ReturnType<typeof createArchiveMutationSuccessHandler<Name>>>[0],
@@ -286,11 +287,18 @@ export function createArchiveDataLayer(
 
 	async function saveSettings(settings: Partial<SendSettings>): Promise<void> {
 		const previous = queryClient.getQueryData<SendSettings>(archiveQueryKeys.settings());
-		queryClient.setQueryData(archiveQueryKeys.settings(), normalizeArchiveSettings({ ...previous, ...settings }));
+		const optimistic = normalizeArchiveSettings({ ...previous, ...settings });
+		queryClient.setQueryData(archiveQueryKeys.settings(), optimistic);
+		const write = settingsWriteChain
+			.catch(() => {})
+			.then(() => run("saveSettings", { settings: optimistic }, () => client.saveSettings(optimistic)));
+		settingsWriteChain = write;
 		try {
-			await run("saveSettings", { settings }, () => client.saveSettings(settings));
+			await write;
 		} catch (error) {
-			rollbackQuery(archiveQueryKeys.settings(), previous);
+			if (queryClient.getQueryData(archiveQueryKeys.settings()) === optimistic) {
+				rollbackQuery(archiveQueryKeys.settings(), previous);
+			}
 			throw error;
 		}
 	}

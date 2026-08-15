@@ -188,7 +188,10 @@ export const archiveMutationCachePolicy: ArchiveMutationCachePolicy = {
 		archiveQueryKeys.queue(),
 		archiveQueryKeys.history()
 	],
-	saveSettings: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.settings()],
+	// Settings are optimistically normalized in the data layer and persisted by
+	// its coalescing write queue. Refetching the whole archive for every draft
+	// keystroke would undo that batching and needlessly wake unrelated consumers.
+	saveSettings: () => [],
 	createCapture: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.captures()],
 	patchMetadata: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.captures()],
 	startCanonicalization: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.captures()],

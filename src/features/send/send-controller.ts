@@ -44,6 +44,9 @@ export function createSendController(dependencies: SendControllerDependencies) {
 	let queueDelayTimer: ReturnType<typeof setTimeout> | null = null;
 	let queueDelayResolve: (() => void) | null = null;
 	let retryOperation: (() => Promise<void>) | null = null;
+	let settingsPersistTimer: ReturnType<typeof setTimeout> | null = null;
+	let settingsWriteInFlight: Promise<void> | null = null;
+	let pendingSettingsWrite: { desired: SendSettings; previous: SendSettings } | null = null;
 
 	function reportPersistenceFailure(error: unknown, retry: () => Promise<void>): void {
 		retryOperation = retry;
@@ -96,8 +99,42 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		}
 	}
 
-	function persistSettings(previous: SendSettings): void {
-		void writeSettings({ ...state.sendSettings }, previous).catch(() => {});
+	function flushPendingSettings(): void {
+		if (settingsWriteInFlight || !pendingSettingsWrite) return;
+		const pending = pendingSettingsWrite;
+		pendingSettingsWrite = null;
+		const write = writeSettings(pending.desired, pending.previous);
+		settingsWriteInFlight = write;
+		void write.then(
+			() => {
+				settingsWriteInFlight = null;
+				flushPendingSettings();
+			},
+			() => {
+				settingsWriteInFlight = null;
+				flushPendingSettings();
+			}
+		);
+	}
+
+	function persistSettings(previous: SendSettings, immediate = false): void {
+		if (!dependencies.archiveCommands) return;
+		pendingSettingsWrite = {
+			desired: { ...state.sendSettings },
+			previous: pendingSettingsWrite?.previous || previous
+		};
+		if (immediate) {
+			if (settingsPersistTimer) clearTimeout(settingsPersistTimer);
+			settingsPersistTimer = null;
+			flushPendingSettings();
+			return;
+		}
+		if (settingsPersistTimer === null) {
+			settingsPersistTimer = setTimeout(() => {
+				settingsPersistTimer = null;
+				flushPendingSettings();
+			}, 75);
+		}
 	}
 
 	function persistQueueItem(item: SendQueueEntry, position: number): Promise<void> {
@@ -222,7 +259,7 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		if (!sent) return false;
 		const previousSettings = { ...state.sendSettings };
 		state.sendSettings.draft = "";
-		persistSettings(previousSettings);
+		persistSettings(previousSettings, true);
 		dependencies.publishSendState();
 		return true;
 	}
@@ -252,7 +289,7 @@ export function createSendController(dependencies: SendControllerDependencies) {
 				clearPersistenceFailure();
 			});
 		});
-		persistSettings(previousSettings);
+		persistSettings(previousSettings, true);
 		dependencies.publishSendState();
 		dependencies.showToast("Message added to transmit queue");
 		return true;
@@ -291,7 +328,7 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		const draft = (item.bytes as number[]).map(hexByte).join(" ");
 		const previousSettings = { ...state.sendSettings };
 		state.sendSettings.draft = draft;
-		persistSettings(previousSettings);
+		persistSettings(previousSettings, true);
 		dependencies.publishSendState();
 		return draft;
 	}

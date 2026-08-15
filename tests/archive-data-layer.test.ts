@@ -3,7 +3,7 @@ import test from "node:test";
 import { ArchiveClient, type ArchiveIndex } from "../src/persistence/archive-client.ts";
 import { createArchiveDataLayer } from "../src/data/archive-data-layer.ts";
 import { createTestQueryClient } from "../src/test-utils/query-client.ts";
-import type { AppState, SendQueueEntry } from "../src/shared/app-state.ts";
+import type { AppState, SendQueueEntry, SendSettings } from "../src/shared/app-state.ts";
 
 type TestServer = {
 	state: AppState;
@@ -143,6 +143,32 @@ test("query data reflects named queue and settings commands without AppState per
 	await reloaded.ready;
 	assert.deepEqual(reloaded.queryClient.getQueryData<SendQueueEntry[]>(reloaded.queries.queue().queryKey), [item]);
 	assert.equal(reloaded.queryClient.getQueryData<{ delayMs?: number }>(reloaded.queries.settings().queryKey)?.delayMs, 250);
+});
+
+test("serializes concurrent settings writes and keeps the latest optimistic value", async () => {
+	const server = emptyServer();
+	const client = createTestClient(server);
+	const writes: string[] = [];
+	let releaseFirst!: () => void;
+	const firstWrite = new Promise<void>(resolve => { releaseFirst = resolve; });
+	client.saveSettings = async settings => {
+		writes.push(String(settings.draft));
+		if (writes.length === 1) await firstWrite;
+		server.state.sendSettings = { ...(server.state.sendSettings ?? {}), ...structuredClone(settings) };
+	};
+	const layer = createArchiveDataLayer(createTestQueryClient(), client);
+	await layer.ready;
+
+	const first = layer.commands.saveSettings({ draft: "A" });
+	const latest = layer.commands.saveSettings({ draft: "AB" });
+	assert.equal(layer.queryClient.getQueryData<SendSettings>(layer.queries.settings().queryKey)?.draft, "AB");
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.deepEqual(writes, ["A"]);
+
+	releaseFirst();
+	await Promise.all([first, latest]);
+	assert.deepEqual(writes, ["A", "AB"]);
+	assert.equal(server.state.sendSettings?.draft, "AB");
 });
 
 test("migrates a legacy local archive before removing its compatibility copy", async () => {
