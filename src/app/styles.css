@@ -2546,10 +2546,22 @@ tr:hover .row-action,
 	font: 10px var(--mono);
 }
 .parameter-row button {
+	display: grid;
+	place-items: center;
+	padding: 0;
 	border: 1px solid var(--line);
 	background: transparent;
 	color: var(--muted);
 	cursor: pointer;
+}
+.parameter-row button svg {
+	width: 17px;
+	height: 17px;
+	fill: none;
+	stroke: currentColor;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 1.6;
 }
 .serial-settings {
 	display: grid;
