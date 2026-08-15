@@ -1,3 +1,4 @@
+import { availableParallelism } from "node:os";
 import { Worker } from "node:worker_threads";
 import { AgentQueryError, requiredCaptureId, type AgentResponse } from "./agent-contracts.ts";
 import type {
@@ -32,10 +33,9 @@ import type { AgentProtocolReportInput, AgentProtocolReportResult } from "./prot
 import type { McpQueryRequest, McpQueryWorkerResponse } from "./mcp-query-worker.ts";
 
 export const MCP_TOOL_TIMEOUT_MS = 5_000;
-// Worker startup opens a SQLite connection and is expensive enough that an
-// unbounded burst can starve the service event loop even though the query
-// itself is isolated from the writer connection.
-export const MCP_MAX_CONCURRENT_WORKERS = 4;
+// Worker startup opens a SQLite connection and is expensive enough that one
+// logical processor should remain available for service and MCP request work.
+export const MCP_MAX_CONCURRENT_WORKERS = Math.max(1, availableParallelism() - 1);
 
 const QUERY_WORKER_URL = new URL("./mcp-query-worker.ts", import.meta.url);
 
