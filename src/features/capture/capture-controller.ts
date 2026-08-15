@@ -108,13 +108,18 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	const state = dependencies.state as ActiveAppState;
 	const captureWriteQueues = new Map<string, CaptureWriteQueue>();
 	const patternRemarkWriteQueues = new Map<string, Map<string, PatternRemarkWriteQueue>>();
+	const captureCommandWrites = new Map<string, Set<Promise<unknown>>>();
 
 	function capture(): ActiveCapture | undefined {
 		return dependencies.capture() as ActiveCapture | undefined;
 	}
 
 	function isCanonical(item: Capture | undefined): item is Capture & { id: string } {
-		return Boolean(item?.id && (dependencies.archiveCommands || dependencies.captureWriter) && dependencies.isCanonicalCapture?.(String(item.id)));
+		return Boolean(
+			item?.id &&
+			(dependencies.archiveCommands || dependencies.captureWriter) &&
+			(dependencies.isCanonicalCapture?.(String(item.id)) || item.storageStatus === "canonical")
+		);
 	}
 
 	function isConversionLocked(item: Capture | undefined): boolean {
@@ -505,12 +510,25 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			const captureQueue = captureWriteQueues.get(captureId);
 			const patternQueues = patternRemarkWriteQueues.get(captureId);
 			const running = [
+				...(captureCommandWrites.get(captureId) || []),
 				...(captureQueue?.running ? [captureQueue.running] : []),
 				...(patternQueues ? [...patternQueues.values()].flatMap(queue => queue.running ? [queue.running] : []) : [])
 			];
 			if (!running.length) return;
 			await Promise.all(running);
 		}
+	}
+
+	function trackCaptureCommand(captureId: string, write: Promise<unknown>): void {
+		const writes = captureCommandWrites.get(captureId) || new Set<Promise<unknown>>();
+		writes.add(write);
+		captureCommandWrites.set(captureId, writes);
+		const remove = () => {
+			writes.delete(write);
+			if (!writes.size) captureCommandWrites.delete(captureId);
+		};
+		void write.then(remove, remove);
+		dependencies.trackCaptureWrite?.(captureId, write);
 	}
 
 	function metadataPatch(item: ActiveCapture): void {
@@ -738,7 +756,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		dependencies.setActiveId(copy.id);
 		dependencies.setSelectedCaptureId?.(String(copy.id));
 		if (isCanonical(source)) {
-			void (dependencies.archiveCommands
+			const duplicateWrite = (dependencies.archiveCommands
 				? dependencies.archiveCommands.duplicateCapture(source.id, String(copy.id))
 				: dependencies.captureWriter!.duplicate({ captureId: source.id, duplicateCaptureId: String(copy.id) }))
 				.then(() => dependencies.refreshCapture?.(String(copy.id)))
@@ -753,6 +771,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 					reportFailure(source.id, error);
 					dependencies.render();
 				});
+			trackCaptureCommand(String(source.id), duplicateWrite);
+			trackCaptureCommand(String(copy.id), duplicateWrite);
 		} else persistLegacyCapture(copy);
 		persistArchiveIndex();
 		dependencies.render();
@@ -774,7 +794,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				return;
 			}
 		}
-		await waitForCaptureWrites(captureId);
+		await dependencies.waitForCaptureWrite?.(String(captureId));
+		await waitForCaptureWrites(String(captureId));
 		item = state.captures.find(captureItem => captureItem.id === captureId);
 		if (!item) return;
 		state.captures = state.captures.filter(captureItem => captureItem.id !== captureId);

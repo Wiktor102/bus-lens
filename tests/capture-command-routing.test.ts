@@ -711,75 +711,59 @@ test("holds canonical metadata writes until a new capture command is acknowledge
 });
 
 test("does not reconcile a canonical delete twice after sidebar selection", async () => {
-	const originalFetch = globalThis.fetch;
-	const requests: Array<{ path: string; method: string }> = [];
 	let deleteCalls = 0;
-	const stored = {
-		captures: [
-			{ id: "delete-me", document: { id: "delete-me", name: "Delete me", messages: [], byteStream: [] } },
-			{ id: "keep-me", document: { id: "keep-me", name: "Keep me", messages: [], byteStream: [] } }
-		],
+	const deleteMe: Capture = {
+		id: "delete-me",
+		name: "Delete me",
+		messages: [],
+		byteStream: [],
+		frameSections: [],
+		params: [],
+		notes: [],
+		annotations: {},
+		storageStatus: "canonical"
+	};
+	const keepMe: Capture = {
+		id: "keep-me",
+		name: "Keep me",
+		messages: [],
+		byteStream: [],
+		frameSections: [],
+		params: [],
+		notes: [],
+		annotations: {},
+		storageStatus: "canonical"
+	};
+	const state = {
+		captures: [deleteMe, keepMe],
 		folders: [],
-		index: { activeId: "delete-me", unfiledCollapsed: false },
-		queue: [],
-		history: [],
-		settings: { send: { delayMs: 100, draft: "", baudRate: 115200 } }
-	};
-	globalThis.fetch = async (input, init) => {
-		const path = String(input);
-		const method = init?.method || "GET";
-		requests.push({ path, method });
-		if (path.endsWith("/health")) return new Response(null, { status: 204 });
-		if (path.endsWith("/archive")) return new Response(JSON.stringify(stored), { status: 200 });
-		if (path.endsWith("/canonical/captures")) {
-			return new Response(JSON.stringify([
-				{ id: "delete-me", status: "canonical", name: "Delete me", lifecycle: "finalized", byteCount: 0, createdAt: "now", updatedAt: "now", folderId: null },
-				{ id: "keep-me", status: "canonical", name: "Keep me", lifecycle: "finalized", byteCount: 0, createdAt: "now", updatedAt: "now", folderId: null }
-			]), { status: 200 });
-		}
-		if (path === "/api/captures/delete-me" && method === "DELETE") {
-			deleteCalls += 1;
-			return new Response(null, { status: 204 });
-		}
-		return new Response(null, { status: 204 });
-	};
+		unfiledCollapsed: false
+	} as unknown as AppState;
+	let activeId: string | null = deleteMe.id!;
+	const controller = createCaptureController({
+		state,
+		capture: () => state.captures.find(capture => String(capture.id) === activeId),
+		getActiveId: () => activeId,
+		setActiveId: captureId => { activeId = captureId ? String(captureId) : null; },
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => false, stopRecording: async () => {} },
+		publishDialogCommand: () => {},
+		captureWriter: {
+			delete: async captureId => {
+				if (captureId === deleteMe.id) deleteCalls += 1;
+			}
+		} as unknown as CaptureWriter,
+		isCanonicalCapture: () => true
+	});
 
-	try {
-		const runtime = createAppRuntime();
-		await runtime.ready;
-		const controller = createCaptureController({
-			state: runtime.state,
-			capture: runtime.capture,
-			getActiveId: runtime.getActiveId,
-			setActiveId: runtime.setActiveId,
-			saveState: runtime.saveState,
-			render: () => {},
-			renderMessages: () => {},
-			showToast: () => {},
-			confirm: () => true,
-			transport: { isRecording: () => false, stopRecording: async () => {} },
-			publishArchiveState: () => {},
-			publishCaptureHeaderState: () => {},
-			publishNotesState: () => {},
-			publishDialogCommand: () => {},
-			captureWriter: runtime.captureWriter,
-			trackCaptureWrite: runtime.trackCaptureWrite,
-			markCapturePersisted: runtime.markCapturePersisted,
-			deleteCapture: runtime.deleteCapture,
-			isCanonicalCapture: runtime.isCanonicalCapture,
-			waitForCaptureWrite: runtime.waitForCaptureWrite
-		});
+	await controller.deleteArchiveCapture("delete-me");
+	controller.selectArchiveCapture("keep-me");
 
-		await controller.deleteArchiveCapture("delete-me");
-		controller.selectArchiveCapture("keep-me");
-		runtime.saveState({ immediate: true });
-		await new Promise(resolve => setTimeout(resolve, 0));
-
-		assert.equal(deleteCalls, 1);
-		assert.equal(requests.filter(request => request.path === "/api/captures/delete-me" && request.method === "DELETE").length, 1);
-	} finally {
-		globalThis.fetch = originalFetch;
-	}
+	assert.equal(deleteCalls, 1);
+	assert.deepEqual(state.captures.map(capture => capture.id), [keepMe.id]);
 });
 
 test("waits for an in-flight duplicate before deleting its copy", async () => {

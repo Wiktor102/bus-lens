@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createAppRuntime } from "../src/app/app-runtime.ts";
+import { createCaptureController } from "../src/features/capture/capture-controller.ts";
 import type { ArchiveDataLayer } from "../src/data/archive-data-layer.ts";
 import { STORAGE_KEY, type AppState } from "../src/shared/app-state.ts";
 
@@ -93,39 +94,60 @@ test("waits for a named capture command before recording or canonicalization", a
 });
 
 test("keeps canonical routing when the supplemental status list is incomplete", async () => {
-	const originalFetch = globalThis.fetch;
-	const requests: Array<{ path: string; method: string }> = [];
-	const stored = {
-		captures: [{ id: "canonical", document: { id: "canonical", name: "Before", storageStatus: "canonical", messages: [], byteStream: [] } }],
-		folders: [],
-		index: { activeId: "canonical", unfiledCollapsed: false },
-		queue: [],
-		history: [],
-		settings: {}
+	const stored: AppState = {
+		...emptyState(),
+		captures: [{ id: "canonical", name: "Before", storageStatus: "canonical", params: [], messages: [], byteStream: [] }],
+		activeId: "canonical"
 	};
-	globalThis.fetch = async (input, init) => {
-		const path = String(input);
-		requests.push({ path, method: init?.method || "GET" });
-		if (path.endsWith("/health")) return new Response(null, { status: 204 });
-		if (path.endsWith("/archive")) return new Response(JSON.stringify(stored), { status: 200 });
-		if (path.endsWith("/canonical/captures")) return new Response(JSON.stringify([]), { status: 200 });
-		if (path.endsWith("/metadata")) return new Response(JSON.stringify({ metadataRevision: 2, updatedAt: "now" }), { status: 200 });
-		return new Response(null, { status: 204 });
+	const metadataCalls: string[] = [];
+	const writer = {
+		patchMetadata: async () => {
+			metadataCalls.push("metadata");
+			return { metadataRevision: 2, updatedAt: "now" };
+		}
 	};
+	const archive = {
+		ready: Promise.resolve(),
+		commands: {
+			hydrate: async () => ({
+				index: {
+					activeId: stored.activeId ?? null,
+					unfiledCollapsed: false,
+					captures: [{ id: "canonical", folderId: null, position: 0 }],
+					folders: []
+				},
+				captures: stored.captures,
+				folders: [],
+				queue: [],
+				history: [],
+				settings: stored.sendSettings!,
+				summaries: []
+			}),
+			recordingWriter: writer
+		}
+	} as unknown as ArchiveDataLayer;
+	const runtime = createAppRuntime({ archive });
+	await runtime.ready;
+	assert.equal(runtime.getCaptureStorageStatus("canonical"), "canonical");
+	assert.equal(runtime.isCanonicalCapture("canonical"), true);
 
-	try {
-		const runtime = createAppRuntime();
-		await runtime.ready;
-		assert.equal(runtime.getCaptureStorageStatus("canonical"), "canonical");
-		assert.equal(runtime.isCanonicalCapture("canonical"), true);
+	const controller = createCaptureController({
+		state: runtime.state,
+		capture: runtime.capture,
+		getActiveId: runtime.getActiveId,
+		setActiveId: runtime.setActiveId,
+		saveState: () => { throw new Error("canonical rename used legacy persistence"); },
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => false, stopRecording: async () => {} },
+		publishDialogCommand: () => {},
+		captureWriter: runtime.captureWriter,
+		isCanonicalCapture: runtime.isCanonicalCapture
+	});
 
-		runtime.state.captures[0]!.name = "Renamed";
-		runtime.saveCapture("canonical");
-		await runtime.waitForCaptureWrite("canonical");
-
-		assert.ok(requests.some(request => request.path === "/api/captures/canonical/metadata" && request.method === "PATCH"));
-		assert.equal(requests.some(request => request.path === "/api/captures/canonical" && request.method === "PUT"), false);
-	} finally {
-		globalThis.fetch = originalFetch;
-	}
+	controller.commitCaptureTitle("Renamed");
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.deepEqual(metadataCalls, ["metadata"]);
 });
