@@ -360,7 +360,8 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 			profileVersion: z.number().int().nonnegative().optional(),
 			sourceDataRevision: z.number().int().nonnegative().optional(),
 			rowsBefore: z.number().int().positive().max(100).optional(),
-			rowsAfter: z.number().int().positive().max(100).optional()
+			rowsAfter: z.number().int().positive().max(100).optional(),
+			includeNoteSummaries: z.boolean().optional()
 		}),
 		input => queries.getMessageContext(input as AgentMessageContextInput),
 		response => `Returned ${response.meta.page?.returned ?? (response.data as AgentMessageContext).messages.length} frames around the selected stable frame.`,

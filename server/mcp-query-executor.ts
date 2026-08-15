@@ -9,10 +9,14 @@ import type {
 	AgentCaptureDifferenceResult,
 	AgentCaptureDiscovery,
 	AgentCaptureOverview,
+	AgentFramingProfiles,
+	AgentFramingProfilesInput,
 	AgentMessageContext,
 	AgentMessageContextInput,
 	AgentMessageQueryInput,
 	AgentMessageQueryResult,
+	AgentNoteQueryInput,
+	AgentNoteQueryResult,
 	AgentRawRead,
 	AgentRawReadInput,
 	AgentSequenceGroupsInput,
@@ -141,6 +145,10 @@ export class McpQueryExecutor {
 		return this.run({ operation: "capture-overview", captureId, snapshot });
 	}
 
+	listFramingProfiles(input: AgentFramingProfilesInput): Promise<AgentResponse<AgentFramingProfiles>> {
+		return this.run<AgentResponse<AgentFramingProfiles>>({ operation: "framing-profiles", input });
+	}
+
 	compareCaptures(input: AgentCompareCapturesInput): Promise<AgentResponse<AgentComparisonResult>> {
 		return this.run<AgentResponse<AgentComparisonResult>>({ operation: "comparison", input });
 	}
@@ -151,6 +159,10 @@ export class McpQueryExecutor {
 
 	getMessageContext(input: AgentMessageContextInput): Promise<AgentResponse<AgentMessageContext>> {
 		return this.run<AgentResponse<AgentMessageContext>>({ operation: "message-context", input });
+	}
+
+	queryNotes(input: AgentNoteQueryInput = {}): Promise<AgentResponse<AgentNoteQueryResult>> {
+		return this.run<AgentResponse<AgentNoteQueryResult>>({ operation: "notes", input });
 	}
 
 	getSequenceGroups(input: AgentSequenceGroupsInput): Promise<AgentResponse<AgentSequenceGroupsResult>> {

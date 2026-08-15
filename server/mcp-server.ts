@@ -11,7 +11,7 @@ import {
 import { toNodeHandler, type NodeMcpRequestHandler } from "@modelcontextprotocol/node";
 import { z } from "zod";
 import { AgentQueryError, type AgentResponse } from "./agent-contracts.ts";
-import type { AgentCaptureDiscovery, AgentCaptureOverview, CaptureDiscoveryFiltersInput } from "./canonical-query.ts";
+import type { AgentCaptureDiscovery, AgentCaptureOverview, AgentFramingProfiles, CaptureDiscoveryFiltersInput } from "./canonical-query.ts";
 import { ALLOW_AGENT_AUTHORED_NOTES_SETTING, CanonicalCaptureCommandService } from "./canonical-capture-command-service.ts";
 import type { SqliteDatabase } from "./database.ts";
 import { McpQueryExecutor, MCP_TOOL_TIMEOUT_MS } from "./mcp-query-executor.ts";
@@ -23,7 +23,7 @@ export const MCP_SERVER_NAME = "Bus Lens Agent Access";
 export const MCP_REQUEST_LIMIT_BYTES = 256 * 1024;
 export const MCP_RESPONSE_LIMIT_BYTES = 96 * 1024;
 
-const SERVER_INSTRUCTIONS = `Bus Lens is a local-first RS-485 capture analysis workbench. Use an overview-first workflow: list_captures, get_capture_overview, then choose a bounded analytical drill-down. Every analytical result is pinned to a capture/profile/source-data snapshot and is pageable. Raw bytes are available only through an explicit bounded read in a later tool surface. MCP exposes read-only analysis and evidence-linked notes when enabled; it never exposes framing mutation, capture control, replay, queue, serial, or ESP32 operations. Analytical reads run in a disposable read-only worker and are cancelled if they exceed ${MCP_TOOL_TIMEOUT_MS / 1000} seconds.`;
+const SERVER_INSTRUCTIONS = `Bus Lens is a local-first RS-485 capture analysis workbench. Use an overview-first workflow: list_captures, list_framing_profiles, get_capture_overview, then choose a bounded analytical drill-down. Raw bytes are source data; interpreted frames are a versioned framing-profile view. Select raw data explicitly with read_raw_bytes, or pass the exact profileId, profileVersion, and sourceDataRevision returned by list_framing_profiles to analyze current or historical framing. Hidden bytes/frames remain retained evidence and can be included or excluded; deleted or cleared data is unavailable. Use query_notes for bounded note text and exact anchors, and use get_message_context with includeNoteSummaries when IDs alone are insufficient. MCP exposes read-only analysis and append-only evidence-linked notes when enabled; it never exposes framing mutation, capture control, replay, queue, serial, or ESP32 operations. Analytical reads run in a disposable read-only worker and are cancelled if they exceed ${MCP_TOOL_TIMEOUT_MS / 1000} seconds.`;
 
 export const BUS_LENS_GUIDE = `# Bus Lens agent guide
 
@@ -32,6 +32,22 @@ export const BUS_LENS_GUIDE = `# Bus Lens agent guide
 Bus Lens evidence is organized as capture → framing profile → profile revision → section → frame. Raw bytes are the immutable byte stream; interpreted frames are a view produced by a versioned framing profile. A capture may retain active and historical framing revisions. A stable snapshot reference names the capture ID, profile ID, profile version, and source data revision.
 
 Sequence groups describe repeated signature sequences. Occurrences are the individual appearances of one group in a frame stream. Notes target stable evidence such as a capture, raw byte/range, frame/range, or sequence group.
+
+## Raw versus interpreted data
+
+Raw data is the retained byte stream with absolute offsets, timestamps, directions, and visibility state. It is the source evidence and does not depend on a framing interpretation. Interpreted data is the set of materialized frames, sections, signatures, transitions, and sequence groups produced by one framing profile. The same raw bytes can therefore have different interpreted frames under different profiles.
+
+Call list_framing_profiles before choosing an interpretation. Its selectionOptions.raw reference is for read_raw_bytes; selectionOptions.current is the active framing snapshot; selectionOptions.historical contains explicit historical profile snapshots. For analytical tools, copy captureId, profileId, profileVersion, and sourceDataRevision from the chosen framing reference. Do not infer a historical profile from its version alone: profileId, profileVersion, and sourceDataRevision together identify the evidence.
+
+## Hidden versus deleted data
+
+Hidden bytes and frames are still retained. Hidden policy controls whether analytical results include them, and raw reads can mask, include, or omit hidden bytes. Hiding is therefore an evidence-visibility decision, not deletion. Deleted notes, deleted captures, and cleared raw capture data are no longer queryable evidence; do not treat their absence as proof that the underlying observation never existed.
+
+## Notes and evidence navigation
+
+Use query_notes to discover note content rather than relying on the bounded previews in get_capture_overview. Filter by capture, note ID, frame ID, raw range, author type, or creation time; each result includes bounded text and exact capture/profile/frame/raw-range anchors. Pagination cursors are opaque and must be reused with the same filters. get_message_context normally returns note IDs; set includeNoteSummaries when the nearby note text is needed in the same bounded response.
+
+Notes are annotations, not new measurements. Use them to record actions taken (for example, a byte range was hidden, a framing hypothesis was tested, or a profile was selected) and known states (for example, a device was idle, a response was expected, or a capture boundary is trusted). Keep the note text concise, state what is observed versus assumed, and preserve the returned anchors and profile snapshot when drawing a conclusion.
 
 ## Storage and limits
 
@@ -44,9 +60,10 @@ Analytical reads execute against a separate read-only SQLite connection in a dis
 ## Recommended overview-first workflow
 
 1. Call list_captures with a narrow name, folder, view, lifecycle, or date filter when possible.
-2. Call get_capture_overview for one canonical capture. Read its sections, counts, signatures, transitions, byte-position summary, sequence-group summaries, notes, and available bounds.
-3. Select one drill-down operation based on that overview: message filters for an unusual signature, sequence-group occurrences for repetition, message context for local neighbors, byte statistics for varying positions, transitions for behavior changes, or a bounded raw read for a specific absolute range.
-4. Preserve conclusions with an evidence-linked agent note only when annotation is enabled.
+2. Call list_framing_profiles for that capture and deliberately choose raw data, the current profile, or one historical profile.
+3. Call get_capture_overview with the selected framing snapshot when interpreting frames. Read its sections, counts, signatures, transitions, byte-position summary, sequence-group summaries, note previews, and available bounds.
+4. Select one drill-down operation based on that overview: query_messages for an unusual signature or raw overlap, query_notes for the note content and anchors, sequence-group occurrences for repetition, message context for local neighbors, byte statistics for varying positions, transitions for behavior changes, or a bounded raw read for a specific absolute range.
+5. Preserve conclusions with an evidence-linked agent note only when annotation is enabled. Record actions and known states with the relevant raw or profile-linked target.
 
 Unavailable operations include changing framing, changing visibility, creating/deleting captures, recording, replay, queue control, serial access, and ESP32/hardware control.
 `;
@@ -140,6 +157,12 @@ function synopsisForOverview(response: AgentResponse<AgentCaptureOverview>): str
 	return `${overview.capture.name} has ${overview.counts.frames ?? 0} framed messages across ${overview.sections.length} section${overview.sections.length === 1 ? "" : "s"}; the response is pinned to profile ${overview.snapshot?.profileVersion ?? "unknown"}.`;
 }
 
+function synopsisForFramingProfiles(response: AgentResponse<AgentFramingProfiles>): string {
+	const profiles = response.data.profiles;
+	const active = response.data.activeProfileId ? ` active profile ${response.data.activeProfileId}` : " no active framing profile";
+	return `Found ${profiles.length} bounded framing profile${profiles.length === 1 ? "" : "s"} for ${response.data.captureId};${active}. Choose a raw or explicit profile selection before analytical reads.`;
+}
+
 function errorResult(error: unknown): { isError: true; structuredContent: AgentResponse<unknown>; content: [{ type: "text"; text: string }] } {
 	const normalized = error instanceof AgentQueryError
 		? error
@@ -217,6 +240,29 @@ function registerOrientationTools(server: McpServer, queries: McpQueryExecutor, 
 					...(input.sourceDataRevision === undefined ? {} : { sourceDataRevision: input.sourceDataRevision })
 				});
 				return { structuredContent: response, content: [{ type: "text" as const, text: synopsisForOverview(response) }] };
+			} catch (error) {
+				return errorResult(error);
+			}
+		}
+	);
+
+	server.registerTool(
+		"list_framing_profiles",
+		{
+			title: "List Bus Lens framing profiles",
+			description: "List the current and historical framing profiles for one capture, including stable IDs, versions, creation times, source-data revisions, bounded framing summaries, and explicit raw/current/historical selection references.",
+			inputSchema: z.object({
+				captureId: z.string().min(1),
+				cursor: z.string().optional(),
+				limit: z.number().int().positive().max(100).optional()
+			}),
+			outputSchema: agentResponseSchema
+		},
+		async (input, context) => {
+			recordClient(context, server);
+			try {
+				const response = await queries.listFramingProfiles(input);
+				return { structuredContent: response, content: [{ type: "text" as const, text: synopsisForFramingProfiles(response) }] };
 			} catch (error) {
 				return errorResult(error);
 			}

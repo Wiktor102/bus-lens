@@ -51,6 +51,23 @@ a reached `page-limit` from a response-size reduction. Cursors remain bound to
 their evidence filters and snapshots, not to page size, so callers may change
 `limit` while continuing with an existing cursor.
 
+## MCP evidence workflow
+
+The MCP guide at `buslens://guide` documents the evidence-navigation workflow.
+Use `list_framing_profiles` before interpreting a capture: choose its raw-data
+selection for `read_raw_bytes`, its current selection for the active framing, or
+one historical selection for a deliberate profile revision. Raw bytes are source
+evidence; interpreted frames and analysis rows belong to the selected profile.
+Pass `profileId`, `profileVersion`, and `sourceDataRevision` together so an
+analytical result cannot silently switch revisions.
+
+Hidden bytes and frames remain retained and can be included or excluded. Deleted
+notes, captures, or cleared raw data are unavailable rather than hidden. Use
+`query_notes` for bounded note text and exact anchors, and request
+`includeNoteSummaries` from `get_message_context` when note IDs alone are not
+enough. Notes can record actions taken and known states; they should distinguish
+observations from hypotheses and retain their evidence anchors.
+
 ## Capture framing
 
 The serial input is a raw binary stream, compatible with ESP32 `Serial.write()`.
