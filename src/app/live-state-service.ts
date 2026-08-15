@@ -1,6 +1,6 @@
 import { deriveCaptureHeaderSnapshot } from "../features/capture/capture-header.ts";
 import { publishCaptureHeaderSnapshot } from "../features/capture/capture-header-bridge.ts";
-import { deriveMessageStreamSnapshot } from "../features/message-stream/message-stream.ts";
+import { deriveMessageStreamSnapshot, type MessageStreamDeriveOptions } from "../features/message-stream/message-stream.ts";
 import { selectFramingToolbarSnapshot } from "../features/capture/framing-toolbar.ts";
 import type { Capture } from "../features/capture/capture-framing.ts";
 import type { SendController } from "../features/send/send-controller.ts";
@@ -20,7 +20,7 @@ export type LiveStateService = {
 	publishCaptureHeaderState: (capture?: Capture) => void;
 	publishSendState: () => void;
 	publishFramingToolbarState: (capture?: Capture) => void;
-	renderMessages: () => void;
+	renderMessages: (options?: MessageStreamDeriveOptions) => void;
 	render: () => void;
 	subscribeToViewStateChanges: () => () => void;
 };
@@ -55,12 +55,12 @@ export function createLiveStateService(dependencies: LiveStateServiceDependencie
 		});
 	}
 
-	function renderMessages(): void {
+	function renderMessages(options: MessageStreamDeriveOptions = {}): void {
 		const capture = dependencies.capture();
 		if (!capture) return;
 		store.send({
 			type: "message-stream/changed",
-			state: deriveMessageStreamSnapshot(capture, getViewState())
+			state: deriveMessageStreamSnapshot(capture, getViewState(), options)
 		});
 	}
 

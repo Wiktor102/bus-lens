@@ -4,6 +4,7 @@ import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
 import type { ApplicationEvent, TransportViewState } from "../../shared/application-store.ts";
 import { recordReceivedByte } from "../capture/capture-summary.ts";
 import { appendLivePreview, rebuildPreview, type Capture } from "../capture/capture-framing.ts";
+import type { MessageStreamDeriveOptions } from "../message-stream/message-stream.ts";
 import {
 	CaptureAppendQueue,
 	type AppendCaptureChunkRequest,
@@ -56,7 +57,7 @@ export type SerialControllerDependencies = {
 	publishFramingToolbarState: (capture?: Capture) => void;
 	publishTransportState?: (state: TransportViewState) => void;
 	publishTransportWorkflow?: (event: TransportWorkflowEvent) => void;
-	renderMessages: () => void;
+	renderMessages: (options?: MessageStreamDeriveOptions) => void;
 	stopSendQueue: () => void;
 	publishSendState?: () => void;
 	serial?: SerialProvider;
@@ -286,7 +287,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		if (!canonicalRecording) persistLiveCapture(capture);
 		dependencies.publishCaptureHeaderState?.(capture);
 		dependencies.publishFramingToolbarState(capture);
-		dependencies.renderMessages();
+		dependencies.renderMessages({ live: recording });
 		if (trimmed) dependencies.showToast(`Capture limit reached; keeping the newest ${MAX_CAPTURE_BYTES.toLocaleString()} bytes`);
 	}
 

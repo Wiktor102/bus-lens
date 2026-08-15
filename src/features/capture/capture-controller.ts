@@ -14,6 +14,7 @@ import {
 	type PatternRemarkSaveInput
 } from "../dialogs/dialog-model.ts";
 import type { RawByteRecord } from "./capture-summary.ts";
+import type { MessageStreamDeriveOptions } from "../message-stream/message-stream.ts";
 import {
 	applySectionFramingSettings,
 	hexByte,
@@ -53,7 +54,7 @@ export type CaptureControllerDependencies = {
 	trackCaptureWrite?: (captureId: string, write: Promise<unknown>) => void;
 	archiveCommands?: ArchiveCommands;
 	render: () => void;
-	renderMessages: () => void;
+	renderMessages: (options?: MessageStreamDeriveOptions) => void;
 	showToast: (message: string) => void;
 	confirm: (message: string) => boolean;
 	transport: Pick<SerialController, "isRecording" | "stopRecording">;
