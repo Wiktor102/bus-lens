@@ -7,13 +7,13 @@ import {
 	type AgentComparisonCategory,
 	type AgentComparisonResult
 } from "./canonical-query.ts";
-import { agentResponseSchema } from "./mcp-server.ts";
+import { agentResponseSchema, captureIdSchema } from "./mcp-server.ts";
 import type { McpQueryExecutor } from "./mcp-query-executor.ts";
 
 type RecordClient = (context: unknown, server: McpServer) => void;
 
 const snapshotSchema = z.object({
-	captureId: z.string().min(1),
+	captureId: captureIdSchema,
 	profileId: z.string().min(1),
 	profileVersion: z.number().int().positive(),
 	sourceDataRevision: z.number().int().nonnegative()

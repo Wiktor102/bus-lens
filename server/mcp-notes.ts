@@ -14,7 +14,7 @@ import {
 	type CreateAgentNoteRequest
 } from "./canonical-capture-command-service.ts";
 import type { AgentNoteQueryInput, AgentNoteQueryResult } from "./canonical-query.ts";
-import { getMcpClientAttribution, agentResponseSchema } from "./mcp-server.ts";
+import { captureIdSchema, getMcpClientAttribution, agentResponseSchema } from "./mcp-server.ts";
 import type { McpQueryExecutor } from "./mcp-query-executor.ts";
 
 type RecordClient = (context: unknown, server: McpServer) => void;
@@ -86,7 +86,7 @@ export function registerAgentNoteTools(server: McpServer, queries: McpQueryExecu
 			title: "Add an evidence-linked agent note",
 			description: "Append a bounded note to a canonical stable capture, raw byte, frame, raw range, frame range, or sequence-group target. Agent notes cannot edit or delete existing notes.",
 			inputSchema: z.object({
-				captureId: z.string().min(1),
+				captureId: captureIdSchema,
 				text: z.string().trim().min(1).max(4_000),
 				target: targetSchema,
 				profileId: z.string().optional(),

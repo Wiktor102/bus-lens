@@ -10,6 +10,7 @@ import {
 	decodeAgentCursor,
 	encodeAgentCursor,
 	makeAgentResponse,
+	requiredCaptureId,
 	stableJson,
 	type AgentCursorPayload,
 	type AgentPageTruncationReason,
@@ -2141,20 +2142,22 @@ export class CanonicalQueryService {
 	}
 
 	queryCaptureOverview(captureId: string, snapshot?: Partial<AgentSnapshotReference>): AgentResponse<AgentCaptureOverview> {
-		const data = this.readAgentOverview(captureId, snapshot);
+		const normalizedCaptureId = requiredCaptureId(captureId);
+		const data = this.readAgentOverview(normalizedCaptureId, snapshot);
 		const response = makeAgentResponse({
 			data,
-			appliedFilters: { captureId, ...(snapshot ?? {}) },
+			appliedFilters: { captureId: normalizedCaptureId, ...(snapshot ?? {}) },
 			snapshot: data.snapshot ?? undefined,
 			truncated: false,
-			suggestedOperations: data.snapshot ? [{ tool: "query_messages", reason: "Inspect selected evidence after reviewing the bounded overview", arguments: { captureId, profileId: data.snapshot.profileId, profileVersion: data.snapshot.profileVersion, sourceDataRevision: data.snapshot.sourceDataRevision } }] : []
+			suggestedOperations: data.snapshot ? [{ tool: "query_messages", reason: "Inspect selected evidence after reviewing the bounded overview", arguments: { captureId: normalizedCaptureId, profileId: data.snapshot.profileId, profileVersion: data.snapshot.profileVersion, sourceDataRevision: data.snapshot.sourceDataRevision } }] : []
 		});
 		assertEncodedResponseSize(response);
 		return response;
 	}
 
 	getCaptureOverview(captureId: string): CanonicalCaptureOverview | undefined {
-		const summary = this.getCaptureSummary(captureId);
+		const normalizedCaptureId = requiredCaptureId(captureId);
+		const summary = this.getCaptureSummary(normalizedCaptureId);
 		if (!summary) return undefined;
 		if (summary.status !== "canonical") {
 			return { ...summary, rawByteCount: null, frameCount: null, activeProfile: null };
@@ -2164,8 +2167,8 @@ export class CanonicalQueryService {
 			`SELECT framing_profiles.id, framing_profiles.version, framing_profiles.algorithm_version AS algorithmVersion
 			 FROM captures
 			 JOIN framing_profiles ON framing_profiles.id = captures.active_framing_profile_id
-			 WHERE captures.id = @captureId LIMIT 1`
-		).get({ captureId }) as { id: string; version: number; algorithmVersion: number } | undefined;
+				WHERE captures.id = @captureId LIMIT 1`
+		).get({ captureId: normalizedCaptureId }) as { id: string; version: number; algorithmVersion: number } | undefined;
 		const frameCount = profile
 			? (this.database.prepare("SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId").get({ profileId: profile.id }) as { count: number }).count
 			: 0;
@@ -2178,10 +2181,11 @@ export class CanonicalQueryService {
 	}
 
 	getFrameWindow(captureId: string, offset = 0, limit = DEFAULT_FRAME_WINDOW_LIMIT): CanonicalFrameWindow | undefined {
+		const normalizedCaptureId = requiredCaptureId(captureId);
 		if (!Number.isSafeInteger(offset) || offset < 0) throw new RangeError("frame window offset must be a non-negative integer");
 		if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError("frame window limit must be a positive integer");
 		const boundedFrameLimit = Math.min(limit, MAX_FRAME_WINDOW_LIMIT);
-		const summary = this.getCaptureSummary(captureId);
+		const summary = this.getCaptureSummary(normalizedCaptureId);
 		if (!summary) return undefined;
 		if (summary.status !== "canonical") {
 			return { capture: summary, status: summary.status, offset, limit: boundedFrameLimit, totalFrames: null, hasMore: false, frames: [] };
@@ -2190,8 +2194,8 @@ export class CanonicalQueryService {
 		const profile = this.database.prepare(
 			`SELECT framing_profiles.id FROM captures
 			 JOIN framing_profiles ON framing_profiles.id = captures.active_framing_profile_id
-			 WHERE captures.id = @captureId LIMIT 1`
-		).get({ captureId }) as { id: string } | undefined;
+				WHERE captures.id = @captureId LIMIT 1`
+		).get({ captureId: normalizedCaptureId }) as { id: string } | undefined;
 		if (!profile) return { capture: summary, status: summary.status, offset, limit: boundedFrameLimit, totalFrames: 0, hasMore: false, frames: [] };
 		const totalFrames = (this.database.prepare("SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId").get({ profileId: profile.id }) as { count: number }).count;
 		const rows = this.database.prepare(
@@ -2521,7 +2525,7 @@ export class CanonicalQueryService {
 	}
 
 	queryMessages(input: AgentMessageQueryInput): AgentResponse<AgentMessageQueryResult> {
-		const captureId = requiredText(input.captureId, "captureId");
+		const captureId = requiredCaptureId(input.captureId);
 		const filters = normalizeMessageFilters(input);
 		const requestedSnapshot: Partial<AgentSnapshotReference> = {
 			...(input.profileId ? { profileId: requiredText(input.profileId, "profileId") } : {}),
@@ -2637,6 +2641,7 @@ export class CanonicalQueryService {
 
 	getMessageContext(input: AgentMessageContextInput): AgentResponse<AgentMessageContext> {
 		const frameId = requiredText(input.frameId, "frameId");
+		const requestedCaptureId = input.captureId === undefined ? undefined : requiredCaptureId(input.captureId);
 		const rowsBefore = boundedLimit(input.rowsBefore, 10, 100, "rowsBefore");
 		const rowsAfter = boundedLimit(input.rowsAfter, 10, 100, "rowsAfter");
 		const includeNoteSummaries = Boolean(input.includeNoteSummaries);
@@ -2646,7 +2651,7 @@ export class CanonicalQueryService {
 			 FROM materialized_frames WHERE id = @frameId`
 		).get({ frameId }) as AnalysisFrameRow | undefined;
 		if (!frame) throw new AgentQueryError("evidence-missing", "The requested frame evidence is no longer available", { frameId });
-		if (input.captureId && input.captureId !== frame.capture_id) throw new AgentQueryError("snapshot-mismatch", "The frame does not belong to the requested capture", { frameId, captureId: input.captureId });
+		if (requestedCaptureId && requestedCaptureId !== frame.capture_id) throw new AgentQueryError("snapshot-mismatch", "The frame does not belong to the requested capture", { frameId, captureId: requestedCaptureId });
 		const requested: Partial<AgentSnapshotReference> = {
 			profileId: input.profileId ?? frame.profile_id,
 			...(input.profileVersion === undefined ? {} : { profileVersion: input.profileVersion }),
@@ -2736,7 +2741,7 @@ export class CanonicalQueryService {
 	}
 
 	getSequenceGroups(input: AgentSequenceGroupsInput): AgentResponse<AgentSequenceGroupsResult> {
-		const captureId = requiredText(input.captureId, "captureId");
+		const captureId = requiredCaptureId(input.captureId);
 		const requestedSnapshot: Partial<AgentSnapshotReference> = {
 			...(input.profileId ? { profileId: requiredText(input.profileId, "profileId") } : {}),
 			...(input.profileVersion === undefined ? {} : { profileVersion: optionalNonNegativeInteger(input.profileVersion, "profileVersion") }),
@@ -2795,13 +2800,14 @@ export class CanonicalQueryService {
 
 	getSequenceOccurrences(input: AgentSequenceOccurrencesInput): AgentResponse<AgentSequenceOccurrencesResult> {
 		const groupId = requiredText(input.groupId, "groupId");
+		const requestedCaptureId = input.captureId === undefined ? undefined : requiredCaptureId(input.captureId);
 		const group = this.database.prepare(
 			`SELECT id, capture_id, profile_id, key_text, signatures_json, length,
 			        0 AS occurrence_count, NULL AS first_ordinal, NULL AS last_ordinal
 			 FROM sequence_groups WHERE id = @groupId`
 		).get({ groupId }) as (SequenceGroupRow & { capture_id: string; profile_id: string }) | undefined;
 		if (!group) throw new AgentQueryError("evidence-missing", "The requested sequence group is no longer available", { groupId });
-		if (input.captureId && input.captureId !== group.capture_id) throw new AgentQueryError("snapshot-mismatch", "The sequence group does not belong to the requested capture", { groupId, captureId: input.captureId });
+		if (requestedCaptureId && requestedCaptureId !== group.capture_id) throw new AgentQueryError("snapshot-mismatch", "The sequence group does not belong to the requested capture", { groupId, captureId: requestedCaptureId });
 		const captureId = group.capture_id;
 		const normalizedScope = normalizeDifferentialScope(input.scope);
 		const publicScope = publicProtocolReportScope(normalizedScope);
@@ -3405,7 +3411,7 @@ export class CanonicalQueryService {
 	}
 
 	getByteStatistics(input: AgentByteStatisticsInput): AgentResponse<AgentByteStatisticsResult> {
-		const captureId = requiredText(input.captureId, "captureId");
+		const captureId = requiredCaptureId(input.captureId);
 		if (!Array.isArray(input.positions) || input.positions.length === 0) throw new AgentQueryError("invalid-input", "positions must contain at least one byte position");
 		if (input.positions.length > 32) throw new AgentQueryError("invalid-input", "At most 32 byte positions may be requested", { maximum: 32 });
 		const positions = [...new Set(input.positions.map((position, index) => optionalNonNegativeInteger(position, `positions[${index}]`) as number))].sort((left, right) => left - right);
@@ -3728,7 +3734,7 @@ export class CanonicalQueryService {
 	}
 
 	getTransitions(input: AgentTransitionsInput): AgentResponse<AgentTransitionsResult> {
-		const captureId = requiredText(input.captureId, "captureId");
+		const captureId = requiredCaptureId(input.captureId);
 		const requested: Partial<AgentSnapshotReference> = {
 			...(input.profileId ? { profileId: requiredText(input.profileId, "profileId") } : {}),
 			...(input.profileVersion === undefined ? {} : { profileVersion: optionalNonNegativeInteger(input.profileVersion, "profileVersion") }),
@@ -3859,7 +3865,7 @@ export class CanonicalQueryService {
 	}
 
 	private resolveDifferentialSnapshot(reference: AgentSnapshotReference): AgentSnapshotReference {
-		const captureId = requiredText(reference?.captureId, "snapshot.captureId");
+		const captureId = requiredCaptureId(reference?.captureId, "snapshot.captureId");
 		const profileId = requiredText(reference?.profileId, "snapshot.profileId");
 		const profileVersion = optionalNonNegativeInteger(reference?.profileVersion, "snapshot.profileVersion");
 		const sourceDataRevision = optionalNonNegativeInteger(reference?.sourceDataRevision, "snapshot.sourceDataRevision");
@@ -4158,7 +4164,7 @@ export class CanonicalQueryService {
 	}
 
 	readRawBytes(input: AgentRawReadInput): AgentResponse<AgentRawRead> {
-		const captureId = requiredText(input.captureId, "captureId");
+		const captureId = requiredCaptureId(input.captureId);
 		const startOffset = optionalNonNegativeInteger(input.rawOffset ?? input.offset, "rawOffset");
 		if (startOffset === undefined) throw new AgentQueryError("invalid-input", "rawOffset is required", { label: "rawOffset" });
 		const requestedLength = input.length ?? input.byteCount;
@@ -4244,7 +4250,7 @@ export class CanonicalQueryService {
 	}
 
 	private resolveComparisonSnapshot(reference: AgentComparisonSnapshot): AgentComparisonSnapshot {
-		const captureId = requiredText(reference.captureId, "captureId");
+		const captureId = requiredCaptureId(reference.captureId);
 		const profileId = requiredText(reference.profileId, "profileId");
 		const profileVersion = optionalNonNegativeInteger(reference.profileVersion, "profileVersion");
 		const sourceDataRevision = optionalNonNegativeInteger(reference.sourceDataRevision, "sourceDataRevision");
