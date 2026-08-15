@@ -53,6 +53,7 @@ function FolderGroup({
 	contextMenuCaptureId: string | null;
 }) {
 	const collapsed = group.collapsed && !searching;
+	const hasLiveCapture = group.captures.some(capture => capture.isRecording);
 
 	return (
 		<section
@@ -76,6 +77,7 @@ function FolderGroup({
 					<span className="folder-chevron" aria-hidden="true" />
 					<span className="folder-icon">{FOLDER_ICON}</span>
 					<strong>{group.name}</strong>
+					{collapsed && hasLiveCapture ? <span className="recording-badge folder-live-badge">LIVE</span> : null}
 					<small>{group.captures.length}</small>
 				</button>
 			</header>
