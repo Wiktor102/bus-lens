@@ -53,6 +53,7 @@ function FolderGroup({
 	contextMenuCaptureId: string | null;
 }) {
 	const collapsed = group.collapsed && !searching;
+	const hasLiveCapture = group.captures.some(capture => capture.isRecording);
 
 	return (
 		<section
@@ -76,6 +77,7 @@ function FolderGroup({
 					<span className="folder-chevron" aria-hidden="true" />
 					<span className="folder-icon">{FOLDER_ICON}</span>
 					<strong>{group.name}</strong>
+					{collapsed && hasLiveCapture ? <span className="recording-badge folder-live-badge">LIVE</span> : null}
 					<small>{group.captures.length}</small>
 				</button>
 			</header>
@@ -121,12 +123,15 @@ function CaptureItem({
 		>
 			<button className="capture-open" type="button" data-capture-id={capture.id} onClick={() => onSelect(capture.id)}>
 				<strong className="capture-name-row">
-					{capture.name}
-					{storageStatus === "legacy" || storageStatus === "failed" ? (
-						<span className={`storage-badge storage-${storageStatus}`} data-storage-status={capture.storageStatus || "legacy-not-canonicalized"}>
-							{captureStorageLabel(storageStatus)}
-						</span>
-					) : null}
+					<span className="capture-name">{capture.name}</span>
+					<span className="capture-badges">
+						{capture.isRecording ? <span className="recording-badge">LIVE</span> : null}
+						{storageStatus === "legacy" || storageStatus === "failed" ? (
+							<span className={`storage-badge storage-${storageStatus}`} data-storage-status={capture.storageStatus || "legacy-not-canonicalized"}>
+								{captureStorageLabel(storageStatus)}
+							</span>
+						) : null}
+					</span>
 				</strong>
 				<small>
 					<span>{capture.view || "Unassigned view"}</span>

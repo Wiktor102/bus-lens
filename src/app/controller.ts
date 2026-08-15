@@ -55,6 +55,7 @@ export function initializeController(): ControllerLifecycle {
 		state: runtime.state,
 		saveState: runtime.saveState,
 		showToast: runtime.showToast,
+		publishArchiveState: snapshots.publishArchiveState,
 		publishCaptureHeaderState: snapshots.publishCaptureHeaderState,
 		publishFramingToolbarState: snapshots.publishFramingToolbarState,
 		publishAnalysisState: snapshots.publishAnalysisState,

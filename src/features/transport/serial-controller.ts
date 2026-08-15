@@ -33,6 +33,7 @@ export type SerialControllerDependencies = {
 	state: AppState;
 	saveState: (options?: { immediate?: boolean }) => void;
 	showToast: (message: string) => void;
+	publishArchiveState?: () => void;
 	publishCaptureHeaderState: () => void;
 	publishFramingToolbarState: (capture?: Capture) => void;
 	publishAnalysisState: (capture?: Capture) => void;
@@ -106,6 +107,8 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		const message = error instanceof Error ? error.message : String(error);
 		dependencies.publishPersistenceError?.({ captureId, message });
 		dependencies.showToast("Capture persistence paused — retry or export JSON recovery");
+		dependencies.publishArchiveState?.();
+		dependencies.publishCaptureHeaderState();
 		publishState();
 	}
 
@@ -311,6 +314,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		reader = null;
 		port = null;
 		dependencies.publishCaptureHeaderState();
+		dependencies.publishArchiveState?.();
 		publishState();
 	}
 
@@ -320,6 +324,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		const captureId = recordingCaptureId;
 		const sessionId = recordingSessionId;
 		recording = false;
+		dependencies.publishArchiveState?.();
 		flushLiveBytes();
 		stopPromise = (async () => {
 			if (canonicalRecording && captureId && sessionId && appendQueue && dependencies.recordingWriter) {
@@ -342,6 +347,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			persistenceError = null;
 			dependencies.publishPersistenceError?.(null);
 			dependencies.publishCaptureHeaderState();
+			dependencies.publishArchiveState?.();
 			publishState();
 			if (notify) dependencies.showToast("Capture finalized and stored");
 		})().catch(error => {
@@ -390,6 +396,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			dependencies.publishPersistenceError?.(null);
 			if (!canonicalRecording) dependencies.saveState();
 			dependencies.publishCaptureHeaderState();
+			dependencies.publishArchiveState?.();
 			publishState();
 			dependencies.showToast("Capture started");
 		})().catch(error => {
@@ -432,6 +439,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		getPort,
 		isConnected,
 		isRecording,
+		getRecordingCaptureId: () => recording ? recordingCaptureId : null,
 		hasUnacknowledgedBytes: () => appendQueue?.hasUnacknowledgedBytes() ?? false,
 		getPersistenceError: () => persistenceError?.error ?? null,
 		retryPersistence,

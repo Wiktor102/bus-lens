@@ -14,7 +14,8 @@ const captures: ArchiveCapture[] = [
 		view: "Home",
 		folderId: "alpha",
 		params: [{ key: "Speed", value: "1" }],
-		messageCount: 3
+		messageCount: 3,
+		isRecording: true
 	},
 	{
 		id: "capture-2",
@@ -22,7 +23,8 @@ const captures: ArchiveCapture[] = [
 		view: "Service",
 		folderId: null,
 		params: [{ key: "Mode", value: "safe" }],
-		messageCount: 0
+		messageCount: 0,
+		isRecording: false
 	}
 ];
 
@@ -35,6 +37,7 @@ test("groups all captures, including empty folders and unfiled captures", () => 
 		["empty", []],
 		["", ["capture-2"]]
 	]);
+	assert.equal(result.groups[0]?.captures[0]?.isRecording, true);
 	assert.equal(result.searching, false);
 });
 

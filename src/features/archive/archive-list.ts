@@ -10,6 +10,7 @@ export type ArchiveCapture = {
 	folderId: string | null;
 	params: ArchiveParameter[];
 	messageCount: number;
+	isRecording: boolean;
 	storageStatus?: "legacy-not-canonicalized" | "converting" | "canonical" | "canonicalization-failed";
 };
 

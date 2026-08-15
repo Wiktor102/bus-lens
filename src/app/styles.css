@@ -573,6 +573,17 @@ p {
 	justify-content: space-between;
 	gap: 8px;
 }
+.capture-name {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.capture-badges {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	flex-shrink: 0;
+}
 .storage-badge {
 	display: inline-flex;
 	align-items: center;
@@ -583,6 +594,18 @@ p {
 	font: 700 9px var(--mono);
 	letter-spacing: 0.05em;
 	white-space: nowrap;
+}
+.recording-badge {
+	display: inline-flex;
+	align-items: center;
+	width: max-content;
+	padding: 3px 5px;
+	border: 1px solid color-mix(in srgb, var(--red) 55%, var(--line));
+	color: var(--red);
+	font: 700 9px var(--mono);
+	letter-spacing: 0.05em;
+	white-space: nowrap;
+	animation: pulse 1s infinite;
 }
 .storage-badge.storage-legacy {
 	color: var(--amber);
