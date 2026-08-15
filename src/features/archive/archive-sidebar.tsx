@@ -11,7 +11,7 @@ import {
 import { getArchiveActions, getArchiveSnapshot, subscribeToArchive } from "./archive-bridge";
 import { buildArchiveGroups, type ArchiveCapture, type ArchiveGroup, type ArchiveStorageFilter } from "./archive-list";
 import { captureStorageLabel, captureStorageUiStatus } from "../capture/capture-storage";
-import { ArrowUp, Check, ChevronRight, Download, Folder, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
+import { ArrowUp, Check, ChevronRight, Copy, Download, Folder, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
 
 const FOLDER_ICON = (
 	<Folder aria-hidden="true" />
@@ -573,6 +573,20 @@ function CaptureContextMenu({
 					<span>Upgrade</span>
 				</button>
 			) : null}
+			<button
+				type="button"
+				role="menuitem"
+				id="duplicateCaptureContextBtn"
+				data-context-action="duplicate"
+				onClick={() => {
+					if (!state) return;
+					onClose();
+					actions.duplicateCapture(state.captureId);
+				}}
+			>
+				<Copy aria-hidden="true" />
+				<span>Duplicate capture</span>
+			</button>
 			<button
 				type="button"
 				role="menuitem"
