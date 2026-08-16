@@ -1338,6 +1338,23 @@ export function convertCaptureDocumentToCanonical(
 				insertParameter.run({ captureId, position, keyText: parameter.key, valueText: parameter.value })
 			);
 
+			// A converted capture must retain the framing draft that represents its
+			// current profile.  Live sessions update this draft before their bytes are
+			// finalized; without the seed row, the first framing edit after
+			// canonicalization fails with "framing draft is missing".
+			database
+				.prepare(
+					`INSERT INTO framing_drafts
+						(capture_id, revision, sections_json, source_data_revision, created_at, updated_at)
+					 VALUES (@captureId, 0, @sectionsJson, 1, @createdAt, @updatedAt)`
+				)
+				.run({
+					captureId,
+					sectionsJson: JSON.stringify(sections),
+					createdAt: String(doc.createdAt || now),
+					updatedAt: now
+				});
+
 			// Session records preserve explicit capture-session metadata, including
 			// sessions that have no bytes after filtering. Per-byte identities are
 			// stored separately on each raw chunk below.
