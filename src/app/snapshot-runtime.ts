@@ -1,4 +1,6 @@
 import { publishFramingToolbarSnapshot } from "../features/capture/framing-toolbar-bridge.ts";
+import { deriveCaptureHeaderSnapshot } from "../features/capture/capture-header.ts";
+import { publishCaptureHeaderSnapshot } from "../features/capture/capture-header-bridge.ts";
 import { publishSendRuntimeSnapshot } from "../features/send/send-bridge.ts";
 import { getViewStateSnapshot, subscribeToViewState } from "../shared/view-state-bridge.ts";
 import { deriveMessageStreamSnapshot } from "../features/message-stream/message-stream.ts";
@@ -11,12 +13,13 @@ import type { ViewStateSnapshot } from "../shared/view-state.ts";
 
 export type SnapshotRuntimeDependencies = {
 	capture: () => Capture | undefined;
-	getTransport: () => Pick<SerialController, "getPort" | "isRecording" | "publishState">;
+	getTransport: () => Pick<SerialController, "getPort" | "isRecording" | "getRecordingCaptureId" | "publishState">;
 	getSendController: () => Pick<SendController, "getStatus"> | undefined;
 	getViewStateSnapshot?: () => ViewStateSnapshot;
 };
 
 export type SnapshotRuntime = {
+	publishCaptureHeaderState: (capture?: Capture) => void;
 	publishSendState: () => void;
 	publishFramingToolbarState: (capture?: Capture) => void;
 	renderMessages: () => void;
@@ -26,6 +29,12 @@ export type SnapshotRuntime = {
 
 export function createSnapshotRuntime(dependencies: SnapshotRuntimeDependencies): SnapshotRuntime {
 	const getViewState = dependencies.getViewStateSnapshot || getViewStateSnapshot;
+
+	function publishCaptureHeaderState(capture = dependencies.capture()): void {
+		const recordingCaptureId = dependencies.getTransport().getRecordingCaptureId();
+		const isRecording = Boolean(capture?.id && recordingCaptureId === String(capture.id));
+		publishCaptureHeaderSnapshot(deriveCaptureHeaderSnapshot(capture, isRecording));
+	}
 
 	function publishSendState(): void {
 		const sendStatus = dependencies.getSendController()?.getStatus() || {
@@ -55,6 +64,7 @@ export function createSnapshotRuntime(dependencies: SnapshotRuntimeDependencies)
 
 	function render(): void {
 		dependencies.getTransport().publishState();
+		publishCaptureHeaderState();
 		publishFramingToolbarState();
 		if (!dependencies.capture()) {
 			return;
@@ -77,6 +87,7 @@ export function createSnapshotRuntime(dependencies: SnapshotRuntimeDependencies)
 	}
 
 	return {
+		publishCaptureHeaderState,
 		publishSendState,
 		publishFramingToolbarState,
 		renderMessages,

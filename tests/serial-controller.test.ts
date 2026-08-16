@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createSerialController, MAX_CAPTURE_BYTES } from "../src/features/transport/serial-controller.ts";
 import { getTransportSnapshot } from "../src/features/transport/transport-bridge.ts";
+import { deriveCaptureHeaderSnapshot } from "../src/features/capture/capture-header.ts";
 import type { AppendCaptureChunkRequest } from "../src/features/transport/capture-append-queue.ts";
 import type { Capture } from "../src/features/capture/capture-framing.ts";
 import type { AppState } from "../src/shared/app-state.ts";
@@ -74,6 +75,29 @@ test("keeps the recording target when the selected capture changes", async () =>
 	await controller.stopRecording();
 	assert.equal(controller.getRecordingCaptureId(), null);
 	assert.equal(getTransportSnapshot().recordingCaptureId, null);
+});
+
+test("publishes updated live header stats after a byte flush", async () => {
+	const capture: Capture = { id: "live-header", byteStream: [], frameSections: [], messages: [], notes: [], annotations: {} };
+	const capturedByteCounts: string[] = [];
+	const controller = createSerialController({
+		capture: () => capture,
+		state: { captures: [capture] } as AppState,
+		showToast: () => {},
+		publishCaptureHeaderState: current => {
+			capturedByteCounts.push(deriveCaptureHeaderSnapshot(current, true).summary.capturedBytes);
+		},
+		publishFramingToolbarState: () => {},
+		renderMessages: () => {},
+		stopSendQueue: () => {}
+	});
+
+	await controller.toggleRecording();
+	controller.queueLiveBytes([0xaa], "rx");
+	controller.flushLiveBytes();
+
+	assert.equal(capturedByteCounts.at(-1), "1 B");
+	await controller.stopRecording();
 });
 
 test("retaining a rolling capture preserves the framing active at the rollover boundary", () => {

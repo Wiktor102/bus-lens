@@ -34,6 +34,7 @@ export type SerialControllerDependencies = {
 	state: AppState;
 	archiveCommands?: ArchiveCommands;
 	showToast: (message: string) => void;
+	publishCaptureHeaderState?: (capture?: Capture) => void;
 	publishFramingToolbarState: (capture?: Capture) => void;
 	renderMessages: () => void;
 	stopSendQueue: () => void;
@@ -253,6 +254,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		const incrementallyRebuilt = !trimmed && appendLivePreview(capture, previousByteStreamLength);
 		if (!incrementallyRebuilt) rebuildPreview(capture);
 		if (!canonicalRecording) persistLiveCapture(capture);
+		dependencies.publishCaptureHeaderState?.(capture);
 		dependencies.publishFramingToolbarState(capture);
 		dependencies.renderMessages();
 		if (trimmed) dependencies.showToast(`Capture limit reached; keeping the newest ${MAX_CAPTURE_BYTES.toLocaleString()} bytes`);
@@ -434,6 +436,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			dependencies.publishPersistenceError?.(null);
 			if (!canonicalRecording) await persistLiveCapture(capture);
 			publishState();
+			dependencies.publishCaptureHeaderState?.(capture);
 			await refreshCaptureProjection(captureId).catch(error => {
 				console.error(`Could not refresh recording capture ${captureId}`, error);
 			});

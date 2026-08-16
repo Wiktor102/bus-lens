@@ -97,3 +97,15 @@ export function deriveCaptureHeaderSnapshot(
 		}
 	};
 }
+
+/**
+ * Live bytes stay outside Query, so only the volatile summary is merged from
+ * the runtime publication. Metadata and capture identity remain Query-owned.
+ */
+export function mergeCaptureHeaderRuntimeStats(
+	snapshot: CaptureHeaderSnapshot,
+	liveSnapshot: CaptureHeaderSnapshot
+): CaptureHeaderSnapshot {
+	if (!snapshot.captureId || snapshot.captureId !== liveSnapshot.captureId) return snapshot;
+	return { ...snapshot, summary: liveSnapshot.summary };
+}

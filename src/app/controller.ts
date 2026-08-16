@@ -57,6 +57,7 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		state: runtime.state,
 		archiveCommands: options.archive?.commands,
 		showToast: runtime.showToast,
+		publishCaptureHeaderState: snapshots.publishCaptureHeaderState,
 		publishFramingToolbarState: snapshots.publishFramingToolbarState,
 		renderMessages: snapshots.renderMessages,
 		stopSendQueue: () => sendController?.stopSendQueue(),

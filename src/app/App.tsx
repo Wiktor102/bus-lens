@@ -12,13 +12,20 @@ import {
 } from "react";
 import { ArchiveSidebar } from "../features/archive/archive-sidebar";
 import {
-	getCaptureHeaderActions
+	getCaptureHeaderActions,
+	getCaptureHeaderSnapshot,
+	subscribeToCaptureHeader
 } from "../features/capture/capture-header-bridge";
 import {
 	getCaptureStorageActions,
 	captureStorageSnapshot
 } from "../features/capture/capture-storage-bridge";
-import { deriveCaptureHeaderSnapshot, normalizeCaptureDescription, normalizeCaptureTitle } from "../features/capture/capture-header";
+import {
+	deriveCaptureHeaderSnapshot,
+	mergeCaptureHeaderRuntimeStats,
+	normalizeCaptureDescription,
+	normalizeCaptureTitle
+} from "../features/capture/capture-header";
 import {
 	getFramingToolbarSnapshot,
 	subscribeToFramingToolbar
@@ -167,10 +174,16 @@ function TopBar() {
 function CaptureHeader() {
 	const activeCapture = useSelectedArchiveCapture();
 	const transport = useSyncExternalStore(subscribeToTransport, getTransportSnapshot, getTransportSnapshot);
-	const snapshot = deriveCaptureHeaderSnapshot(
+	const liveHeader = useSyncExternalStore(
+		subscribeToCaptureHeader,
+		getCaptureHeaderSnapshot,
+		getCaptureHeaderSnapshot
+	);
+	const querySnapshot = deriveCaptureHeaderSnapshot(
 		activeCapture.data,
 		transport.recordingCaptureId === activeCapture.captureId
 	);
+	const snapshot = mergeCaptureHeaderRuntimeStats(querySnapshot, liveHeader);
 	const actions = getCaptureHeaderActions();
 	const storage = captureStorageSnapshot(
 		activeCapture.captureId,
