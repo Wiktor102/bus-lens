@@ -11,8 +11,9 @@ import {
 import { toNodeHandler, type NodeMcpRequestHandler } from "@modelcontextprotocol/node";
 import { z } from "zod";
 import { AgentQueryError, isValidCaptureId, type AgentResponse } from "./agent-contracts.ts";
-import type { AgentCaptureDiscovery, AgentCaptureOverview, AgentFramingProfiles, CaptureDiscoveryFiltersInput } from "./canonical-query.ts";
+import { DEFAULT_RAW_READ_BYTES, MAX_RAW_READ_BYTES, type AgentCaptureDiscovery, type AgentCaptureOverview, type AgentFramingProfiles, type CaptureDiscoveryFiltersInput } from "./canonical-query.ts";
 import { ALLOW_AGENT_AUTHORED_NOTES_SETTING, CanonicalCaptureCommandService } from "./canonical-capture-command-service.ts";
+import { MAX_DIFFERENTIAL_FRAMES, MAX_SIGNATURE_ALIGNMENT_FRAMES } from "./differential-analysis.ts";
 import type { SqliteDatabase } from "./database.ts";
 import { McpQueryExecutor, MCP_TOOL_TIMEOUT_MS } from "./mcp-query-executor.ts";
 
@@ -51,7 +52,7 @@ Notes are annotations, not new measurements. Use them to record actions taken (f
 
 ## Storage and limits
 
-Canonical captures have modeled raw chunks, framing profiles, and derived analytical rows. Legacy JSON captures remain discoverable as legacy-not-canonicalized and include UI conversion guidance; analytical evidence is not inferred from a legacy document. Results are structured, size-bounded, and pageable. Use the supplied cursor unchanged with the same filters and snapshot. Raw reads are explicit and bounded; never request a complete capture.
+Canonical captures have modeled raw chunks, framing profiles, and derived analytical rows. Legacy JSON captures remain discoverable as legacy-not-canonicalized and include UI conversion guidance; analytical evidence is not inferred from a legacy document. Results are structured, size-bounded, and pageable. Use the supplied cursor unchanged with the same filters and snapshot. Differential alignment accepts at most ${MAX_DIFFERENTIAL_FRAMES} filtered frames per side, with a tighter ${MAX_SIGNATURE_ALIGNMENT_FRAMES}-frame-per-side cap for signature-sequence mode; use baseline.filters and changed.filters for larger captures. Raw reads default to ${DEFAULT_RAW_READ_BYTES} bytes and accept up to ${MAX_RAW_READ_BYTES} bytes per request; verbose per-byte timestamp metadata remains subject to the ${MCP_RESPONSE_LIMIT_BYTES / 1024} KiB hard response budget. Never request a complete capture.
 
 ## Execution limit
 

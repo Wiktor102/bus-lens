@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { AGENT_HARD_RESPONSE_BYTES, AGENT_NORMAL_RESPONSE_BYTES } from "../server/agent-contracts.ts";
 import { CanonicalCaptureCommandService } from "../server/canonical-capture-command-service.ts";
 import { CanonicalQueryService } from "../server/canonical-query.ts";
 import { openDatabase } from "../server/database.ts";
@@ -340,6 +341,37 @@ test("analysis groups, occurrences, statistics, transitions, and raw reads remai
 			}
 		});
 		assert.throws(() => query.readRawBytes({ captureId: "analysis-capture", rawOffset: 0, length: 4097 }), /length/);
+	} finally {
+		database.close();
+	}
+});
+
+test("raw reads accept the advertised multi-kilobyte range when timestamp metadata exceeds the normal response target", () => {
+	const database = openDatabase(":memory:");
+	try {
+		const commands = new CanonicalCaptureCommandService(database);
+		commands.createCapture({ captureId: "large-raw-read", framing, inputFormat: "binary" });
+		commands.startSession({ captureId: "large-raw-read", sessionId: "large-raw-read-session" });
+		const bytes = Array.from({ length: 3_100 }, (_value, index) => index & 0xff);
+		const append = commands.appendChunk({
+			captureId: "large-raw-read",
+			sessionId: "large-raw-read-session",
+			requestId: "large-raw-read-request",
+			sequence: 0,
+			expectedStartOffset: 0,
+			bytes,
+			timestamps: bytes.map((_byte, index) => 1_000_000_000_000 + index * 1_234_567.89),
+			directions: bytes.map(() => "rx")
+		});
+		assert.equal(append.dataRevision, 1);
+
+		const response = new CanonicalQueryService(database).readRawBytes({ captureId: "large-raw-read", rawOffset: 0, length: 3_100 });
+		const encodedBytes = Buffer.byteLength(JSON.stringify(response), "utf8");
+		assert.equal(response.data.returnedByteCount, 3_100);
+		assert.equal(response.data.requestedBounds.endOffset, 3_099);
+		assert.equal(response.data.truncated, false);
+		assert.ok(encodedBytes > AGENT_NORMAL_RESPONSE_BYTES);
+		assert.ok(encodedBytes <= AGENT_HARD_RESPONSE_BYTES);
 	} finally {
 		database.close();
 	}

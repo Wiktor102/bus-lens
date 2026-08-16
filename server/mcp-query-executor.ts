@@ -152,6 +152,8 @@ function validateMcpQueryRequest(request: McpQueryRequest): McpQueryRequest {
 					? request.snapshot
 					: { ...request.snapshot, captureId: requiredCaptureId(request.snapshot.captureId, "snapshot.captureId") }
 			};
+		case "framing-profiles":
+			return { ...request, input: { ...request.input, captureId: requiredCaptureId(request.input.captureId) } };
 		case "comparison":
 			return {
 				...request,
@@ -188,6 +190,8 @@ function validateMcpQueryRequest(request: McpQueryRequest): McpQueryRequest {
 		case "messages":
 			return { ...request, input: { ...request.input, captureId: requiredCaptureId(request.input.captureId) } };
 		case "message-context":
+			return { ...request, input: validateOptionalCaptureId(request.input) };
+		case "notes":
 			return { ...request, input: validateOptionalCaptureId(request.input) };
 		case "sequence-groups":
 			return { ...request, input: { ...request.input, captureId: requiredCaptureId(request.input.captureId) } };
