@@ -524,6 +524,39 @@ test("duplicateCapture rejects active sources and allows a finalized copy to sta
 	}
 });
 
+test("duplicateCapture keeps the framing draft when the copy is cleared and restarted", () => {
+	const database = openDatabase(":memory:");
+	try {
+		const service = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-09T00:00:00.000Z" });
+		recordCapture(service, "duplicate-clear-source");
+		service.duplicateCapture({ captureId: "duplicate-clear-source", duplicateCaptureId: "duplicate-clear-copy" });
+
+		const draftBeforeClear = database
+			.prepare("SELECT revision, sections_json FROM framing_drafts WHERE capture_id = 'duplicate-clear-copy' ORDER BY revision")
+			.all();
+		assert.equal(draftBeforeClear.length, 1);
+		// Simulate a duplicate created by the older implementation.
+		database.prepare("DELETE FROM framing_drafts WHERE capture_id = 'duplicate-clear-copy'").run();
+		service.clearCaptureData({ captureId: "duplicate-clear-copy" });
+		const repairedDraft = database
+			.prepare("SELECT revision, sections_json FROM framing_drafts WHERE capture_id = 'duplicate-clear-copy' ORDER BY revision")
+			.get() as { revision: number; sections_json: string };
+		assert.equal(repairedDraft.revision, 0);
+		assert.equal(JSON.parse(repairedDraft.sections_json)[0].frameSize, 2);
+
+		const session = service.startSession({ captureId: "duplicate-clear-copy", sessionId: "duplicate-clear-session" });
+		assert.equal(session.session.status, "recording");
+		const updated = service.updateFramingDraft({
+			captureId: "duplicate-clear-copy",
+			expectedRevision: 0,
+			sections: [{ start: 0, framingMode: "length", frameSize: 1 }]
+		});
+		assert.equal(updated.revision, 1);
+	} finally {
+		database.close();
+	}
+});
+
 test("deleteCapture removes only the canonical target, cascade children, storage, and archive ordering", () => {
 	const database = openDatabase(":memory:");
 	try {

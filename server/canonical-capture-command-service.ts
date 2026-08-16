@@ -596,6 +596,47 @@ function normalizeFramingSections(
 	});
 }
 
+type StoredFramingSectionRow = {
+	id: string;
+	start_offset: number;
+	framing_mode: string;
+	frame_length: number | null;
+	marker_bytes: string | null;
+	marker_position: string | null;
+	time_gap_ms: number | null;
+	collapse_runs: number;
+	collapsed: number;
+};
+
+function markerTextFromStoredBytes(value: string | null): string {
+	if (!value) return "";
+	try {
+		const bytes = JSON.parse(value) as unknown;
+		if (!Array.isArray(bytes)) return "";
+		return bytes
+			.map(Number)
+			.filter(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255)
+			.map(byte => byte.toString(16).padStart(2, "0").toUpperCase())
+			.join(" ");
+	} catch {
+		return "";
+	}
+}
+
+function framingRequestsFromStoredSections(rows: readonly StoredFramingSectionRow[]): FramingSectionRequest[] {
+	return rows.map(row => ({
+		id: row.id,
+		start: row.start_offset,
+		framingMode: row.framing_mode as FramingSectionRequest["framingMode"],
+		frameSize: row.frame_length ?? 3,
+		frameMarker: markerTextFromStoredBytes(row.marker_bytes),
+		markerPosition: row.marker_position === "end" ? "end" : "start",
+		frameTimeGap: row.time_gap_ms ?? 5,
+		collapseRuns: Boolean(row.collapse_runs),
+		collapsed: Boolean(row.collapsed)
+	}));
+}
+
 function isoFrom(value: string | number | undefined, fallback: string): string {
 	if (value === undefined) return fallback;
 	if (typeof value === "number" && Number.isFinite(value)) return new Date(value).toISOString();
@@ -877,6 +918,67 @@ export class CanonicalCaptureCommandService {
 				requiredStatus: CANONICAL_STORAGE_STATUS
 			});
 		}
+	}
+
+	/**
+	 * Older canonicalized captures predate the framing-draft seed. Repair that
+	 * narrow piece of state at the command boundary so an existing archive can
+	 * start a new live session without requiring a manual database migration.
+	 */
+	private ensureFramingDraft(captureId: string, dataRevision: number): void {
+		const existing = this.database
+			.prepare("SELECT 1 FROM framing_drafts WHERE capture_id = @captureId LIMIT 1")
+			.get({ captureId });
+		if (existing) return;
+
+		const profile = this.database
+			.prepare(
+				`SELECT id, source_data_revision
+				 FROM framing_profiles
+				 WHERE capture_id = @captureId AND is_active = 1
+				 ORDER BY version DESC LIMIT 1`
+			)
+			.get({ captureId }) as { id: string; source_data_revision: number | null } | undefined;
+		if (!profile) {
+			throw new CanonicalCaptureConflictError("framing draft is missing", { captureId });
+		}
+
+		const sections = this.database
+			.prepare(
+				`SELECT id, start_offset, framing_mode, frame_length, marker_bytes, marker_position,
+						time_gap_ms, collapse_runs, collapsed
+				 FROM framing_sections WHERE capture_id = @captureId AND profile_id = @profileId ORDER BY position`
+			)
+			.all({ captureId, profileId: profile.id }) as StoredFramingSectionRow[];
+		if (!sections.length) {
+			throw new CanonicalCaptureConflictError("framing draft is missing", { captureId });
+		}
+
+		const now = this.nowIso();
+		this.database
+			.prepare(
+				`INSERT INTO framing_drafts
+					(capture_id, revision, sections_json, source_data_revision, created_at, updated_at)
+				 VALUES (@captureId, 0, @sectionsJson, @sourceDataRevision, @createdAt, @updatedAt)`
+			)
+			.run({
+				captureId,
+				sectionsJson: JSON.stringify(framingRequestsFromStoredSections(sections)),
+				sourceDataRevision: profile.source_data_revision ?? dataRevision,
+				createdAt: now,
+				updatedAt: now
+			});
+	}
+
+	private repairFramingDraftIfProfileExists(captureId: string, dataRevision: number): void {
+		const draft = this.database
+			.prepare("SELECT 1 FROM framing_drafts WHERE capture_id = @captureId LIMIT 1")
+			.get({ captureId });
+		if (draft) return;
+		const profile = this.database
+			.prepare("SELECT 1 FROM framing_profiles WHERE capture_id = @captureId AND is_active = 1 LIMIT 1")
+			.get({ captureId });
+		if (profile) this.ensureFramingDraft(captureId, dataRevision);
 	}
 
 	createCapture(request: CreateCaptureRequest): CaptureState {
@@ -1467,6 +1569,7 @@ export class CanonicalCaptureCommandService {
 				.get({ captureId }) as { byte_count: number; data_revision: number } | undefined;
 			if (!capture) throw new CanonicalCaptureNotFoundError(captureId);
 			this.requireCanonicalStorage(captureId);
+			this.ensureFramingDraft(captureId, capture.data_revision);
 
 			if (requestedSessionId) {
 				const existing = this.database
@@ -2004,8 +2107,8 @@ export class CanonicalCaptureCommandService {
 		const sections = normalizeFramingSections(request.sections, this.generateId);
 		const transaction = this.database.transaction(() => {
 			const capture = this.database
-				.prepare("SELECT lifecycle FROM captures WHERE id = @captureId")
-				.get({ captureId }) as { lifecycle: string } | undefined;
+				.prepare("SELECT lifecycle, data_revision FROM captures WHERE id = @captureId")
+				.get({ captureId }) as { lifecycle: string; data_revision: number } | undefined;
 			if (!capture) throw new CanonicalCaptureNotFoundError(captureId);
 			this.requireCanonicalStorage(captureId);
 			if (capture.lifecycle !== "recording") {
@@ -2014,6 +2117,7 @@ export class CanonicalCaptureCommandService {
 					lifecycle: capture.lifecycle
 				});
 			}
+			this.ensureFramingDraft(captureId, capture.data_revision);
 
 			const draft = this.database
 				.prepare("SELECT revision FROM framing_drafts WHERE capture_id = @captureId ORDER BY revision DESC LIMIT 1")
@@ -2714,6 +2818,9 @@ export class CanonicalCaptureCommandService {
 					activeSessionStatus: activeSession.status
 				});
 			}
+			// Preserve the draft for older canonical captures before deleting the
+			// profile rows that can be used to reconstruct it.
+			this.repairFramingDraftIfProfileExists(captureId, capture.data_revision);
 
 			// Framing drafts, parameters, canonical metadata, and capture-level notes
 			// are the durable operator context for a capture. Everything below is
@@ -2977,6 +3084,12 @@ export class CanonicalCaptureCommandService {
 					lifecycle: source.lifecycle
 				});
 			}
+			// A duplicate must retain a live framing draft even when the source is
+			// an older canonical capture that predates draft seeding. Repair it
+			// before reading the rows that will be copied below; otherwise clearing
+			// the duplicate would also remove the only profile from which the draft
+			// could be reconstructed.
+			this.repairFramingDraftIfProfileExists(sourceCaptureId, source.data_revision);
 
 			const profiles = this.database
 				.prepare(

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { ArchiveRepository } from "../server/archive-repository.ts";
 import { convertCaptureDocumentToCanonical, isCaptureConverted } from "../server/canonical.ts";
+import { CanonicalCaptureCommandService } from "../server/canonical-capture-command-service.ts";
 import { openDatabase } from "../server/database.ts";
 
 async function withTemporaryArchive(run: (directory: string) => Promise<void>): Promise<void> {
@@ -68,6 +69,48 @@ test("canonical conversion reconstructs legacy message-only captures", async () 
 
 		repository.close();
 	});
+});
+
+test("converted captures seed and repair the live framing draft", () => {
+	const database = openDatabase(":memory:", () => "2026-01-01T00:00:00.000Z");
+	try {
+		const repository = new ArchiveRepository(database, {
+			nowIso: () => "2026-01-01T00:00:00.000Z",
+			generateId: (() => {
+				let index = 0;
+				return () => `converted-draft-${index++}`;
+			})()
+		});
+		repository.putCapture("converted-live-draft", {
+			id: "converted-live-draft",
+			name: "Converted live draft",
+			byteStream: [
+				{ rawOffset: 0, value: 0x10, timestamp: 100, direction: "rx" },
+				{ rawOffset: 1, value: 0x20, timestamp: 110, direction: "rx" }
+			],
+			frameSections: [{ id: "legacy-section", start: 0, framingMode: "length", frameSize: 2 }],
+			messages: [{ id: "legacy-message", timestamp: 100, byteTimestamps: [100, 110], bytes: [0x10, 0x20], rawOffsets: [0, 1] }]
+		});
+
+		assert.equal(repository.convertCaptureToCanonical("converted-live-draft").verified, true);
+		assert.equal((database.prepare("SELECT COUNT(*) AS count FROM framing_drafts WHERE capture_id = 'converted-live-draft'").get() as { count: number }).count, 1);
+
+		// This simulates a capture converted by the older implementation. The
+		// command boundary should repair it before accepting a live edit.
+		database.prepare("DELETE FROM framing_drafts WHERE capture_id = 'converted-live-draft'").run();
+		const commands = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-01-01T00:00:01.000Z" });
+		commands.startSession({ captureId: "converted-live-draft", sessionId: "live-session" });
+		const updated = commands.updateFramingDraft({
+			captureId: "converted-live-draft",
+			expectedRevision: 0,
+			sections: [{ start: 0, framingMode: "length", frameSize: 1 }]
+		});
+
+		assert.equal(updated.revision, 1);
+		assert.equal(updated.sections[0]?.frameSize, 1);
+	} finally {
+		database.close();
+	}
 });
 
 test("conversion commits explicit authority, complete metadata, and one idempotent recovery row", () => {
