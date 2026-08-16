@@ -10,6 +10,7 @@ import type {
 	PatternRemarkSaveInput
 } from "../features/dialogs/dialog-model.ts";
 import { EMPTY_MESSAGE_STREAM_SNAPSHOT, type MessageStreamSnapshot } from "../features/message-stream/message-stream.ts";
+import { EMPTY_CAPTURE_HEADER_SNAPSHOT, type CaptureHeaderRuntimeSnapshot } from "../features/capture/capture-header.ts";
 import type { SectionFramingUpdate, Capture } from "../features/capture/capture-framing.ts";
 import type { SectionMoveAction } from "../features/capture/section-repositioning.ts";
 import {
@@ -96,6 +97,11 @@ function freezeValue<T>(value: T, seen = new WeakSet<object>()): T {
 function cloneAndFreeze<T>(value: T): T {
 	return freezeValue(cloneValue(value));
 }
+
+export const EMPTY_CAPTURE_HEADER_RUNTIME: CaptureHeaderRuntimeSnapshot = cloneAndFreeze({
+	captureId: null,
+	summary: EMPTY_CAPTURE_HEADER_SNAPSHOT.summary
+});
 
 export const IDLE_WORKFLOW: WorkflowState = cloneAndFreeze({ status: "idle" });
 
@@ -281,6 +287,7 @@ export type ApplicationEvent =
 	| { type: "view/collapse-runs-changed"; collapseRuns: boolean }
 	| { type: "view/replaced"; viewState: ViewStateSnapshot }
 	| { type: "capture/selected-changed"; captureId: string | null }
+	| { type: "capture-header/runtime-updated"; state: CaptureHeaderRuntimeSnapshot }
 	| { type: "dialog/command-changed"; command: DialogCommandInput | null }
 	| { type: "canonicalization/changed"; update: Partial<CanonicalizationState> }
 	| { type: "transport/connection-started"; startedAt: number }
@@ -317,6 +324,7 @@ export type ApplicationStore = {
 export type ApplicationState = Readonly<{
 	viewState: ViewStateSnapshot;
 	selectedCaptureId: string | null;
+	captureHeaderRuntime: CaptureHeaderRuntimeSnapshot;
 	dialog: DialogCommand | null;
 	canonicalization: CanonicalizationState;
 	transport: TransportState;
@@ -335,6 +343,7 @@ function createApplicationState(viewState: ViewStateSnapshot, selectedCaptureId:
 	return cloneAndFreeze({
 		viewState: cloneViewStateSnapshot(viewState),
 		selectedCaptureId,
+		captureHeaderRuntime: EMPTY_CAPTURE_HEADER_RUNTIME,
 		dialog: null,
 		canonicalization: EMPTY_CANONICALIZATION_STATE,
 		transport: EMPTY_TRANSPORT_STATE,
@@ -377,6 +386,7 @@ export const selectViewState: ApplicationSelector<ViewStateSnapshot> = state => 
 export const selectActivePanel: ApplicationSelector<ViewPanel> = state => state.viewState.activePanel;
 export const selectDisplayMode: ApplicationSelector<DisplayMode> = state => state.viewState.displayMode;
 export const selectSelectedCaptureId: ApplicationSelector<string | null> = state => state.selectedCaptureId;
+export const selectCaptureHeaderRuntime: ApplicationSelector<CaptureHeaderRuntimeSnapshot> = state => state.captureHeaderRuntime;
 export const selectDialog: ApplicationSelector<DialogCommand | null> = state => state.dialog;
 export const selectCanonicalization: ApplicationSelector<CanonicalizationState> = state => state.canonicalization;
 export const selectCanonicalizationWorkflow: ApplicationSelector<WorkflowState> = state => state.canonicalization.workflow;
@@ -422,6 +432,8 @@ export function createApplicationStore(
 				Object.freeze({ ...state, viewState: cloneViewStateSnapshot(event.viewState) }),
 			"capture/selected-changed": (state, event: { captureId: string | null }) =>
 				Object.freeze({ ...state, selectedCaptureId: event.captureId }),
+			"capture-header/runtime-updated": (state, event: { state: CaptureHeaderRuntimeSnapshot }) =>
+				Object.freeze({ ...state, captureHeaderRuntime: cloneAndFreeze(event.state) }),
 			"dialog/command-changed": (state, event: { command: DialogCommandInput | null }) => {
 				if (!event.command) return Object.freeze({ ...state, dialog: null });
 				const command = cloneAndFreeze({ ...event.command, requestId: ++nextDialogRequestId }) as DialogCommand;

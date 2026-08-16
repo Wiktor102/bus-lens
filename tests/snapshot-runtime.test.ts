@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getCaptureHeaderSnapshot } from "../src/features/capture/capture-header-bridge.ts";
 import type { Capture } from "../src/features/capture/capture-framing.ts";
 import { createLiveStateService } from "../src/app/live-state-service.ts";
-import { selectFramingToolbar, selectMessageStream, selectSendRuntime, createApplicationStore } from "../src/shared/application-store.ts";
+import {
+	createApplicationStore,
+	selectCaptureHeaderRuntime,
+	selectFramingToolbar,
+	selectMessageStream,
+	selectSendRuntime
+} from "../src/shared/application-store.ts";
 import { EMPTY_VIEW_STATE_SNAPSHOT } from "../src/shared/view-state.ts";
 
 function capture(id: string): Capture {
@@ -28,8 +33,8 @@ test("publishes live header and projections for the selected capture", () => {
 	});
 
 	snapshots.render();
-	assert.equal(getCaptureHeaderSnapshot().captureId, selectedCapture.id);
-	assert.equal(getCaptureHeaderSnapshot().live, true);
+	assert.equal(selectCaptureHeaderRuntime(store.getSnapshot()).captureId, selectedCapture.id);
+	assert.equal(selectCaptureHeaderRuntime(store.getSnapshot()).summary.capturedBytes, "0 B");
 	assert.equal(selectFramingToolbar(store.getSnapshot()).captureId, selectedCapture.id);
 	assert.equal(selectMessageStream(store.getSnapshot()).captureId, selectedCapture.id);
 });

@@ -1,5 +1,4 @@
 import { deriveCaptureHeaderSnapshot } from "../features/capture/capture-header.ts";
-import { publishCaptureHeaderSnapshot } from "../features/capture/capture-header-bridge.ts";
 import { deriveMessageStreamSnapshot, type MessageStreamDeriveOptions } from "../features/message-stream/message-stream.ts";
 import { selectFramingToolbarSnapshot } from "../features/capture/framing-toolbar.ts";
 import type { Capture } from "../features/capture/capture-framing.ts";
@@ -36,7 +35,14 @@ export function createLiveStateService(dependencies: LiveStateServiceDependencie
 	function publishCaptureHeaderState(capture = dependencies.capture()): void {
 		const recordingCaptureId = dependencies.getTransport().getRecordingCaptureId();
 		const isRecording = Boolean(capture?.id && recordingCaptureId === String(capture.id));
-		publishCaptureHeaderSnapshot(deriveCaptureHeaderSnapshot(capture, isRecording));
+		const snapshot = deriveCaptureHeaderSnapshot(capture, isRecording);
+		store.send({
+			type: "capture-header/runtime-updated",
+			state: {
+				captureId: snapshot.captureId,
+				summary: snapshot.summary
+			}
+		});
 	}
 
 	function publishSendState(): void {

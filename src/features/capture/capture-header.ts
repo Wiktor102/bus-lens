@@ -28,6 +28,8 @@ export type CaptureHeaderSnapshot = {
 	summary: CaptureHeaderSummary;
 };
 
+export type CaptureHeaderRuntimeSnapshot = Pick<CaptureHeaderSnapshot, "captureId" | "summary">;
+
 const EMPTY_HEADER_SUMMARY: CaptureHeaderSummary = {
 	messages: "0",
 	unique: "0",
@@ -104,7 +106,7 @@ export function deriveCaptureHeaderSnapshot(
  */
 export function mergeCaptureHeaderRuntimeStats(
 	snapshot: CaptureHeaderSnapshot,
-	liveSnapshot: CaptureHeaderSnapshot
+	liveSnapshot: CaptureHeaderRuntimeSnapshot
 ): CaptureHeaderSnapshot {
 	if (!snapshot.captureId || snapshot.captureId !== liveSnapshot.captureId) return snapshot;
 	return { ...snapshot, summary: liveSnapshot.summary };

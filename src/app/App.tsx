@@ -10,11 +10,7 @@ import {
 	type RefObject
 } from "react";
 import { ArchiveSidebar } from "../features/archive/archive-sidebar";
-import {
-	getCaptureHeaderActions,
-	getCaptureHeaderSnapshot,
-	subscribeToCaptureHeader
-} from "../features/capture/capture-header-bridge";
+import { getCaptureHeaderActions } from "../features/capture/capture-header-bridge";
 import {
 	getCaptureStorageActions,
 	captureStorageSnapshot
@@ -43,6 +39,7 @@ import { deriveMessageStreamSnapshot } from "../features/message-stream/message-
 import { MessageStream } from "../features/message-stream/message-stream-view";
 import { useApplicationSelector, useApplicationSend } from "./application-store-provider";
 import {
+	selectCaptureHeaderRuntime,
 	selectFramingToolbar,
 	selectMessageStream,
 	selectPersistenceError,
@@ -168,11 +165,7 @@ function TopBar() {
 function CaptureHeader() {
 	const activeCapture = useSelectedArchiveCapture();
 	const transport = useApplicationSelector(selectTransport);
-	const liveHeader = useSyncExternalStore(
-		subscribeToCaptureHeader,
-		getCaptureHeaderSnapshot,
-		getCaptureHeaderSnapshot
-	);
+	const liveHeader = useApplicationSelector(selectCaptureHeaderRuntime);
 	const querySnapshot = deriveCaptureHeaderSnapshot(
 		activeCapture.data,
 		transport.recordingCaptureId === activeCapture.captureId
