@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createSerialController, MAX_CAPTURE_BYTES } from "../src/features/transport/serial-controller.ts";
+import { getTransportSnapshot } from "../src/features/transport/transport-bridge.ts";
 import type { AppendCaptureChunkRequest } from "../src/features/transport/capture-append-queue.ts";
 import type { Capture } from "../src/features/capture/capture-framing.ts";
 import type { AppState } from "../src/shared/app-state.ts";
@@ -61,6 +62,7 @@ test("keeps the recording target when the selected capture changes", async () =>
 	});
 
 	await controller.toggleRecording();
+	assert.equal(getTransportSnapshot().recordingCaptureId, recordingCapture.id);
 	selected = selectedCapture;
 	controller.queueLiveBytes([0xaa], "rx");
 	controller.flushLiveBytes();
@@ -71,6 +73,7 @@ test("keeps the recording target when the selected capture changes", async () =>
 
 	await controller.stopRecording();
 	assert.equal(controller.getRecordingCaptureId(), null);
+	assert.equal(getTransportSnapshot().recordingCaptureId, null);
 });
 
 test("retaining a rolling capture preserves the framing active at the rollover boundary", () => {
@@ -156,7 +159,7 @@ test("canonical stop drains acknowledged appends before finalizing exactly once"
 	await Promise.all([firstStop, repeatedStop]);
 
 	assert.equal(finalizeCount, 1);
-	assert.deepEqual(events.filter(event => /^(start|append|finalize|refresh)/.test(event)), ["start", "append:0:0", "finalize:1", "refresh"]);
+	assert.deepEqual(events.filter(event => /^(start|append|finalize|refresh)/.test(event)), ["start", "refresh", "append:0:0", "finalize:1", "refresh"]);
 	assert.equal(appendRequests.length, 1);
 	assert.deepEqual(appendRequests[0].segments.map(segment => ({ direction: segment.direction, bytes: segment.bytes })), [
 		{ direction: "rx", bytes: [0x10, 0x11] }

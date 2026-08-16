@@ -167,7 +167,10 @@ function TopBar() {
 function CaptureHeader() {
 	const activeCapture = useSelectedArchiveCapture();
 	const transport = useSyncExternalStore(subscribeToTransport, getTransportSnapshot, getTransportSnapshot);
-	const snapshot = deriveCaptureHeaderSnapshot(activeCapture.data, transport.recording);
+	const snapshot = deriveCaptureHeaderSnapshot(
+		activeCapture.data,
+		transport.recordingCaptureId === activeCapture.captureId
+	);
 	const actions = getCaptureHeaderActions();
 	const storage = captureStorageSnapshot(
 		activeCapture.captureId,

@@ -3,6 +3,7 @@ import { createExternalStore } from "../../shared/external-store.ts";
 export type TransportSnapshot = {
 	connected: boolean;
 	recording: boolean;
+	recordingCaptureId: string | null;
 	connectionLabel: "Disconnected" | "Port connected";
 	connectLabel: "Connect port" | "Disconnect";
 	recordLabel: "Start capture" | "Stop capture";
@@ -19,6 +20,7 @@ export type TransportActions = {
 export const EMPTY_TRANSPORT_SNAPSHOT: TransportSnapshot = {
 	connected: false,
 	recording: false,
+	recordingCaptureId: null,
 	connectionLabel: "Disconnected",
 	connectLabel: "Connect port",
 	recordLabel: "Start capture",

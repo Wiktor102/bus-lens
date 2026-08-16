@@ -163,12 +163,29 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		publishTransportSnapshot({
 			connected,
 			recording,
+			recordingCaptureId: recording ? recordingCaptureId : null,
 			connectionLabel: connected ? "Port connected" : "Disconnected",
 			connectLabel: connected ? "Disconnect" : "Connect port",
 			recordLabel: recording ? "Stop capture" : "Start capture",
 			recordDisabled: !connected || !activeCapture || conversionLocked
 		});
 		dependencies.publishSendState?.();
+	}
+
+	let projectionRefresh: Promise<void> = Promise.resolve();
+
+	function refreshCaptureProjection(captureId: string, applyToRuntime = false): Promise<void> {
+		const refreshCapture = dependencies.recordingWriter?.refreshCapture;
+		if (!refreshCapture) return Promise.resolve();
+		const next = projectionRefresh.catch(() => {}).then(async () => {
+			const refreshed = await refreshCapture(captureId);
+			if (applyToRuntime) {
+				const capture = captureById(captureId);
+				if (capture) Object.assign(capture, refreshed);
+			}
+		});
+		projectionRefresh = next.catch(() => {});
+		return next;
 	}
 
 	function trimCapture(capture: Capture) {
@@ -356,22 +373,14 @@ export function createSerialController(dependencies: SerialControllerDependencie
 				await appendQueue.drain(captureId);
 				const boundary = appendQueue.boundary(captureId);
 				await dependencies.recordingWriter.finalizeSession(captureId, sessionId, boundary.dataRevision);
-				if (dependencies.recordingWriter.refreshCapture) {
-					const refreshed = await dependencies.recordingWriter.refreshCapture(captureId);
-					const capture = captureById(captureId);
-					if (capture) Object.assign(capture, refreshed);
-				}
-				} else if (persist) {
-					const capture = captureById(captureId ?? undefined);
-					if (capture) capture.lifecycle = "finalized";
-					await legacyWrite;
-					await persistLiveCapture(capture);
-					if (captureId && dependencies.recordingWriter?.refreshCapture) {
-						const refreshed = await dependencies.recordingWriter.refreshCapture(captureId);
-						const current = captureById(captureId);
-						if (current) Object.assign(current, refreshed);
-					}
-				}
+				await refreshCaptureProjection(captureId, true);
+			} else if (persist) {
+				const capture = captureById(captureId ?? undefined);
+				if (capture) capture.lifecycle = "finalized";
+				await legacyWrite;
+				await persistLiveCapture(capture);
+				if (captureId) await refreshCaptureProjection(captureId, true);
+			}
 			recordingSessionId = null;
 			recordingCaptureId = null;
 			canonicalRecording = false;
@@ -422,9 +431,12 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			recordingSessionId = session.id;
 			recording = true;
 			persistenceError = null;
-				dependencies.publishPersistenceError?.(null);
-				if (!canonicalRecording) persistLiveCapture(capture);
-				publishState();
+			dependencies.publishPersistenceError?.(null);
+			if (!canonicalRecording) await persistLiveCapture(capture);
+			publishState();
+			await refreshCaptureProjection(captureId).catch(error => {
+				console.error(`Could not refresh recording capture ${captureId}`, error);
+			});
 			dependencies.showToast("Capture started");
 		})().catch(error => {
 			handlePersistenceFailure(captureId, error);
