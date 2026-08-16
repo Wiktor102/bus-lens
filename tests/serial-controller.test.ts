@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createSerialController, MAX_CAPTURE_BYTES } from "../src/features/transport/serial-controller.ts";
-import { getTransportSnapshot } from "../src/features/transport/transport-bridge.ts";
 import { deriveCaptureHeaderSnapshot } from "../src/features/capture/capture-header.ts";
 import type { AppendCaptureChunkRequest } from "../src/features/transport/capture-append-queue.ts";
 import type { Capture } from "../src/features/capture/capture-framing.ts";
@@ -49,6 +48,7 @@ test("keeps the recording target when the selected capture changes", async () =>
 	const recordingCapture: Capture = { id: "recording", byteStream: [], frameSections: [], messages: [], notes: [], annotations: {} };
 	const selectedCapture: Capture = { id: "selected", byteStream: [], frameSections: [], messages: [], notes: [], annotations: {} };
 	let selected = recordingCapture;
+	let recordingCaptureId: string | null = null;
 	const controller = createSerialController({
 		capture: () => selected,
 		state: { captures: [recordingCapture, selectedCapture] } as AppState,
@@ -58,12 +58,13 @@ test("keeps the recording target when the selected capture changes", async () =>
 		publishFramingToolbarState: () => {},
 		publishAnalysisState: () => {},
 		publishNotesState: () => {},
+		publishTransportState: view => { recordingCaptureId = view.recordingCaptureId; },
 		renderMessages: () => {},
 		stopSendQueue: () => {}
 	});
 
 	await controller.toggleRecording();
-	assert.equal(getTransportSnapshot().recordingCaptureId, recordingCapture.id);
+	assert.equal(recordingCaptureId, recordingCapture.id);
 	selected = selectedCapture;
 	controller.queueLiveBytes([0xaa], "rx");
 	controller.flushLiveBytes();
@@ -74,7 +75,7 @@ test("keeps the recording target when the selected capture changes", async () =>
 
 	await controller.stopRecording();
 	assert.equal(controller.getRecordingCaptureId(), null);
-	assert.equal(getTransportSnapshot().recordingCaptureId, null);
+	assert.equal(recordingCaptureId, null);
 });
 
 test("publishes updated live header stats after a byte flush", async () => {
