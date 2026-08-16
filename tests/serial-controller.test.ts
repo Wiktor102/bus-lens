@@ -144,14 +144,19 @@ test("canonical stop drains acknowledged appends before finalizing exactly once"
 	const capture: Capture = { id: "canonical", byteStream: [], frameSections: [{ id: "section", start: 0, framingMode: "length", frameSize: 2 }], messages: [], notes: [], annotations: {} };
 	const events: string[] = [];
 	const appendRequests: AppendCaptureChunkRequest[] = [];
+	const framingStates: Array<{ workflow: string; disabled: boolean }> = [];
 	let finalizeCount = 0;
-	const controller = createSerialController({
+	let controller!: ReturnType<typeof createSerialController>;
+	controller = createSerialController({
 		capture: () => capture,
 		state: { captures: [capture] } as AppState,
 		saveState: () => { throw new Error("canonical recording must not use saveState"); },
 		showToast: message => events.push(`toast:${message}`),
 		publishCaptureHeaderState: () => {},
-		publishFramingToolbarState: () => {},
+		publishFramingToolbarState: current => framingStates.push({
+			workflow: controller.getRecordingWorkflow(),
+			disabled: Boolean(current?.id && controller.isCaptureMutationLocked(String(current.id)))
+		}),
 		publishAnalysisState: () => {},
 		publishNotesState: () => {},
 		renderMessages: () => {},
@@ -194,6 +199,56 @@ test("canonical stop drains acknowledged appends before finalizing exactly once"
 	assert.equal(events.at(-1), "toast:Capture finalized and stored");
 	assert.equal(controller.hasUnacknowledgedBytes(), false);
 	assert.equal((capture as Capture & { lifecycle?: string }).lifecycle, "finalized");
+	const stopStates = framingStates.filter(state => state.workflow === "finalizing" || state.workflow === "finalized");
+	assert.ok(stopStates.some(state => state.workflow === "finalizing" && state.disabled));
+	assert.deepEqual(stopStates.at(-1), { workflow: "finalized", disabled: false });
+});
+
+test("publishes the mutation lock when finalizing without pending live bytes", async () => {
+	const capture: Capture = {
+		id: "canonical-empty-stop",
+		byteStream: [],
+		frameSections: [{ id: "section", start: 0, framingMode: "length", frameSize: 2 }],
+		messages: [],
+		notes: [],
+		annotations: {}
+	};
+	const framingStates: Array<{ workflow: string; disabled: boolean }> = [];
+	let controller!: ReturnType<typeof createSerialController>;
+	controller = createSerialController({
+		capture: () => capture,
+		state: { captures: [capture] } as AppState,
+		showToast: () => {},
+		publishCaptureHeaderState: () => {},
+		publishFramingToolbarState: current => framingStates.push({
+			workflow: controller.getRecordingWorkflow(),
+			disabled: Boolean(current?.id && controller.isCaptureMutationLocked(String(current.id)))
+		}),
+		publishTransportState: () => {},
+		renderMessages: () => {},
+		stopSendQueue: () => {},
+		recordingWriter: {
+			startSession: async (_captureId, sessionId) => ({ sessionId, nextChunkSequence: 0, nextRawOffset: 0, dataRevision: 0 }),
+			appendChunk: async request => ({
+				acceptedStartOffset: request.expectedStartOffset,
+				acceptedEndOffset: request.expectedStartOffset,
+				nextRawOffset: request.expectedStartOffset,
+				nextSequence: request.sequence + 1,
+				dataRevision: 0
+			}),
+			finalizeSession: async () => {},
+			refreshCapture: async () => ({ ...capture, lifecycle: "finalized" } as Capture)
+		}
+	});
+
+	await controller.toggleRecording();
+	framingStates.length = 0;
+	await controller.stopRecording();
+
+	assert.deepEqual(framingStates, [
+		{ workflow: "finalizing", disabled: true },
+		{ workflow: "finalized", disabled: false }
+	]);
 });
 
 test("finalization waits for an accepted section edit and refreshes that edit", async () => {
@@ -372,14 +427,19 @@ test("failed finalization keeps a locked recovery target until retry succeeds", 
 	let finalizeCount = 0;
 	let refreshCount = 0;
 	const views: Array<{ label: string; recordingCaptureId: string | null; disabled: boolean }> = [];
+	const framingStates: Array<{ workflow: string; disabled: boolean }> = [];
 	const persistenceErrors: Array<string | null> = [];
-	const controller = createSerialController({
+	let controller!: ReturnType<typeof createSerialController>;
+	controller = createSerialController({
 		capture: () => capture,
 		getCapture: captureId => captureId === capture.id ? capture : undefined,
 		state: { captures: [capture] } as AppState,
 		showToast: () => {},
 		publishCaptureHeaderState: () => {},
-		publishFramingToolbarState: () => {},
+		publishFramingToolbarState: current => framingStates.push({
+			workflow: controller.getRecordingWorkflow(),
+			disabled: Boolean(current?.id && controller.isCaptureMutationLocked(String(current.id)))
+		}),
 		publishTransportState: view => views.push({ label: view.recordLabel, recordingCaptureId: view.recordingCaptureId, disabled: view.recordDisabled }),
 		publishPersistenceError: error => persistenceErrors.push(error?.message ?? null),
 		renderMessages: () => {},
@@ -414,6 +474,8 @@ test("failed finalization keeps a locked recovery target until retry succeeds", 
 	assert.equal(refreshCount, 1);
 	assert.ok(views.some(view => view.label === "Saving…" && view.recordingCaptureId === capture.id && view.disabled));
 	assert.ok(persistenceErrors.includes("materialization unavailable"));
+	assert.ok(framingStates.some(state => state.workflow === "finalizing" && state.disabled));
+	assert.ok(framingStates.some(state => state.workflow === "failed" && state.disabled));
 
 	fail = false;
 	await controller.retryPersistence();
@@ -423,6 +485,7 @@ test("failed finalization keeps a locked recovery target until retry succeeds", 
 	assert.equal(controller.isCaptureMutationLocked(capture.id!), false);
 	assert.equal(capture.lifecycle, "finalized");
 	assert.equal(persistenceErrors.at(-1), null);
+	assert.deepEqual(framingStates.at(-1), { workflow: "finalized", disabled: false });
 });
 
 test("transport controller publishes application-owned view and workflow transitions", async () => {

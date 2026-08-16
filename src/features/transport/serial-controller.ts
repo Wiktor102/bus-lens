@@ -201,6 +201,11 @@ export function createSerialController(dependencies: SerialControllerDependencie
 				break;
 		}
 		dependencies.publishTransportWorkflow?.(event);
+		if (event.type.startsWith("transport/recording-")) {
+			const capture = recordingCaptureId ? captureById(recordingCaptureId) : dependencies.capture();
+			dependencies.publishFramingToolbarState(capture);
+			dependencies.renderMessages({ live: recording });
+		}
 	}
 
 	function isConnected() {
