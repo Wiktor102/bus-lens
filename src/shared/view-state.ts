@@ -1,14 +1,14 @@
 export type ViewPanel = "stream" | "patterns" | "notes";
 export type DisplayMode = "hex" | "binary";
 
-export type ViewStateSnapshot = {
+export type ViewStateSnapshot = Readonly<{
 	activePanel: ViewPanel;
 	filterOpen: boolean;
 	filterQuery: string;
 	displayMode: DisplayMode;
 	showFrameChanges: boolean;
 	collapseRuns: boolean;
-};
+}>;
 
 export type ViewStateAction =
 	| { type: "set-active-panel"; activePanel: ViewPanel }
@@ -18,14 +18,14 @@ export type ViewStateAction =
 	| { type: "set-frame-changes"; showFrameChanges: boolean }
 	| { type: "set-collapse-runs"; collapseRuns: boolean };
 
-export const EMPTY_VIEW_STATE_SNAPSHOT: ViewStateSnapshot = {
+export const EMPTY_VIEW_STATE_SNAPSHOT: ViewStateSnapshot = Object.freeze({
 	activePanel: "stream",
 	filterOpen: false,
 	filterQuery: "",
 	displayMode: "hex",
 	showFrameChanges: true,
 	collapseRuns: false
-};
+});
 
 export function reduceViewState(
 	state: ViewStateSnapshot,

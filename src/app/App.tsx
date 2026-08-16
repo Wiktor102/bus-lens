@@ -1,8 +1,8 @@
 import {
 	memo,
+	useCallback,
 	useEffect,
 	useLayoutEffect,
-	useReducer,
 	useRef,
 	useState,
 	useSyncExternalStore,
@@ -46,7 +46,8 @@ import {
 } from "../features/dialogs/dialogs";
 import { getMessageStreamSnapshot, subscribeToMessageStream } from "../features/message-stream/message-stream-bridge";
 import { MessageStream } from "../features/message-stream/message-stream-view";
-import { publishViewStateSnapshot } from "../shared/view-state-bridge";
+import { useApplicationSelector, useApplicationSend } from "./application-store-provider";
+import { selectViewState, viewStateActionToApplicationEvent } from "../shared/application-store";
 import {
 	ArrowUp,
 	Copy,
@@ -62,8 +63,6 @@ import {
 	X
 } from "lucide-react";
 import {
-	EMPTY_VIEW_STATE_SNAPSHOT,
-	reduceViewState,
 	type DisplayMode,
 	type ViewStateAction,
 	type ViewStateSnapshot
@@ -1174,7 +1173,12 @@ function App() {
 	const [sendPopupOpen, setSendPopupOpen] = useState(false);
 	const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
 	const [sidebarResizing, setSidebarResizing] = useState(false);
-	const [viewState, dispatchViewState] = useReducer(reduceViewState, EMPTY_VIEW_STATE_SNAPSHOT);
+	const viewState = useApplicationSelector(selectViewState);
+	const sendApplicationEvent = useApplicationSend();
+	const dispatchViewState = useCallback(
+		(action: ViewStateAction) => sendApplicationEvent(viewStateActionToApplicationEvent(action)),
+		[sendApplicationEvent]
+	);
 	const messageFilterRef = useRef<HTMLInputElement>(null);
 	const messageFilterToggleRef = useRef<HTMLButtonElement>(null);
 	const handleSendPopupChange = (open: boolean) => setSendPopupOpen(open);
@@ -1206,8 +1210,6 @@ function App() {
 			removeBeforeUnload?.();
 		};
 	}, []);
-
-	useEffect(() => publishViewStateSnapshot(viewState), [viewState]);
 
 	return (
 		<>
