@@ -28,6 +28,14 @@ export type WorkflowState =
 	| { status: "success"; completedAt: number }
 	| { status: "failure"; error: string; canRetry: boolean };
 
+export type RecordingWorkflowState =
+	| { status: "idle" }
+	| { status: "starting"; startedAt: number }
+	| { status: "recording"; startedAt: number }
+	| { status: "finalizing"; startedAt: number }
+	| { status: "finalized"; completedAt: number }
+	| { status: "failed"; error: string; canRetry: boolean };
+
 function cloneValue<T>(value: T, seen = new WeakMap<object, unknown>()): T {
 	if (!value || typeof value !== "object") return value;
 	if (seen.has(value as object)) return seen.get(value as object) as T;
@@ -111,13 +119,13 @@ export type TransportViewState = {
 	recordingCaptureId: string | null;
 	connectionLabel: "Disconnected" | "Port connected";
 	connectLabel: "Connect port" | "Disconnect";
-	recordLabel: "Start capture" | "Stop capture";
+	recordLabel: "Start capture" | "Stop capture" | "Starting…" | "Saving…" | "Save failed";
 	recordDisabled: boolean;
 };
 
 export type TransportState = TransportViewState & {
 	connection: WorkflowState;
-	recordingWorkflow: WorkflowState;
+	recordingWorkflow: RecordingWorkflowState;
 };
 
 export const EMPTY_TRANSPORT_STATE: TransportState = cloneAndFreeze({
@@ -129,7 +137,7 @@ export const EMPTY_TRANSPORT_STATE: TransportState = cloneAndFreeze({
 	recordLabel: "Start capture",
 	recordDisabled: true,
 	connection: IDLE_WORKFLOW,
-	recordingWorkflow: IDLE_WORKFLOW
+	recordingWorkflow: { status: "idle" } satisfies RecordingWorkflowState
 });
 
 export type SendRuntimeState = {
@@ -293,8 +301,10 @@ export type ApplicationEvent =
 	| { type: "transport/connection-started"; startedAt: number }
 	| { type: "transport/connection-succeeded"; completedAt: number }
 	| { type: "transport/connection-failed"; error: string; canRetry: boolean }
+	| { type: "transport/recording-starting"; startedAt: number }
 	| { type: "transport/recording-started"; startedAt: number }
-	| { type: "transport/recording-succeeded"; completedAt: number }
+	| { type: "transport/recording-finalizing"; startedAt: number }
+	| { type: "transport/recording-finalized"; completedAt: number }
 	| { type: "transport/recording-failed"; error: string; canRetry: boolean }
 	| { type: "transport/view-updated"; view: TransportViewState }
 	| { type: "send/started"; startedAt: number }
@@ -392,7 +402,7 @@ export const selectCanonicalization: ApplicationSelector<CanonicalizationState> 
 export const selectCanonicalizationWorkflow: ApplicationSelector<WorkflowState> = state => state.canonicalization.workflow;
 export const selectTransport: ApplicationSelector<TransportState> = state => state.transport;
 export const selectConnectionWorkflow: ApplicationSelector<WorkflowState> = state => state.transport.connection;
-export const selectRecordingWorkflow: ApplicationSelector<WorkflowState> = state => state.transport.recordingWorkflow;
+export const selectRecordingWorkflow: ApplicationSelector<RecordingWorkflowState> = state => state.transport.recordingWorkflow;
 export const selectSendRuntime: ApplicationSelector<SendRuntimeState> = state => state.send;
 export const selectSendWorkflow: ApplicationSelector<WorkflowState> = state => state.send.sendWorkflow;
 export const selectQueueWorkflow: ApplicationSelector<WorkflowState> = state => state.send.queueWorkflow;
@@ -450,12 +460,16 @@ export function createApplicationStore(
 				replaceTransport(state, { connection: { status: "success", completedAt: event.completedAt } }),
 			"transport/connection-failed": (state, event: { error: string; canRetry: boolean }) =>
 				replaceTransport(state, { connection: workflowFailure(event.error, event.canRetry) }),
+			"transport/recording-starting": (state, event: { startedAt: number }) =>
+				replaceTransport(state, { recordingWorkflow: { status: "starting", startedAt: event.startedAt } }),
 			"transport/recording-started": (state, event: { startedAt: number }) =>
-				replaceTransport(state, { recordingWorkflow: { status: "running", startedAt: event.startedAt } }),
-			"transport/recording-succeeded": (state, event: { completedAt: number }) =>
-				replaceTransport(state, { recordingWorkflow: { status: "success", completedAt: event.completedAt } }),
+				replaceTransport(state, { recordingWorkflow: { status: "recording", startedAt: event.startedAt } }),
+			"transport/recording-finalizing": (state, event: { startedAt: number }) =>
+				replaceTransport(state, { recordingWorkflow: { status: "finalizing", startedAt: event.startedAt } }),
+			"transport/recording-finalized": (state, event: { completedAt: number }) =>
+				replaceTransport(state, { recordingWorkflow: { status: "finalized", completedAt: event.completedAt } }),
 			"transport/recording-failed": (state, event: { error: string; canRetry: boolean }) =>
-				replaceTransport(state, { recordingWorkflow: workflowFailure(event.error, event.canRetry) }),
+				replaceTransport(state, { recordingWorkflow: { status: "failed", error: String(event.error), canRetry: Boolean(event.canRetry) } }),
 			"transport/view-updated": (state, event: { view: TransportViewState }) =>
 				replaceTransport(state, { ...event.view }),
 			"send/started": (state, event: { startedAt: number }) =>

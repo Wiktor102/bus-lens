@@ -57,7 +57,10 @@ export type CaptureControllerDependencies = {
 	renderMessages: (options?: MessageStreamDeriveOptions) => void;
 	showToast: (message: string) => void;
 	confirm: (message: string) => boolean;
-	transport: Pick<SerialController, "isRecording" | "stopRecording">;
+	transport: Pick<SerialController, "isRecording" | "stopRecording"> & {
+		isCaptureMutationLocked?: (captureId: string) => boolean;
+		isCaptureFinalizing?: (captureId: string) => boolean;
+	};
 	publishDialogCommand: typeof publishDialogCommand;
 	captureWriter?: CaptureWriter;
 	isCanonicalCapture?: (captureId: string) => boolean;
@@ -148,6 +151,10 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	}
 
 	function rejectLockedMutation(item: Capture | undefined): boolean {
+		if (item?.id && dependencies.transport.isCaptureMutationLocked?.(String(item.id))) {
+			dependencies.showToast("Capture is still being saved; editing is temporarily disabled");
+			return true;
+		}
 		if (!isConversionLocked(item)) return false;
 		dependencies.showToast("Capture conversion is in progress; editing is temporarily disabled");
 		return true;
@@ -232,17 +239,19 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (dependencies.waitForCaptureWrite) await dependencies.waitForCaptureWrite(captureId);
 		const item = captureById(captureId);
 		if (!item || !isCanonical(item)) return;
-		const result = dependencies.archiveCommands
-			? await dependencies.archiveCommands.patchMetadata({
+		const operation = dependencies.archiveCommands
+			? dependencies.archiveCommands.patchMetadata({
 				captureId: item.id,
 				expectedMetadataRevision: item.metadataRevision,
 				patch
 			})
-			: await dependencies.captureWriter!.patchMetadata({
+			: dependencies.captureWriter!.patchMetadata({
 			captureId: item.id,
 			expectedMetadataRevision: item.metadataRevision,
 			patch
 			});
+		dependencies.trackCaptureWrite?.(captureId, operation);
+		const result = await operation;
 		const current = captureById(captureId);
 		if (current) {
 			current.metadataRevision = result.metadataRevision;
@@ -254,8 +263,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (dependencies.waitForCaptureWrite) await dependencies.waitForCaptureWrite(captureId);
 		const item = captureById(captureId);
 		if (!item || !isCanonical(item)) return;
-		if (dependencies.transport.isRecording()) {
-			const draft = await (dependencies.archiveCommands
+		if (dependencies.transport.isRecording() || dependencies.transport.isCaptureFinalizing?.(captureId)) {
+			const operation = dependencies.archiveCommands
 				? dependencies.archiveCommands.recordingWriter.updateFramingDraft({
 					captureId: item.id,
 					sections,
@@ -265,13 +274,15 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				captureId: item.id,
 				sections,
 				expectedRevision: item.framingDraftRevision
-				}));
+				});
+			dependencies.trackCaptureWrite?.(captureId, operation);
+			const draft = await operation;
 			const current = captureById(captureId);
 			if (current) {
 				current.framingDraftRevision = draft.revision;
 			}
 		} else {
-			const profile = await (dependencies.archiveCommands
+			const operation = dependencies.archiveCommands
 				? dependencies.archiveCommands.recordingWriter.reframe({
 					captureId: item.id,
 					sections,
@@ -283,7 +294,9 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				sections,
 				expectedActiveProfileId: item.activeFramingProfileId,
 				expectedDataRevision: Number(item.dataRevision ?? 0)
-				}));
+				});
+			dependencies.trackCaptureWrite?.(captureId, operation);
+			const profile = await operation;
 			const current = captureById(captureId);
 			if (current) {
 				current.activeFramingProfileId = profile.profileId;
@@ -376,13 +389,15 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (!item || !isCanonical(item)) return;
 		const target: CanonicalNoteTarget = { kind: "pattern", sequenceKey: patternKey };
 		if (text) {
-			const result = queue.noteId
-				? await (dependencies.archiveCommands
+			const operation = queue.noteId
+				? (dependencies.archiveCommands
 					? dependencies.archiveCommands.updateNote({ captureId: item.id, noteId: queue.noteId, text, target })
 					: dependencies.captureWriter!.updateNote({ captureId: item.id, noteId: queue.noteId, text, target }))
-				: await (dependencies.archiveCommands
+				: (dependencies.archiveCommands
 					? dependencies.archiveCommands.createNote({ captureId: item.id, text, target })
 					: dependencies.captureWriter!.createNote({ captureId: item.id, text, target }));
+			dependencies.trackCaptureWrite?.(captureId, operation);
+			const result = await operation;
 			queue.noteId = result.note.id;
 			const current = captureById(captureId);
 			if (current) {
@@ -391,9 +406,11 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				current.contentRevision = result.contentRevision;
 			}
 		} else if (queue.noteId) {
-			await (dependencies.archiveCommands
+			const operation = dependencies.archiveCommands
 				? dependencies.archiveCommands.deleteNote({ captureId: item.id, noteId: queue.noteId })
-				: dependencies.captureWriter!.deleteNote({ captureId: item.id, noteId: queue.noteId }));
+				: dependencies.captureWriter!.deleteNote({ captureId: item.id, noteId: queue.noteId });
+			dependencies.trackCaptureWrite?.(captureId, operation);
+			await operation;
 			queue.noteId = undefined;
 		}
 	}
@@ -729,7 +746,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		});
 		const optimistic = notes.at(-1)!;
 		if (isCanonical(c) && c.activeFramingProfileId) {
-			void (dependencies.archiveCommands
+			const operation = dependencies.archiveCommands
 				? dependencies.archiveCommands.createNote({
 					captureId: c.id,
 					text: noteText,
@@ -749,7 +766,9 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 					startOrdinal: start - 1,
 					endOrdinal: end - 1
 				}
-				})).then(result => {
+				});
+			dependencies.trackCaptureWrite?.(c.id, operation);
+			void operation.then(result => {
 				optimistic.id = result.note.id;
 				c.contentRevision = result.contentRevision;
 			}).catch(error => reconcileFailure(c.id, error, () => {
@@ -895,15 +914,17 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			c.messages = [];
 			c.annotations = {};
 			c.patternRemarks = {};
-				if (isCanonical(c)) {
-					void (dependencies.archiveCommands
-						? dependencies.archiveCommands.clearCaptureData(c.id).then(() => undefined)
-						: dependencies.captureWriter!.clearData({ captureId: c.id })).then(result => {
-						if (!result) return;
-						c.dataRevision = result.dataRevision;
-						c.contentRevision = result.contentRevision;
-					}).catch(error => reconcileFailure(c.id, error));
-				} else persistLegacyCapture(c);
+			if (isCanonical(c)) {
+				const operation = dependencies.archiveCommands
+					? dependencies.archiveCommands.clearCaptureData(c.id)
+					: dependencies.captureWriter!.clearData({ captureId: c.id });
+				dependencies.trackCaptureWrite?.(c.id, operation);
+				void operation.then(result => {
+					if (!result) return;
+					c.dataRevision = result.dataRevision;
+					c.contentRevision = result.contentRevision;
+				}).catch(error => reconcileFailure(c.id, error));
+			} else persistLegacyCapture(c);
 			dependencies.render();
 		}
 	}
@@ -1143,7 +1164,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function publishAnnotationDialog(type: "message" | "byte", key: string) {
 		const c = capture();
-		if (!c) return;
+		if (!c || rejectLockedMutation(c)) return;
 		const details = annotationTargetLabel(c, type, key);
 		if (!details) return;
 		const [messageId, positionText] = key.split(":");
@@ -1208,6 +1229,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				: (dependencies.archiveCommands
 					? dependencies.archiveCommands.createNote({ captureId: c.id, text: String(optimistic.text), target })
 					: dependencies.captureWriter!.createNote({ captureId: c.id, text: String(optimistic.text), target }));
+			dependencies.trackCaptureWrite?.(c.id, operation);
 			void operation.then(result => {
 				optimistic.noteId = result.note.id;
 				c.contentRevision = result.contentRevision;
@@ -1230,9 +1252,11 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const previous = c.annotations[details.targetKey];
 		delete c.annotations[details.targetKey];
 		if (isCanonical(c) && previous?.noteId) {
-			void (dependencies.archiveCommands
+			const operation = dependencies.archiveCommands
 				? dependencies.archiveCommands.deleteNote({ captureId: c.id, noteId: previous.noteId })
-				: dependencies.captureWriter!.deleteNote({ captureId: c.id, noteId: previous.noteId }))
+				: dependencies.captureWriter!.deleteNote({ captureId: c.id, noteId: previous.noteId });
+			dependencies.trackCaptureWrite?.(c.id, operation);
+			void operation
 				.catch(error => reconcileFailure(c.id, error, () => {
 					c.annotations[details.targetKey] = previous;
 					dependencies.render();
@@ -1316,6 +1340,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		setSectionFrameTimeGap,
 		setSectionCollapse,
 		setSectionCollapsed,
+		waitForCaptureWrites,
 		commitContextDraft,
 		publishAnnotationDialog,
 		commitAnnotationDraft,

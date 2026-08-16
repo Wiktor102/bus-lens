@@ -1,7 +1,7 @@
 import type { SendSettings, StoredFolder } from "../../shared/app-state.ts";
 import type { ArchiveIndex } from "../../persistence/archive-client.ts";
 import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
-import type { ApplicationEvent, TransportViewState } from "../../shared/application-store.ts";
+import type { ApplicationEvent, RecordingWorkflowState, TransportViewState } from "../../shared/application-store.ts";
 import { recordReceivedByte } from "../capture/capture-summary.ts";
 import { appendLivePreview, rebuildPreview, type Capture } from "../capture/capture-framing.ts";
 import type { MessageStreamDeriveOptions } from "../message-stream/message-stream.ts";
@@ -38,8 +38,10 @@ type TransportWorkflowEvent = Extract<
 			| "transport/connection-started"
 			| "transport/connection-succeeded"
 			| "transport/connection-failed"
+			| "transport/recording-starting"
 			| "transport/recording-started"
-			| "transport/recording-succeeded"
+			| "transport/recording-finalizing"
+			| "transport/recording-finalized"
 			| "transport/recording-failed"
 	}
 >;
@@ -67,6 +69,12 @@ export type SerialControllerDependencies = {
 		finalizeSession: (captureId: string, sessionId: string, expectedDataRevision: number) => Promise<unknown>;
 		refreshCapture?: (captureId: string) => Promise<Capture>;
 	};
+	/** Wait for direct capture commands already in the runtime write barrier. */
+	waitForCaptureWrite?: (captureId: string) => Promise<void>;
+	/** Wait for client-side capture commands already accepted before stopping. */
+	waitForCaptureWrites?: (captureId: string) => Promise<void>;
+	/** Include finalization in the app-wide capture write barrier. */
+	trackCaptureWrite?: (captureId: string, write: Promise<unknown>) => void;
 	isCanonicalCapture?: (captureId: string) => boolean;
 	isCaptureConversionLocked?: (captureId: string) => boolean;
 	publishPersistenceError?: (error: { captureId: string; message: string } | null) => void;
@@ -111,6 +119,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	let legacyWrite: Promise<void> = Promise.resolve();
 	let stopPromise: Promise<void> | null = null;
 	let startPromise: Promise<void> | null = null;
+	let recordingWorkflow: RecordingWorkflowState["status"] = "idle";
 	const appendQueue = dependencies.recordingWriter
 		? new CaptureAppendQueue(
 				{ appendChunk: request => dependencies.recordingWriter!.appendChunk(request) },
@@ -165,10 +174,33 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		persistenceError = { captureId, error };
 		recording = false;
 		const message = error instanceof Error ? error.message : String(error);
-		dependencies.publishTransportWorkflow?.({ type: "transport/recording-failed", error: message, canRetry: true });
+		const capture = captureById(captureId);
+		if (capture) capture.lifecycle = "failed";
+		publishTransportWorkflow({ type: "transport/recording-failed", error: message, canRetry: true });
 		dependencies.publishPersistenceError?.({ captureId, message });
 		dependencies.showToast("Capture persistence paused — retry or export JSON recovery");
 		publishState();
+	}
+
+	function publishTransportWorkflow(event: TransportWorkflowEvent): void {
+		switch (event.type) {
+			case "transport/recording-starting":
+				recordingWorkflow = "starting";
+				break;
+			case "transport/recording-started":
+				recordingWorkflow = "recording";
+				break;
+			case "transport/recording-finalizing":
+				recordingWorkflow = "finalizing";
+				break;
+			case "transport/recording-finalized":
+				recordingWorkflow = "finalized";
+				break;
+			case "transport/recording-failed":
+				recordingWorkflow = "failed";
+				break;
+		}
+		dependencies.publishTransportWorkflow?.(event);
 	}
 
 	function isConnected() {
@@ -183,9 +215,21 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		return recording;
 	}
 
+	function isCaptureMutationLocked(captureId: string): boolean {
+		return recordingCaptureId === String(captureId) &&
+			(recordingWorkflow === "starting" || recordingWorkflow === "finalizing" || recordingWorkflow === "failed");
+	}
+
+	function isCaptureFinalizing(captureId: string): boolean {
+		return recordingCaptureId === String(captureId) && recordingWorkflow === "finalizing";
+	}
+
 	function publishState() {
 		const connected = isConnected();
 		const activeCapture = dependencies.capture();
+		const starting = recordingWorkflow === "starting" || Boolean(startPromise);
+		const finalizing = recordingWorkflow === "finalizing" || Boolean(stopPromise);
+		const failed = Boolean(persistenceError) || (recordingWorkflow === "failed" && Boolean(recordingCaptureId));
 		const conversionLocked = Boolean(
 			!recording &&
 			activeCapture?.id &&
@@ -194,11 +238,11 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		const view: TransportViewState = {
 			connected,
 			recording,
-			recordingCaptureId: recording ? recordingCaptureId : null,
+			recordingCaptureId,
 			connectionLabel: connected ? "Port connected" : "Disconnected",
 			connectLabel: connected ? "Disconnect" : "Connect port",
-			recordLabel: recording ? "Stop capture" : "Start capture",
-			recordDisabled: !connected || !activeCapture || conversionLocked
+			recordLabel: failed ? "Save failed" : finalizing ? "Saving…" : starting ? "Starting…" : recording ? "Stop capture" : "Start capture",
+			recordDisabled: !connected || !activeCapture || conversionLocked || starting || finalizing || failed || Boolean(recordingSessionId && !recording)
 		};
 		dependencies.publishTransportState?.(view);
 		dependencies.publishSendState?.();
@@ -339,7 +383,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	async function connect() {
 		const serial = dependencies.serial || serialProvider();
 		if (!serial) {
-			dependencies.publishTransportWorkflow?.({
+			publishTransportWorkflow({
 				type: "transport/connection-failed",
 				error: "Web Serial requires Chrome or Edge on localhost",
 				canRetry: false
@@ -351,7 +395,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			await disconnect();
 			return;
 		}
-		dependencies.publishTransportWorkflow?.({ type: "transport/connection-started", startedAt: Date.now() });
+		publishTransportWorkflow({ type: "transport/connection-started", startedAt: Date.now() });
 		try {
 			port = await serial.requestPort();
 			const baudRate = dependencies.capture()?.baudRate || dependencies.getSettings?.()?.baudRate || dependencies.state?.sendSettings?.baudRate || 115200;
@@ -360,13 +404,13 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			persistSettings({ ...settings, baudRate });
 			readAbort = false;
 			publishState();
-			dependencies.publishTransportWorkflow?.({ type: "transport/connection-succeeded", completedAt: Date.now() });
+			publishTransportWorkflow({ type: "transport/connection-succeeded", completedAt: Date.now() });
 			void readSerialLoop();
 		} catch (error) {
 			port = null;
 			publishState();
 			const serialError = error as SerialError;
-			dependencies.publishTransportWorkflow?.({
+			publishTransportWorkflow({
 				type: "transport/connection-failed",
 				error: serialError.message || String(error),
 				canRetry: true
@@ -380,7 +424,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	}
 
 	async function disconnect({ persist = true }: DisconnectOptions = {}) {
-		dependencies.publishTransportWorkflow?.({ type: "transport/connection-started", startedAt: Date.now() });
+		publishTransportWorkflow({ type: "transport/connection-started", startedAt: Date.now() });
 		const hadRecording = Boolean(recording || recordingSessionId);
 		if (!persist) {
 			flushLiveBytes();
@@ -404,18 +448,20 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		reader = null;
 		port = null;
 		publishState();
-		dependencies.publishTransportWorkflow?.({ type: "transport/connection-succeeded", completedAt: Date.now() });
+		publishTransportWorkflow({ type: "transport/connection-succeeded", completedAt: Date.now() });
 	}
 
 	function stopRecording({ notify = false, persist = true } = {}): Promise<void> {
 		if (stopPromise) return stopPromise;
 		if (!recording && !recordingSessionId) return Promise.resolve();
-		dependencies.publishTransportWorkflow?.({ type: "transport/recording-started", startedAt: Date.now() });
 		const captureId = recordingCaptureId;
 		const sessionId = recordingSessionId;
+		publishTransportWorkflow({ type: "transport/recording-finalizing", startedAt: Date.now() });
 		recording = false;
 		flushLiveBytes();
-		stopPromise = (async () => {
+		const stopping = (async () => {
+			if (captureId) await dependencies.waitForCaptureWrite?.(captureId);
+			if (captureId) await dependencies.waitForCaptureWrites?.(captureId);
 			if (canonicalRecording && captureId && sessionId && appendQueue && dependencies.recordingWriter) {
 				await appendQueue.drain(captureId);
 				const boundary = appendQueue.boundary(captureId);
@@ -428,13 +474,15 @@ export function createSerialController(dependencies: SerialControllerDependencie
 				await persistLiveCapture(capture);
 				if (captureId) await refreshCaptureProjection(captureId, true);
 			}
+			const finalizedCapture = captureById(captureId ?? undefined);
+			if (finalizedCapture) finalizedCapture.lifecycle = "finalized";
 			recordingSessionId = null;
 			recordingCaptureId = null;
 			canonicalRecording = false;
 			persistenceError = null;
 			dependencies.publishPersistenceError?.(null);
+			publishTransportWorkflow({ type: "transport/recording-finalized", completedAt: Date.now() });
 			publishState();
-			dependencies.publishTransportWorkflow?.({ type: "transport/recording-succeeded", completedAt: Date.now() });
 			if (notify) dependencies.showToast("Capture finalized and stored");
 		})().catch(error => {
 			if (captureId) handlePersistenceFailure(captureId, error);
@@ -442,7 +490,10 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		}).finally(() => {
 			stopPromise = null;
 		});
-		return stopPromise;
+		stopPromise = stopping;
+		if (captureId) dependencies.trackCaptureWrite?.(captureId, stopping);
+		publishState();
+		return stopping;
 	}
 
 	function toggleRecording(): Promise<void> {
@@ -454,6 +505,10 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		if (recording) {
 			return stopRecording({ notify: true });
 		}
+		if (startPromise || stopPromise || recordingSessionId || persistenceError) {
+			dependencies.showToast("Capture is still being saved; use the recovery controls before recording again");
+			return Promise.resolve();
+		}
 		if (dependencies.isCaptureConversionLocked?.(String(capture.id))) {
 			dependencies.showToast("Capture conversion is in progress; recording is temporarily disabled");
 			return Promise.resolve();
@@ -461,8 +516,10 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		if (startPromise) return startPromise;
 		const captureId = String(capture.id ?? "");
 		const sessionId = crypto.randomUUID();
-		dependencies.publishTransportWorkflow?.({ type: "transport/recording-started", startedAt: Date.now() });
-		startPromise = (async () => {
+		recordingCaptureId = captureId;
+		publishTransportWorkflow({ type: "transport/recording-starting", startedAt: Date.now() });
+		publishState();
+		const starting = (async () => {
 			canonicalRecording = Boolean(
 				dependencies.recordingWriter &&
 				appendQueue &&
@@ -482,28 +539,36 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			persistenceError = null;
 			dependencies.publishPersistenceError?.(null);
 			if (!canonicalRecording) await persistLiveCapture(capture);
+			publishTransportWorkflow({ type: "transport/recording-started", startedAt: Date.now() });
 			publishState();
 			dependencies.publishCaptureHeaderState?.(capture);
 			await refreshCaptureProjection(captureId).catch(error => {
 				console.error(`Could not refresh recording capture ${captureId}`, error);
 			});
-			dependencies.publishTransportWorkflow?.({ type: "transport/recording-succeeded", completedAt: Date.now() });
 			dependencies.showToast("Capture started");
 		})().catch(error => {
-			handlePersistenceFailure(captureId, error);
+			recording = false;
+			recordingSessionId = null;
+			recordingCaptureId = null;
+			canonicalRecording = false;
+			publishTransportWorkflow({ type: "transport/recording-failed", error: error instanceof Error ? error.message : String(error), canRetry: true });
+			publishState();
+			dependencies.showToast(`Capture could not start: ${error instanceof Error ? error.message : String(error)}`);
 			throw error;
 		}).finally(() => {
 			startPromise = null;
 		});
-		return startPromise;
+		startPromise = starting;
+		publishState();
+		return starting;
 	}
 
 	async function retryPersistence(): Promise<void> {
-		if (!persistenceError || !appendQueue) return;
+		if (!persistenceError) return;
 		const captureId = persistenceError.captureId;
+		if (appendQueue) await appendQueue.retry(captureId);
 		persistenceError = null;
 		dependencies.publishPersistenceError?.(null);
-		await appendQueue.retry(captureId);
 		await stopRecording({ notify: true });
 	}
 
@@ -529,7 +594,10 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		getPort,
 		isConnected,
 		isRecording,
-		getRecordingCaptureId: () => recording ? recordingCaptureId : null,
+		isCaptureMutationLocked,
+		isCaptureFinalizing,
+		getRecordingWorkflow: () => recordingWorkflow,
+		getRecordingCaptureId: () => recordingCaptureId,
 		hasUnacknowledgedBytes: () => appendQueue?.hasUnacknowledgedBytes() ?? false,
 		getPersistenceError: () => persistenceError?.error ?? null,
 		retryPersistence,

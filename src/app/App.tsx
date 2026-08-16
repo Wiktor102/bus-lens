@@ -43,6 +43,7 @@ import {
 	selectFramingToolbar,
 	selectMessageStream,
 	selectPersistenceError,
+	selectRecordingWorkflow,
 	selectSendRuntime,
 	selectToast,
 	selectTransport,
@@ -165,10 +166,15 @@ function TopBar() {
 function CaptureHeader() {
 	const activeCapture = useSelectedArchiveCapture();
 	const transport = useApplicationSelector(selectTransport);
+	const recordingWorkflow = useApplicationSelector(selectRecordingWorkflow);
 	const liveHeader = useApplicationSelector(selectCaptureHeaderRuntime);
+	const recordingOwnsCapture = transport.recordingCaptureId === activeCapture.captureId;
+	const captureWorkflow = recordingOwnsCapture && recordingWorkflow.status !== "idle" ? recordingWorkflow.status : undefined;
+	const mutationLocked = recordingOwnsCapture && (captureWorkflow === "starting" || captureWorkflow === "finalizing" || captureWorkflow === "failed");
 	const querySnapshot = deriveCaptureHeaderSnapshot(
 		activeCapture.data,
-		transport.recordingCaptureId === activeCapture.captureId
+		recordingOwnsCapture && captureWorkflow === "recording",
+		captureWorkflow
 	);
 	const snapshot = mergeCaptureHeaderRuntimeStats(querySnapshot, liveHeader);
 	const actions = getCaptureHeaderActions();
@@ -176,6 +182,7 @@ function CaptureHeader() {
 		activeCapture.captureId,
 		activeCapture.data?.storageStatus
 	);
+	const locked = storage.locked || mutationLocked;
 	const storageActions = getCaptureStorageActions();
 	const [titleDraft, setTitleDraft] = useState(snapshot.title);
 	const [descriptionDraft, setDescriptionDraft] = useState(snapshot.description);
@@ -229,7 +236,7 @@ function CaptureHeader() {
 							className="title-input"
 							ref={titleRef}
 							value={titleDraft}
-							disabled={!snapshot.hasCapture || storage.locked}
+							disabled={!snapshot.hasCapture || locked}
 							aria-label="Capture title"
 							onChange={event => {
 								setTitleDraft(event.currentTarget.value);
@@ -246,7 +253,7 @@ function CaptureHeader() {
 							className="capture-description"
 							ref={descriptionRef}
 							value={descriptionDraft}
-							disabled={!snapshot.hasCapture || storage.locked}
+							disabled={!snapshot.hasCapture || locked}
 							rows={1}
 							placeholder="Add a description…"
 							aria-label="Capture description"
@@ -282,14 +289,14 @@ function CaptureHeader() {
 					<span title="Received raw bytes only; transmitted bytes are excluded" aria-label="Captured: received raw bytes only; transmitted bytes are excluded">Captured <strong id="statCapturedBytes">{snapshot.summary.capturedBytes}</strong></span>
 				</div>
 				<div ref={actionsRef} className="header-actions">
-					<button id="editContextBtn" className="btn btn-secondary" type="button" disabled={!snapshot.hasCapture || storage.locked} onClick={() => actions.openContext()}>
+					<button id="editContextBtn" className="btn btn-secondary" type="button" disabled={!snapshot.hasCapture || locked} onClick={() => actions.openContext()}>
 						Edit context
 					</button>
 					<button
 						id="moreBtn"
 						className="icon-btn"
 						type="button"
-						disabled={!snapshot.hasCapture || storage.locked}
+						disabled={!snapshot.hasCapture || locked}
 						aria-label="Capture menu"
 						onClick={() => setMenuOpen(open => !open)}
 					>
@@ -300,6 +307,7 @@ function CaptureHeader() {
 							<button
 								id="upgradeCaptureStorageBtn"
 								type="button"
+								disabled={locked}
 								onClick={() => {
 									storageActions.upgrade();
 									setMenuOpen(false);
@@ -316,7 +324,7 @@ function CaptureHeader() {
 								actions.duplicate();
 								setMenuOpen(false);
 							}}
-							disabled={storage.locked}
+							disabled={locked}
 						>
 							<Copy aria-hidden="true" />
 							<span>Duplicate capture</span>
@@ -328,7 +336,7 @@ function CaptureHeader() {
 								actions.clearMessages();
 								setMenuOpen(false);
 							}}
-							disabled={storage.locked}
+							disabled={locked}
 						>
 							<Trash2 aria-hidden="true" />
 							<span>Clear messages</span>
@@ -341,7 +349,7 @@ function CaptureHeader() {
 								actions.deleteCapture();
 								setMenuOpen(false);
 							}}
-							disabled={storage.locked}
+							disabled={locked}
 						>
 							<Trash2 aria-hidden="true" />
 							<span>Delete capture</span>
@@ -492,7 +500,7 @@ function StreamPanel({ viewState, dispatchViewState, messageFilterRef, messageFi
 					<span id="visibleCount">{messageStream.visibleCount}</span>
 				</div>
 			</div>
-			<MessageStream frameSizeLabel={framing.frameSizeLabel} snapshot={messageStream} />
+			<MessageStream frameSizeLabel={framing.frameSizeLabel} mutationsDisabled={framing.disabled} snapshot={messageStream} />
 		</div>
 	);
 }
@@ -981,6 +989,10 @@ function NotesPanelContent() {
 		activeCapture.data,
 		activeCapture.data?.storageStatus === "canonical" ? notesQuery.data : undefined
 	);
+	const transport = useApplicationSelector(selectTransport);
+	const recordingWorkflow = useApplicationSelector(selectRecordingWorkflow);
+	const mutationLocked = transport.recordingCaptureId === activeCapture.captureId &&
+		(recordingWorkflow.status === "starting" || recordingWorkflow.status === "finalizing" || recordingWorkflow.status === "failed");
 	const actions = getNotesActions();
 	const [sequenceStart, setSequenceStart] = useState("1");
 	const [sequenceEnd, setSequenceEnd] = useState("2");
@@ -1055,6 +1067,7 @@ function NotesPanelContent() {
 								id="sequenceStart"
 								type="number"
 								min="1"
+								disabled={mutationLocked}
 								value={sequenceStart}
 								onChange={event => setSequenceStart(event.currentTarget.value)}
 							/>
@@ -1065,6 +1078,7 @@ function NotesPanelContent() {
 								id="sequenceEnd"
 								type="number"
 								min="1"
+								disabled={mutationLocked}
 								value={sequenceEnd}
 								onChange={event => setSequenceEnd(event.currentTarget.value)}
 							/>
@@ -1073,11 +1087,12 @@ function NotesPanelContent() {
 					<textarea
 						id="captureNoteText"
 						required
+						disabled={mutationLocked}
 						placeholder="What does this message sequence appear to represent?"
 						value={noteText}
 						onChange={event => setNoteText(event.currentTarget.value)}
 					/>
-					<button className="btn btn-primary" type="submit">
+					<button className="btn btn-primary" type="submit" disabled={mutationLocked}>
 						Add sequence note
 					</button>
 				</form>

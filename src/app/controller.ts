@@ -37,6 +37,7 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 	const archiveReads = options.archive?.reads;
 	let transport!: SerialController;
 	let sendController!: SendController;
+	let waitForCaptureWrites: (captureId: string) => Promise<void> = async () => {};
 	let retrySendPersistence: (() => void) | null = null;
 	let openCanonicalizationDialog = (_captureId: string): void => {};
 	const snapshots = createLiveStateService({
@@ -68,6 +69,9 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		} : EMPTY_PERSISTENCE_ERROR),
 		isCanonicalCapture: runtime.isCanonicalCapture,
 		isCaptureConversionLocked: runtime.isCaptureConversionLocked,
+		waitForCaptureWrite: runtime.waitForCaptureWrite,
+		waitForCaptureWrites: captureId => waitForCaptureWrites(captureId),
+		trackCaptureWrite: runtime.trackCaptureWrite,
 		recordingWriter: runtime.captureWriter ? {
 			startSession: async (captureId, sessionId) => {
 				if (!await runtime.ensureCanonicalCapture(captureId)) throw new Error("capture is not canonical");
@@ -142,6 +146,7 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 			canExportRecovery: false
 		})
 	});
+	waitForCaptureWrites = captureController.waitForCaptureWrites;
 
 	let canonicalizationToken = 0;
 	let canonicalizationStarting = false;
@@ -367,6 +372,10 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 			const capture = runtime.capture();
 			const message = capture?.messages?.find(item => item.id === messageId);
 			if (!capture || !message) return;
+			if (capture.id && transport.isCaptureMutationLocked(String(capture.id))) {
+				runtime.showToast("Capture is still being saved; editing is temporarily disabled");
+				return;
+			}
 			if (capture?.id && runtime.isCaptureConversionLocked(String(capture.id))) {
 				runtime.showToast("Capture conversion is in progress; editing is temporarily disabled");
 				return;
@@ -385,10 +394,12 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 					frameId: messageId,
 					hidden: true
 					});
-				void operation.then(async result => {
+				const persistence = operation.then(async result => {
 					capture.contentRevision = result.contentRevision;
 					if (options.archive) Object.assign(capture, await runtime.refreshCapture(String(capture.id)));
-				}).catch(error => {
+				});
+				runtime.trackCaptureWrite(String(capture.id), persistence);
+				void persistence.catch(error => {
 					message.hidden = previousHidden;
 					publishPersistenceError({
 						visible: true,
@@ -413,6 +424,10 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 			const capture = runtime.capture();
 			const message = capture?.messages?.find(item => item.id === messageId);
 			if (!capture || !message || position < 0 || position >= message.bytes.length) return;
+			if (capture.id && transport.isCaptureMutationLocked(String(capture.id))) {
+				runtime.showToast("Capture is still being saved; editing is temporarily disabled");
+				return;
+			}
 			if (capture.id && runtime.isCaptureConversionLocked(String(capture.id))) {
 				runtime.showToast("Capture conversion is in progress; editing is temporarily disabled");
 				return;
@@ -436,10 +451,12 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 					rawOffset,
 					hidden: true
 					});
-				void operation.then(async result => {
+				const persistence = operation.then(async result => {
 					capture.contentRevision = result.contentRevision;
 					if (options.archive) Object.assign(capture, await runtime.refreshCapture(String(capture.id)));
-				}).catch(error => {
+				});
+				runtime.trackCaptureWrite(String(capture.id), persistence);
+				void persistence.catch(error => {
 					if (rawIndex >= 0 && capture.byteStream?.[rawIndex]) capture.byteStream[rawIndex].hidden = previousHidden;
 					rebuildPreview(capture);
 					publishPersistenceError({

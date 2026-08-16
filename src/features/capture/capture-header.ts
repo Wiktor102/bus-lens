@@ -22,13 +22,14 @@ export type CaptureHeaderSnapshot = {
 	hasCapture: boolean;
 	title: string;
 	description: string;
-	stateText: "EMPTY" | "SAVED" | "● LIVE";
+	stateText: "EMPTY" | "SAVED" | "STARTING" | "FINALIZING" | "SAVE FAILED" | "● LIVE";
 	live: boolean;
 	metadata: CaptureHeaderMetadata[];
 	summary: CaptureHeaderSummary;
 };
 
 export type CaptureHeaderRuntimeSnapshot = Pick<CaptureHeaderSnapshot, "captureId" | "summary">;
+export type CaptureHeaderWorkflow = "starting" | "recording" | "finalizing" | "finalized" | "failed";
 
 const EMPTY_HEADER_SUMMARY: CaptureHeaderSummary = {
 	messages: "0",
@@ -67,7 +68,8 @@ export function formatCaptureDuration(milliseconds: number) {
 
 export function deriveCaptureHeaderSnapshot(
 	capture: Capture | undefined,
-	recording = false
+	recording = false,
+	workflow?: CaptureHeaderWorkflow
 ): CaptureHeaderSnapshot {
 	if (!capture) return EMPTY_CAPTURE_HEADER_SNAPSHOT;
 
@@ -83,13 +85,23 @@ export function deriveCaptureHeaderSnapshot(
 		});
 	}
 
+	const live = workflow ? workflow === "recording" : recording;
+	const stateText = workflow === "starting"
+		? "STARTING"
+		: workflow === "finalizing"
+			? "FINALIZING"
+			: workflow === "failed"
+				? "SAVE FAILED"
+				: live
+					? "● LIVE"
+					: "SAVED";
 	return {
 		captureId: String(capture.id),
 		hasCapture: true,
 		title: String(capture.name ?? ""),
 		description: String(capture.description ?? ""),
-		stateText: recording ? "● LIVE" : "SAVED",
-		live: recording,
+		stateText,
+		live,
 		metadata,
 		summary: {
 			messages: messages.length.toLocaleString(),

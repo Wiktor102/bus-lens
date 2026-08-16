@@ -1,15 +1,18 @@
-import { deriveCaptureHeaderSnapshot } from "../features/capture/capture-header.ts";
+import { deriveCaptureHeaderSnapshot, type CaptureHeaderWorkflow } from "../features/capture/capture-header.ts";
 import { deriveMessageStreamSnapshot, type MessageStreamDeriveOptions } from "../features/message-stream/message-stream.ts";
 import { selectFramingToolbarSnapshot } from "../features/capture/framing-toolbar.ts";
 import type { Capture } from "../features/capture/capture-framing.ts";
 import type { SendController } from "../features/send/send-controller.ts";
 import type { SerialController } from "../features/transport/serial-controller.ts";
-import { applicationStore, selectViewState, type ApplicationStore } from "../shared/application-store.ts";
+import { applicationStore, selectViewState, type ApplicationStore, type RecordingWorkflowState } from "../shared/application-store.ts";
 import type { ViewStateSnapshot } from "../shared/view-state.ts";
 
 export type LiveStateServiceDependencies = {
 	capture: () => Capture | undefined;
-	getTransport: () => Pick<SerialController, "getPort" | "isRecording" | "getRecordingCaptureId" | "publishState">;
+	getTransport: () => Pick<SerialController, "getPort" | "isRecording" | "getRecordingCaptureId" | "publishState"> & {
+		getRecordingWorkflow?: SerialController["getRecordingWorkflow"];
+		isCaptureMutationLocked?: SerialController["isCaptureMutationLocked"];
+	};
 	getSendController: () => Pick<SendController, "getStatus"> | undefined;
 	getViewStateSnapshot?: () => ViewStateSnapshot;
 	applicationStore?: Pick<ApplicationStore, "send" | "select" | "subscribe">;
@@ -33,9 +36,13 @@ export function createLiveStateService(dependencies: LiveStateServiceDependencie
 	const getViewState = dependencies.getViewStateSnapshot || (() => store.select(selectViewState));
 
 	function publishCaptureHeaderState(capture = dependencies.capture()): void {
-		const recordingCaptureId = dependencies.getTransport().getRecordingCaptureId();
+		const transport = dependencies.getTransport();
+		const recordingCaptureId = transport.getRecordingCaptureId();
 		const isRecording = Boolean(capture?.id && recordingCaptureId === String(capture.id));
-		const snapshot = deriveCaptureHeaderSnapshot(capture, isRecording);
+		const workflow = transport.getRecordingWorkflow?.() ?? (isRecording ? "recording" : "idle");
+		const headerWorkflow: CaptureHeaderWorkflow | undefined =
+			isRecording && workflow !== "idle" ? workflow as Exclude<RecordingWorkflowState["status"], "idle"> : undefined;
+		const snapshot = deriveCaptureHeaderSnapshot(capture, isRecording && workflow === "recording", headerWorkflow);
 		store.send({
 			type: "capture-header/runtime-updated",
 			state: {
@@ -55,9 +62,10 @@ export function createLiveStateService(dependencies: LiveStateServiceDependencie
 	}
 
 	function publishFramingToolbarState(capture = dependencies.capture()): void {
+		const transport = dependencies.getTransport();
 		store.send({
 			type: "framing-toolbar/changed",
-			state: selectFramingToolbarSnapshot(capture)
+			state: selectFramingToolbarSnapshot(capture, Boolean(capture?.id && transport.isCaptureMutationLocked?.(String(capture.id))))
 		});
 	}
 
