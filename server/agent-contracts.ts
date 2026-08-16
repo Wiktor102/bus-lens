@@ -63,6 +63,30 @@ export class AgentQueryError extends Error {
 	}
 }
 
+const CAPTURE_ID_MAX_LENGTH = 256;
+const CAPTURE_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
+const UUID_CAPTURE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_SHAPED_CAPTURE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-.+$/i;
+
+/**
+ * Capture IDs are UUIDs for newly-created captures, but legacy archives may
+ * contain stable application-defined IDs. Reject malformed UUID-shaped input
+ * without making those legacy IDs inaccessible.
+ */
+export function isValidCaptureId(value: unknown): value is string {
+	const text = typeof value === "string" ? value.trim() : "";
+	if (!text || text.length > CAPTURE_ID_MAX_LENGTH || !CAPTURE_ID_PATTERN.test(text)) return false;
+	return !UUID_SHAPED_CAPTURE_ID_PATTERN.test(text) || UUID_CAPTURE_ID_PATTERN.test(text);
+}
+
+export function requiredCaptureId(value: unknown, label = "captureId"): string {
+	const text = typeof value === "string" ? value.trim() : "";
+	if (!isValidCaptureId(text)) {
+		throw new AgentQueryError("invalid-input", `${label} must be a valid capture identifier`, { label });
+	}
+	return text;
+}
+
 export type AgentCursorPayload = Readonly<{
 	contractVersion: typeof AGENT_CONTRACT_VERSION;
 	scope: string;

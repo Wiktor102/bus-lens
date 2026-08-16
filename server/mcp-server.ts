@@ -10,7 +10,7 @@ import {
 } from "@modelcontextprotocol/server";
 import { toNodeHandler, type NodeMcpRequestHandler } from "@modelcontextprotocol/node";
 import { z } from "zod";
-import { AgentQueryError, type AgentResponse } from "./agent-contracts.ts";
+import { AgentQueryError, isValidCaptureId, type AgentResponse } from "./agent-contracts.ts";
 import type { AgentCaptureDiscovery, AgentCaptureOverview, AgentFramingProfiles, CaptureDiscoveryFiltersInput } from "./canonical-query.ts";
 import { ALLOW_AGENT_AUTHORED_NOTES_SETTING, CanonicalCaptureCommandService } from "./canonical-capture-command-service.ts";
 import type { SqliteDatabase } from "./database.ts";
@@ -69,6 +69,9 @@ Unavailable operations include changing framing, changing visibility, creating/d
 `;
 
 const storageStatusSchema = z.enum(["canonical", "legacy-not-canonicalized", "converting", "canonicalization-failed"]);
+export const captureIdSchema = z.string().trim().min(1).max(256).refine(isValidCaptureId, {
+	message: "captureId must be a valid capture identifier"
+});
 const responseMetaSchema = z.object({
 	contractVersion: z.literal(1),
 	snapshot: z.object({
@@ -223,7 +226,7 @@ function registerOrientationTools(server: McpServer, queries: McpQueryExecutor, 
 			title: "Get a Bus Lens capture overview",
 			description: "Read bounded metadata, framing sections, counts, signatures, transitions, byte summaries, notes, and sequence-group summaries for one explicit analytical snapshot.",
 			inputSchema: z.object({
-				captureId: z.string().min(1),
+				captureId: captureIdSchema,
 				profileId: z.string().optional(),
 				profileVersion: z.number().int().positive().optional(),
 				sourceDataRevision: z.number().int().nonnegative().optional()

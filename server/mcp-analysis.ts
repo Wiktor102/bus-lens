@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { AgentQueryError, type AgentResponse } from "./agent-contracts.ts";
-import { agentResponseSchema } from "./mcp-server.ts";
+import { agentResponseSchema, captureIdSchema } from "./mcp-server.ts";
 import type {
 	AgentByteStatisticsInput,
 	AgentByteStatisticsResult,
@@ -35,7 +35,7 @@ const differentialScopeSchema = z.object({
 });
 
 const transitionCommonInputShape = {
-	captureId: z.string().min(1),
+	captureId: captureIdSchema,
 	profileId: z.string().optional(),
 	profileVersion: z.number().int().nonnegative().optional(),
 	sourceDataRevision: z.number().int().nonnegative().optional(),
@@ -72,7 +72,7 @@ const byteStatisticsScopeSchema = z.union([
 });
 
 const differentialSnapshotSchema = z.object({
-	captureId: z.string().min(1),
+	captureId: captureIdSchema,
 	profileId: z.string().min(1),
 	profileVersion: z.number().int().positive(),
 	sourceDataRevision: z.number().int().nonnegative()
@@ -322,7 +322,7 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 		"query_messages",
 		"Query bounded interpreted frames by snapshot, ordinal, inclusive raw byte range, time, section, direction, signature, wildcard, hidden, note, or sequence filters. A raw byte range performs reverse raw-range lookup and returns every frame whose raw span overlaps it; supplying one raw offset matches that offset.",
 		z.object({
-			captureId: z.string().min(1),
+			captureId: captureIdSchema,
 			profileId: z.string().optional(),
 			profileVersion: z.number().int().nonnegative().optional(),
 			sourceDataRevision: z.number().int().nonnegative().optional(),
@@ -355,7 +355,7 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 		"Resolve one stable frame in its original profile revision and return a bounded neighborhood without switching to the active profile.",
 		z.object({
 			frameId: z.string().min(1),
-			captureId: z.string().optional(),
+			captureId: captureIdSchema.optional(),
 			profileId: z.string().optional(),
 			profileVersion: z.number().int().nonnegative().optional(),
 			sourceDataRevision: z.number().int().nonnegative().optional(),
@@ -373,7 +373,7 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 		"get_sequence_groups",
 		"List bounded repeated-sequence group summaries for one explicit profile snapshot without nesting all occurrences.",
 		z.object({
-			captureId: z.string().min(1),
+			captureId: captureIdSchema,
 			profileId: z.string().optional(),
 			profileVersion: z.number().int().nonnegative().optional(),
 			sourceDataRevision: z.number().int().nonnegative().optional(),
@@ -390,7 +390,7 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 		"get_sequence_occurrences",
 		"List bounded occurrences for one sequence group, with optional small frame context.",
 		z.object({
-			captureId: z.string().optional(),
+			captureId: captureIdSchema.optional(),
 			groupId: z.string().min(1),
 			profileId: z.string().optional(),
 			profileVersion: z.number().int().nonnegative().optional(),
@@ -413,13 +413,13 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 		"get_byte_statistics",
 		"Read profile-wide vocabulary, bit-one percentages, variance, and applicable-frame counts for at most 32 requested byte positions; optionally scope to a non-empty combination of sectionId, frameLength, exactSignature, wildcardHexPattern, or direction to report matched-frame denominators.",
 		z.object({
-			captureId: z.string().min(1),
+			captureId: captureIdSchema,
 			profileId: z.string().optional(),
 			profileVersion: z.number().int().nonnegative().optional(),
-				sourceDataRevision: z.number().int().nonnegative().optional(),
-				positions: z.array(z.number().int().nonnegative()).min(1).max(32),
-				scope: byteStatisticsScopeSchema.optional(),
-				hidden: z.enum(["include", "visible-only", "hidden-only"]).optional()
+			sourceDataRevision: z.number().int().nonnegative().optional(),
+			positions: z.array(z.number().int().nonnegative()).min(1).max(32),
+			scope: byteStatisticsScopeSchema.optional(),
+			hidden: z.enum(["include", "visible-only", "hidden-only"]).optional()
 		}),
 		input => queries.getByteStatistics(input as AgentByteStatisticsInput),
 		response => `Returned byte statistics for ${(response.data as AgentByteStatisticsResult).positions.length} requested position${(response.data as AgentByteStatisticsResult).positions.length === 1 ? "" : "s"}.`,
@@ -468,7 +468,7 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 		"read_raw_bytes",
 		"Read an explicit absolute raw-byte range with a 1,024-byte default and a hard 4,096-byte maximum; use the suggested query_messages operation for reverse raw-range lookup of interpreted frames, and never request a complete capture.",
 		z.object({
-			captureId: z.string().min(1),
+			captureId: captureIdSchema,
 			rawOffset: z.number().int().nonnegative().optional(),
 			offset: z.number().int().nonnegative().optional(),
 			length: z.number().int().positive().max(4096).optional(),

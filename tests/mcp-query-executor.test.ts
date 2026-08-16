@@ -6,7 +6,7 @@ import test from "node:test";
 import { AgentQueryError } from "../server/agent-contracts.ts";
 import { ArchiveRepository } from "../server/archive-repository.ts";
 import { openDatabase } from "../server/database.ts";
-import { McpQueryExecutor, runInterruptibleWorker } from "../server/mcp-query-executor.ts";
+import { McpQueryExecutor, runInterruptibleWorker, type InterruptibleWorkerRunner } from "../server/mcp-query-executor.ts";
 
 test("a synchronous worker task is cancelled without blocking the parent event loop", async () => {
 	let loopTurnRan = false;
@@ -59,6 +59,34 @@ test("canonical MCP queries use a worker-owned read-only connection and preserve
 		await executor.close();
 		database.close();
 		await rm(directory, { recursive: true, force: true });
+	}
+});
+
+test("MCP query dispatch is bounded and malformed capture IDs never create workers", async () => {
+	let activeWorkers = 0;
+	let maximumActiveWorkers = 0;
+	let workerStarts = 0;
+	const runner: InterruptibleWorkerRunner = async <T>(): Promise<T> => {
+		workerStarts += 1;
+		activeWorkers += 1;
+		maximumActiveWorkers = Math.max(maximumActiveWorkers, activeWorkers);
+		await new Promise<void>(resolve => setTimeout(resolve, 10));
+		activeWorkers -= 1;
+		return { ok: true, value: undefined as never } as T;
+	};
+	const executor = new McpQueryExecutor("archive.sqlite", 1_000, 2, runner);
+	try {
+		await assert.rejects(executor.queryMessages({ captureId: "9c6f34ec-af81-42bd-a0a3-b1?" }), error => {
+			assert.ok(error instanceof AgentQueryError);
+			assert.equal(error.code, "invalid-input");
+			return true;
+		});
+		assert.equal(workerStarts, 0);
+
+		await Promise.all(Array.from({ length: 8 }, () => executor.queryCaptureDiscovery({})));
+		assert.equal(maximumActiveWorkers, 2);
+	} finally {
+		await executor.close();
 	}
 });
 
