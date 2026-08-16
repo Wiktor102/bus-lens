@@ -194,27 +194,31 @@ test("transport and send workflow events transition through typed selectors", ()
 	const store = createTestApplicationStore();
 
 	store.send({ type: "transport/connection-started", startedAt: 10 });
+	store.send({ type: "transport/recording-starting", startedAt: 11 });
 	store.send({ type: "transport/recording-started", startedAt: 11 });
 	store.send({ type: "send/started", startedAt: 12 });
 	store.send({ type: "queue/started", startedAt: 13 });
 
 	assert.deepEqual(selectConnectionWorkflow(store.getSnapshot()), { status: "running", startedAt: 10 });
-	assert.deepEqual(selectRecordingWorkflow(store.getSnapshot()), { status: "running", startedAt: 11 });
+	assert.deepEqual(selectRecordingWorkflow(store.getSnapshot()), { status: "recording", startedAt: 11 });
 	assert.deepEqual(selectSendWorkflow(store.getSnapshot()), { status: "running", startedAt: 12 });
 	assert.deepEqual(selectQueueWorkflow(store.getSnapshot()), { status: "running", startedAt: 13 });
 
 	store.send({ type: "transport/connection-succeeded", completedAt: 20 });
+	store.send({ type: "transport/recording-finalizing", startedAt: 21 });
+	assert.deepEqual(selectRecordingWorkflow(store.getSnapshot()), { status: "finalizing", startedAt: 21 });
+	store.send({ type: "transport/recording-finalized", completedAt: 22 });
 	store.send({ type: "transport/recording-failed", error: "append unavailable", canRetry: true });
-	store.send({ type: "send/succeeded", completedAt: 22 });
+	store.send({ type: "send/succeeded", completedAt: 23 });
 	store.send({ type: "queue/failed", error: "write failed", canRetry: false });
 
 	assert.deepEqual(selectConnectionWorkflow(store.getSnapshot()), { status: "success", completedAt: 20 });
 	assert.deepEqual(selectRecordingWorkflow(store.getSnapshot()), {
-		status: "failure",
+		status: "failed",
 		error: "append unavailable",
 		canRetry: true
 	});
-	assert.deepEqual(selectSendWorkflow(store.getSnapshot()), { status: "success", completedAt: 22 });
+	assert.deepEqual(selectSendWorkflow(store.getSnapshot()), { status: "success", completedAt: 23 });
 	assert.deepEqual(selectQueueWorkflow(store.getSnapshot()), {
 		status: "failure",
 		error: "write failed",

@@ -61,6 +61,18 @@ test("uses the empty header snapshot when no capture is selected", () => {
 	assert.deepEqual(deriveCaptureHeaderSnapshot(undefined), EMPTY_CAPTURE_HEADER_SNAPSHOT);
 });
 
+test("does not present a finalizing or failed capture as saved", () => {
+	const capture = { id: "saving", byteStream: [], messages: [] } as Capture;
+
+	const finalizing = deriveCaptureHeaderSnapshot(capture, false, "finalizing");
+	assert.equal(finalizing.stateText, "FINALIZING");
+	assert.equal(finalizing.live, false);
+
+	const failed = deriveCaptureHeaderSnapshot(capture, false, "failed");
+	assert.equal(failed.stateText, "SAVE FAILED");
+	assert.equal(failed.live, false);
+});
+
 test("merges live stats only when the runtime publication targets the selected capture", () => {
 	const selected = deriveCaptureHeaderSnapshot({ id: "selected", byteStream: [], messages: [] } as Capture);
 	const live = deriveCaptureHeaderSnapshot({
