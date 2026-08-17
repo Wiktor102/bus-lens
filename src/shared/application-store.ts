@@ -17,6 +17,8 @@ import {
 	EMPTY_VIEW_STATE_SNAPSHOT,
 	reduceViewState,
 	type DisplayMode,
+	type SectionViewPreferencePatch,
+	type SectionViewPreferenceSeed,
 	type ViewPanel,
 	type ViewStateAction,
 	type ViewStateSnapshot
@@ -306,6 +308,11 @@ export type ApplicationEvent =
 	| { type: "view/display-mode-changed"; displayMode: DisplayMode }
 	| { type: "view/frame-changes-changed"; showFrameChanges: boolean }
 	| { type: "view/collapse-runs-changed"; collapseRuns: boolean }
+	| { type: "view/section-preferences-seeded"; captureId: string; sections: readonly SectionViewPreferenceSeed[] }
+	| { type: "view/section-preference-changed"; captureId: string; rawStart: number; patch: SectionViewPreferencePatch }
+	| { type: "view/section-preference-moved"; captureId: string; fromRawStart: number; toRawStart: number }
+	| { type: "view/section-preference-deleted"; captureId: string; rawStart: number }
+	| { type: "view/section-preferences-cleared"; captureId: string }
 	| { type: "view/replaced"; viewState: ViewStateSnapshot }
 	| { type: "capture/selected-changed"; captureId: string | null }
 	| { type: "capture-header/runtime-updated"; state: CaptureHeaderRuntimeSnapshot }
@@ -402,6 +409,26 @@ export function viewStateActionToApplicationEvent(action: ViewStateAction): Appl
 			return { type: "view/frame-changes-changed", showFrameChanges: action.showFrameChanges };
 		case "set-collapse-runs":
 			return { type: "view/collapse-runs-changed", collapseRuns: action.collapseRuns };
+		case "seed-section-preferences":
+			return { type: "view/section-preferences-seeded", captureId: action.captureId, sections: action.sections };
+		case "set-section-preference":
+			return {
+				type: "view/section-preference-changed",
+				captureId: action.captureId,
+				rawStart: action.rawStart,
+				patch: action.patch
+			};
+		case "move-section-preference":
+			return {
+				type: "view/section-preference-moved",
+				captureId: action.captureId,
+				fromRawStart: action.fromRawStart,
+				toRawStart: action.toRawStart
+			};
+		case "delete-section-preference":
+			return { type: "view/section-preference-deleted", captureId: action.captureId, rawStart: action.rawStart };
+		case "clear-section-preferences":
+			return { type: "view/section-preferences-cleared", captureId: action.captureId };
 	}
 }
 
@@ -451,6 +478,30 @@ export function createApplicationStore(
 				withViewState(state, { type: "set-frame-changes", showFrameChanges: event.showFrameChanges }),
 			"view/collapse-runs-changed": (state, event: { collapseRuns: boolean }) =>
 				withViewState(state, { type: "set-collapse-runs", collapseRuns: event.collapseRuns }),
+			"view/section-preferences-seeded": (state, event: { captureId: string; sections: readonly SectionViewPreferenceSeed[] }) =>
+				withViewState(state, { type: "seed-section-preferences", captureId: event.captureId, sections: event.sections }),
+			"view/section-preference-changed": (state, event: { captureId: string; rawStart: number; patch: SectionViewPreferencePatch }) =>
+				withViewState(state, {
+					type: "set-section-preference",
+					captureId: event.captureId,
+					rawStart: event.rawStart,
+					patch: event.patch
+				}),
+			"view/section-preference-moved": (state, event: { captureId: string; fromRawStart: number; toRawStart: number }) =>
+				withViewState(state, {
+					type: "move-section-preference",
+					captureId: event.captureId,
+					fromRawStart: event.fromRawStart,
+					toRawStart: event.toRawStart
+				}),
+			"view/section-preference-deleted": (state, event: { captureId: string; rawStart: number }) =>
+				withViewState(state, {
+					type: "delete-section-preference",
+					captureId: event.captureId,
+					rawStart: event.rawStart
+				}),
+			"view/section-preferences-cleared": (state, event: { captureId: string }) =>
+				withViewState(state, { type: "clear-section-preferences", captureId: event.captureId }),
 			"view/replaced": (state, event: { viewState: ViewStateSnapshot }) =>
 				Object.freeze({ ...state, viewState: cloneViewStateSnapshot(event.viewState) }),
 			"capture/selected-changed": (state, event: { captureId: string | null }) =>

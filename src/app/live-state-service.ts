@@ -94,7 +94,8 @@ export function createLiveStateService(dependencies: LiveStateServiceDependencie
 				nextViewState.filterQuery !== previousViewState.filterQuery ||
 				nextViewState.displayMode !== previousViewState.displayMode ||
 				nextViewState.showFrameChanges !== previousViewState.showFrameChanges ||
-				nextViewState.collapseRuns !== previousViewState.collapseRuns;
+				nextViewState.collapseRuns !== previousViewState.collapseRuns ||
+				nextViewState.sectionPreferences !== previousViewState.sectionPreferences;
 			if (renderChanged && dependencies.capture()) renderMessages();
 			previousViewState = nextViewState;
 		});

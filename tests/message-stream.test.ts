@@ -76,6 +76,25 @@ test("derives section headers and message visibility without changing stream cal
 	]);
 });
 
+test("uses application section view preferences without changing legacy capture data", () => {
+	const current = sectionedCapture();
+	const viewState = {
+		...EMPTY_VIEW_STATE_SNAPSHOT,
+		sectionPreferences: {
+			"capture-1": {
+				"0": { collapseRuns: false, collapsed: false },
+				"4": { collapseRuns: false, collapsed: true }
+			}
+		}
+	};
+	const snapshot = deriveMessageStreamSnapshot(current, viewState);
+
+	assert.deepEqual(entrySummary(snapshot), ["section:header", "message:0", "message:1", "section:payload"]);
+	assert.equal(snapshot.entries.find(entry => entry.type === "section" && entry.section.id === "payload")?.section.collapseRuns, false);
+	assert.equal(current.frameSections?.[0]?.collapsed, true);
+	assert.equal(current.frameSections?.[1]?.collapseRuns, true);
+});
+
 test("keeps a collapsed section header visible when filtering matches its messages", () => {
 	const current = sectionedCapture();
 	const snapshot = deriveMessageStreamSnapshot(current, {

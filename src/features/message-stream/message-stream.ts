@@ -30,7 +30,7 @@ import {
 	type SectionMoveMetadata,
 	type SectionMoveAvailability
 } from "../capture/section-repositioning.ts";
-import type { DisplayMode, ViewStateSnapshot } from "../../shared/view-state.ts";
+import { getSectionViewPreference, type DisplayMode, type ViewStateSnapshot } from "../../shared/view-state.ts";
 
 export const VIRTUAL_ROW_HEIGHT = 41;
 export const VIRTUAL_SECTION_HEIGHT = 48;
@@ -196,25 +196,33 @@ function copyMessage(message: CaptureMessage): CaptureMessage & { id: string } {
 	};
 }
 
-function copySection(section: CaptureSection, index: number, movement: SectionMoveMetadata): MessageStreamSection {
+function copySection(
+	section: CaptureSection,
+	index: number,
+	capture: Capture,
+	viewState: ViewStateSnapshot,
+	movement: SectionMoveMetadata
+): MessageStreamSection {
 	const id = String(section.id ?? `section-${index}`);
 	const settings = normalizeSectionFramingSettings(section);
+	const rawStart = Number(section.start || 0);
+	const preference = getSectionViewPreference(viewState, String(capture.id ?? ""), rawStart);
 	return {
 		id,
-		start: Number(section.start || 0),
+		start: rawStart,
 		...settings,
-		collapseRuns: Boolean(section.collapseRuns),
-		collapsed: Boolean(section.collapsed),
+		collapseRuns: preference?.collapseRuns ?? Boolean(section.collapseRuns),
+		collapsed: preference?.collapsed ?? Boolean(section.collapsed),
 		moveAvailability: getSectionMoveAvailabilityFromMetadata(movement, id)
 	};
 }
 
-function copySections(capture: Capture): MessageStreamSection[] {
+function copySections(capture: Capture, viewState: ViewStateSnapshot): MessageStreamSection[] {
 	const movement = precomputeSectionMoveMetadata(capture);
 	const sourceSections = capture.frameSections?.length
 		? capture.frameSections
 		: [{ id: "section-0", start: 0, frameSize: capture.frameSize || 3, collapseRuns: false, collapsed: false }];
-	return sourceSections.map((section, index) => copySection(section, index, movement));
+	return sourceSections.map((section, index) => copySection(section, index, capture, viewState, movement));
 }
 
 function sectionIdForMessage(message: CaptureMessage, sections: MessageStreamSection[]): string | undefined {
@@ -404,6 +412,7 @@ type LiveSnapshotCache = {
 	telegramCount: number;
 	collapseRuns: boolean;
 	framingKey: string;
+	sectionViewKey: string;
 	patternRemarksKey: string;
 	notesKey: string;
 	annotationsKey: string;
@@ -420,11 +429,13 @@ function framingKey(capture: Capture): string {
 			section.frameSize,
 			section.frameMarker,
 			section.markerPosition,
-			section.frameTimeGap,
-			section.collapseRuns,
-			section.collapsed
+			section.frameTimeGap
 		])
 	);
+}
+
+function sectionViewKey(capture: Capture, viewState: ViewStateSnapshot): string {
+	return JSON.stringify(viewState.sectionPreferences[String(capture.id ?? "")] || {});
 }
 
 function patternRemarksKey(capture: Capture): string {
@@ -492,6 +503,7 @@ function rememberLiveSnapshot(
 	capture: Capture,
 	snapshot: MessageStreamSnapshot,
 	sections: MessageStreamSection[],
+	viewState: ViewStateSnapshot,
 	collapseRuns: boolean,
 	visibleMessageCount = (capture.messages || []).reduce((count, message) => count + (message.hidden ? 0 : 1), 0),
 	telegramCount = snapshot.matchingRows.reduce((sum, row) => sum + row._repeats, 0),
@@ -515,8 +527,9 @@ function rememberLiveSnapshot(
 		visibleMessageCount,
 		telegramCount,
 		collapseRuns,
-		framingKey: framingKey(capture),
-		patternRemarksKey: patternRemarksKey(capture),
+			framingKey: framingKey(capture),
+			sectionViewKey: sectionViewKey(capture, viewState),
+			patternRemarksKey: patternRemarksKey(capture),
 		notesKey: notesKey(capture),
 		annotationsKey: annotationsKey(capture)
 	});
@@ -536,6 +549,7 @@ function canReuseLiveSnapshot(
 		cached.snapshot.highlight !== viewState.showFrameChanges ||
 		cached.collapseRuns !== (viewState.collapseRuns || capture.previewMode === "sections") ||
 		cached.framingKey !== framingKey(capture) ||
+		cached.sectionViewKey !== sectionViewKey(capture, viewState) ||
 		cached.patternRemarksKey !== patternRemarksKey(capture) ||
 		cached.notesKey !== notesKey(capture) ||
 		cached.annotationsKey !== annotationsKey(capture) ||
@@ -726,6 +740,7 @@ function deriveLiveMessageStreamSnapshot(
 		capture,
 		snapshot,
 		sections,
+		viewState,
 		viewState.collapseRuns || capture.previewMode === "sections",
 		cached.visibleMessageCount - oldVisibleMessageCount + currentVisibleMessageCount,
 		telegramCount,
@@ -751,7 +766,7 @@ export function deriveMessageStreamSnapshot(
 		const liveSnapshot = cached && deriveLiveMessageStreamSnapshot(capture, viewState, cached);
 		if (liveSnapshot) return liveSnapshot;
 	}
-	const sections = copySections(capture);
+	const sections = copySections(capture, viewState);
 	const rawPatterns = recognizeMessagePatterns(capture);
 	const patterns = copyPatterns(rawPatterns);
 	const matchingRows = filterRows(capture, viewState, rawPatterns, sections);
@@ -782,7 +797,7 @@ export function deriveMessageStreamSnapshot(
 		visibleMessageCount: visible.length,
 		telegramCount: matchingRows.reduce((sum, row) => sum + row._repeats, 0)
 	});
-	rememberLiveSnapshot(capture, snapshot, sections, viewState.collapseRuns || capture.previewMode === "sections", visible.length);
+	rememberLiveSnapshot(capture, snapshot, sections, viewState, viewState.collapseRuns || capture.previewMode === "sections", visible.length);
 	return snapshot;
 }
 

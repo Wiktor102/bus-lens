@@ -751,7 +751,8 @@ export function MessageStream({
 		filterQuery: "",
 		displayMode: "hex",
 		showFrameChanges: true,
-		collapseRuns: false
+		collapseRuns: false,
+		sectionPreferences: {}
 	});
 	const actions = getMessageStreamActions();
 	const hasEntries = snapshot.entries.length > 0;
