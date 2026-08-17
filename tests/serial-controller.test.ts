@@ -8,6 +8,27 @@ import type { Capture } from "../src/features/capture/capture-framing.ts";
 import type { AppState } from "../src/shared/app-state.ts";
 import type { CaptureWriter, FramingSectionRequest } from "../src/persistence/archive-client.ts";
 
+function transportCapture(id: string): Capture {
+	return { id, byteStream: [], frameSections: [], messages: [], notes: [], annotations: {} };
+}
+
+function deferred<T>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	const promise = new Promise<T>(resolvePromise => {
+		resolve = resolvePromise;
+	});
+	return { promise, resolve };
+}
+
+function testSerialPort() {
+	return {
+		readable: null,
+		writable: null,
+		open: async () => {},
+		close: async () => {}
+	};
+}
+
 test("retaining a rolling capture preserves absolute offsets and section starts", () => {
 	const capture: Capture = {
 		byteStream: Array.from({ length: MAX_CAPTURE_BYTES }, (_, rawOffset) => ({
@@ -249,6 +270,153 @@ test("publishes the mutation lock when finalizing without pending live bytes", a
 		{ workflow: "finalizing", disabled: true },
 		{ workflow: "finalized", disabled: false }
 	]);
+});
+
+test("a pending start projection refresh does not hold Starting or disable stop", async () => {
+	const capture = transportCapture("pending-start-refresh");
+	const refreshStarted = deferred<void>();
+	const refreshRelease = deferred<Capture>();
+	const views: Array<{ label: string; recording: boolean; disabled: boolean }> = [];
+	let refreshCount = 0;
+	const port = testSerialPort();
+	const controller = createSerialController({
+		capture: () => capture,
+		state: { captures: [capture] } as AppState,
+		showToast: () => {},
+		publishFramingToolbarState: () => {},
+		publishTransportState: view => views.push({ label: view.recordLabel, recording: view.recording, disabled: view.recordDisabled }),
+		renderMessages: () => {},
+		stopSendQueue: () => {},
+		serial: { requestPort: async () => port },
+		recordingWriter: {
+			startSession: async (_captureId, sessionId) => ({ sessionId, nextChunkSequence: 0, nextRawOffset: 0, dataRevision: 0 }),
+			appendChunk: async request => ({
+				acceptedStartOffset: request.expectedStartOffset,
+				acceptedEndOffset: request.expectedStartOffset,
+				nextRawOffset: request.expectedStartOffset,
+				nextSequence: request.sequence + 1,
+				dataRevision: 0
+			}),
+			finalizeSession: async () => {},
+			refreshCapture: async () => {
+				refreshCount++;
+				refreshStarted.resolve(undefined);
+				return refreshRelease.promise;
+			}
+		}
+	});
+
+	await controller.connect();
+	const start = controller.toggleRecording();
+	await refreshStarted.promise;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const startCompleted = await Promise.race([
+		start.then(() => true),
+		new Promise<boolean>(resolve => {
+			timer = setTimeout(() => resolve(false), 250);
+		})
+	]);
+	if (timer) clearTimeout(timer);
+	const viewAfterStart = views.at(-1);
+
+	const stop = controller.toggleRecording();
+	assert.equal(controller.getRecordingWorkflow(), "finalizing");
+	refreshRelease.resolve({ ...capture, lifecycle: "finalized" } as Capture);
+	await start;
+	await stop;
+	assert.equal(startCompleted, true);
+	assert.deepEqual(viewAfterStart, { label: "Stop capture", recording: true, disabled: false });
+	assert.equal(refreshCount, 2);
+});
+
+test("a completed start publishes Stop capture", async () => {
+	const capture = transportCapture("completed-start");
+	const views: Array<{ label: string; recording: boolean; disabled: boolean }> = [];
+	const port = testSerialPort();
+	const controller = createSerialController({
+		capture: () => capture,
+		state: { captures: [capture] } as AppState,
+		showToast: () => {},
+		publishFramingToolbarState: () => {},
+		publishTransportState: view => views.push({ label: view.recordLabel, recording: view.recording, disabled: view.recordDisabled }),
+		renderMessages: () => {},
+		stopSendQueue: () => {},
+		serial: { requestPort: async () => port }
+	});
+
+	await controller.connect();
+	await controller.toggleRecording();
+
+	assert.deepEqual(views.at(-1), { label: "Stop capture", recording: true, disabled: false });
+});
+
+test("a completed stop publishes Start capture", async () => {
+	const capture = transportCapture("completed-stop");
+	const views: Array<{ label: string; recording: boolean; disabled: boolean }> = [];
+	const port = testSerialPort();
+	const controller = createSerialController({
+		capture: () => capture,
+		state: { captures: [capture] } as AppState,
+		showToast: () => {},
+		publishFramingToolbarState: () => {},
+		publishTransportState: view => views.push({ label: view.recordLabel, recording: view.recording, disabled: view.recordDisabled }),
+		renderMessages: () => {},
+		stopSendQueue: () => {},
+		serial: { requestPort: async () => port }
+	});
+
+	await controller.connect();
+	await controller.toggleRecording();
+	views.length = 0;
+	await controller.stopRecording();
+
+	assert.deepEqual(views.at(-1), { label: "Start capture", recording: false, disabled: false });
+});
+
+test("a slow required startSession keeps Starting until the session is established", async () => {
+	const capture = transportCapture("slow-start-session");
+	const startSessionStarted = deferred<void>();
+	const startSessionRelease = deferred<{ sessionId: string; nextChunkSequence: number; nextRawOffset: number; dataRevision: number }>();
+	const views: Array<{ label: string; recording: boolean; disabled: boolean }> = [];
+	const port = testSerialPort();
+	let startedSessionId = "";
+	const controller = createSerialController({
+		capture: () => capture,
+		state: { captures: [capture] } as AppState,
+		showToast: () => {},
+		publishFramingToolbarState: () => {},
+		publishTransportState: view => views.push({ label: view.recordLabel, recording: view.recording, disabled: view.recordDisabled }),
+		renderMessages: () => {},
+		stopSendQueue: () => {},
+		serial: { requestPort: async () => port },
+		recordingWriter: {
+			startSession: async (_captureId, sessionId) => {
+				startedSessionId = sessionId;
+				startSessionStarted.resolve(undefined);
+				return startSessionRelease.promise;
+			},
+			appendChunk: async request => ({
+				acceptedStartOffset: request.expectedStartOffset,
+				acceptedEndOffset: request.expectedStartOffset,
+				nextRawOffset: request.expectedStartOffset,
+				nextSequence: request.sequence + 1,
+				dataRevision: 0
+			}),
+			finalizeSession: async () => {}
+		}
+	});
+
+	await controller.connect();
+	const start = controller.toggleRecording();
+	await startSessionStarted.promise;
+	assert.equal(controller.getRecordingWorkflow(), "starting");
+	assert.equal(controller.isRecording(), false);
+	assert.equal(capture.captureSessions, undefined);
+	assert.deepEqual(views.at(-1), { label: "Starting…", recording: false, disabled: true });
+
+	startSessionRelease.resolve({ sessionId: startedSessionId, nextChunkSequence: 0, nextRawOffset: 0, dataRevision: 0 });
+	await start;
+	assert.deepEqual(views.at(-1), { label: "Stop capture", recording: true, disabled: false });
 });
 
 test("finalization waits for an accepted section edit and refreshes that edit", async () => {

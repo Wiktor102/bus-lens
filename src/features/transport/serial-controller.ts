@@ -232,8 +232,8 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	function publishState() {
 		const connected = isConnected();
 		const activeCapture = dependencies.capture();
-		const starting = recordingWorkflow === "starting" || Boolean(startPromise);
-		const finalizing = recordingWorkflow === "finalizing" || Boolean(stopPromise);
+		const starting = recordingWorkflow === "starting";
+		const finalizing = recordingWorkflow === "finalizing";
 		const failed = Boolean(persistenceError) || (recordingWorkflow === "failed" && Boolean(recordingCaptureId));
 		const conversionLocked = Boolean(
 			!recording &&
@@ -494,6 +494,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			throw error;
 		}).finally(() => {
 			stopPromise = null;
+			publishState();
 		});
 		stopPromise = stopping;
 		if (captureId) dependencies.trackCaptureWrite?.(captureId, stopping);
@@ -547,7 +548,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			publishTransportWorkflow({ type: "transport/recording-started", startedAt: Date.now() });
 			publishState();
 			dependencies.publishCaptureHeaderState?.(capture);
-			await refreshCaptureProjection(captureId).catch(error => {
+			void refreshCaptureProjection(captureId).catch(error => {
 				console.error(`Could not refresh recording capture ${captureId}`, error);
 			});
 			dependencies.showToast("Capture started");
@@ -562,6 +563,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			throw error;
 		}).finally(() => {
 			startPromise = null;
+			publishState();
 		});
 		startPromise = starting;
 		publishState();
