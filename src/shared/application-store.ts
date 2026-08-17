@@ -70,8 +70,10 @@ function cloneValue<T>(value: T, seen = new WeakMap<object, unknown>()): T {
 	return copy as T;
 }
 
+const deeplyFrozenValues = new WeakSet<object>();
+
 function freezeValue<T>(value: T, seen = new WeakSet<object>()): T {
-	if (!value || typeof value !== "object" || seen.has(value as object) || Object.isFrozen(value as object)) return value;
+	if (!value || typeof value !== "object" || seen.has(value as object) || deeplyFrozenValues.has(value as object)) return value;
 	seen.add(value as object);
 
 	if (value instanceof Map) {
@@ -79,18 +81,22 @@ function freezeValue<T>(value: T, seen = new WeakSet<object>()): T {
 			freezeValue(key, seen);
 			freezeValue(item, seen);
 		});
-		Object.defineProperties(value, {
-			set: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } },
-			delete: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } },
-			clear: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } }
-		});
+		if (!Object.isFrozen(value) && !Object.prototype.hasOwnProperty.call(value, "set")) {
+			Object.defineProperties(value, {
+				set: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } },
+				delete: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } },
+				clear: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } }
+			});
+		}
 	} else if (value instanceof Set) {
 		value.forEach(item => freezeValue(item, seen));
-		Object.defineProperties(value, {
-			add: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } },
-			delete: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } },
-			clear: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } }
-		});
+		if (!Object.isFrozen(value) && !Object.prototype.hasOwnProperty.call(value, "add")) {
+			Object.defineProperties(value, {
+				add: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } },
+				delete: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } },
+				clear: { value: () => { throw new TypeError("Cannot mutate an application snapshot"); } }
+			});
+		}
 	} else {
 		for (const key of Reflect.ownKeys(value)) {
 			if (Object.prototype.propertyIsEnumerable.call(value, key)) {
@@ -99,7 +105,9 @@ function freezeValue<T>(value: T, seen = new WeakSet<object>()): T {
 		}
 	}
 
-	return Object.freeze(value);
+	Object.freeze(value);
+	deeplyFrozenValues.add(value as object);
+	return value;
 }
 
 function cloneAndFreeze<T>(value: T): T {

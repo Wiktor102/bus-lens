@@ -495,7 +495,8 @@ function rememberLiveSnapshot(
 	collapseRuns: boolean,
 	visibleMessageCount = (capture.messages || []).reduce((count, message) => count + (message.hidden ? 0 : 1), 0),
 	telegramCount = snapshot.matchingRows.reduce((sum, row) => sum + row._repeats, 0),
-	lastSectionMessageCount = sections.length ? messageCountInLastSection(capture, sections.at(-1)!) : 0
+	lastSectionMessageCount = sections.length ? messageCountInLastSection(capture, sections.at(-1)!) : 0,
+	tailMessages?: LiveMessageSummary[]
 ): void {
 	const messages = capture.messages || [];
 	const tailStart = liveTailStart(capture, snapshot, collapseRuns);
@@ -510,7 +511,7 @@ function rememberLiveSnapshot(
 		tailStart,
 		tailRowIndex: tailRowIndex < 0 ? snapshot.matchingRows.length : tailRowIndex,
 		prefixLastMessageId: tailStart > 0 ? String(messages[tailStart - 1]?.id ?? "") : undefined,
-		tailMessages: messages.slice(tailStart).map(liveMessageSummary),
+		tailMessages: tailMessages ?? messages.slice(tailStart).map(liveMessageSummary),
 		visibleMessageCount,
 		telegramCount,
 		collapseRuns,
@@ -716,6 +717,11 @@ function deriveLiveMessageStreamSnapshot(
 		visibleMessageCount: cached.visibleMessageCount - oldVisibleMessageCount + currentVisibleMessageCount,
 		telegramCount
 	});
+	const nextTailStart = liveTailStart(capture, snapshot, viewState.collapseRuns || capture.previewMode === "sections");
+	const tailOffset = nextTailStart - cached.tailStart;
+	const nextTailMessages = tailOffset >= 0 && tailOffset <= currentTailMessages.length
+		? currentTailMessages.slice(tailOffset)
+		: undefined;
 	rememberLiveSnapshot(
 		capture,
 		snapshot,
@@ -723,7 +729,8 @@ function deriveLiveMessageStreamSnapshot(
 		viewState.collapseRuns || capture.previewMode === "sections",
 		cached.visibleMessageCount - oldVisibleMessageCount + currentVisibleMessageCount,
 		telegramCount,
-		cached.lastSectionMessageCount + Math.max(0, (capture.messages?.length || 0) - cached.messageCount)
+		cached.lastSectionMessageCount + Math.max(0, (capture.messages?.length || 0) - cached.messageCount),
+		nextTailMessages
 	);
 	return snapshot;
 }
