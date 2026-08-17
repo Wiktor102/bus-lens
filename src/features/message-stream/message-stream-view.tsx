@@ -20,7 +20,6 @@ import {
 } from "./message-stream-bridge";
 import {
 	colorForByte,
-	deriveMessageStreamSnapshot,
 	formatDelta,
 	formatTime,
 	renderRepeatPillData,
@@ -30,8 +29,6 @@ import {
 	type MessageStreamRow,
 	type MessageStreamSnapshot
 } from "./message-stream";
-import type { Capture } from "../capture/capture-framing.ts";
-import type { ViewStateSnapshot } from "../../shared/view-state.ts";
 import type { SectionMoveAction, SectionMoveAvailability } from "../capture/section-repositioning.ts";
 import {
 	ArrowDown,
@@ -732,26 +729,13 @@ function MessageContextMenu({ state, onClose, mutationsDisabled }: {
 
 export function MessageStream({
 	frameSizeLabel,
-	capture,
-	viewState,
-	snapshot: providedSnapshot,
+	snapshot,
 	mutationsDisabled = false
 }: {
 	frameSizeLabel: string;
-	capture?: Capture | null;
-	viewState?: ViewStateSnapshot;
-	snapshot?: MessageStreamSnapshot;
+	snapshot: MessageStreamSnapshot;
 	mutationsDisabled?: boolean;
 }) {
-	const snapshot = providedSnapshot || deriveMessageStreamSnapshot(capture, viewState || {
-		activePanel: "stream",
-		filterOpen: false,
-		filterQuery: "",
-		displayMode: "hex",
-		showFrameChanges: true,
-		collapseRuns: false,
-		sectionPreferences: {}
-	});
 	const actions = getMessageStreamActions();
 	const hasEntries = snapshot.entries.length > 0;
 	const scrollRef = useRef<HTMLDivElement>(null);

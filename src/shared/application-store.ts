@@ -388,7 +388,10 @@ function createApplicationState(viewState: ViewStateSnapshot, selectedCaptureId:
 }
 
 function withViewState(state: ApplicationState, action: ViewStateAction): ApplicationState {
-	return Object.freeze({ ...state, viewState: cloneViewStateSnapshot(reduceViewState(state.viewState, action)) });
+	const nextViewState = reduceViewState(state.viewState, action);
+	return nextViewState === state.viewState
+		? state
+		: Object.freeze({ ...state, viewState: cloneViewStateSnapshot(nextViewState) });
 }
 
 function workflowFailure(error: string, canRetry: boolean): WorkflowState {
@@ -527,7 +530,9 @@ export function createApplicationStore(
 			"view/section-preferences-cleared": (state, event: { captureId: string }) =>
 				withViewState(state, { type: "clear-section-preferences", captureId: event.captureId }),
 			"view/replaced": (state, event: { viewState: ViewStateSnapshot }) =>
-				Object.freeze({ ...state, viewState: cloneViewStateSnapshot(event.viewState) }),
+				event.viewState === state.viewState
+					? state
+					: Object.freeze({ ...state, viewState: cloneViewStateSnapshot(event.viewState) }),
 			"capture/selected-changed": (state, event: { captureId: string | null }) =>
 				Object.freeze({ ...state, selectedCaptureId: event.captureId }),
 			"capture-header/runtime-updated": (state, event: { state: CaptureHeaderRuntimeSnapshot }) =>

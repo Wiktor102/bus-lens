@@ -35,7 +35,6 @@ import {
 	ExportDialog,
 	PatternRemarkDialog
 } from "../features/dialogs/dialogs";
-import { deriveMessageStreamSnapshot } from "../features/message-stream/message-stream";
 import { MessageStream } from "../features/message-stream/message-stream-view";
 import { useApplicationSelector, useApplicationSend } from "./application-store-provider";
 import {
@@ -453,12 +452,7 @@ function Toolbar({ viewState, dispatchViewState, messageFilterRef, messageFilter
 
 function StreamPanel({ viewState, dispatchViewState, messageFilterRef, messageFilterToggleRef }: ToolbarProps) {
 	const framing = useApplicationSelector(selectFramingToolbar);
-	const transport = useApplicationSelector(selectTransport);
-	const activeCapture = useSelectedArchiveCapture();
-	const liveMessageStream = useApplicationSelector(selectMessageStream);
-	const messageStream = transport.recording && liveMessageStream.captureId === activeCapture.captureId
-		? liveMessageStream
-		: deriveMessageStreamSnapshot(activeCapture.data, viewState);
+	const messageStream = useApplicationSelector(selectMessageStream);
 
 	return (
 		<div

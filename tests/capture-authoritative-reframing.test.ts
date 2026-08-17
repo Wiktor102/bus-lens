@@ -33,6 +33,7 @@ type Fixture = {
 	controller: ReturnType<typeof createCaptureController>;
 	errors: unknown[];
 	getViewState: () => ViewStateSnapshot;
+	getSectionSeedRequestCount: () => number;
 	getSectionViewRequestCount: () => number;
 };
 
@@ -65,6 +66,7 @@ function makeFixture(name: string, options: FixtureOptions = {}): Fixture {
 	const state = { captures: [capture], folders: [] } as unknown as AppState;
 	const errors: unknown[] = [];
 	let viewState = EMPTY_VIEW_STATE_SNAPSHOT;
+	let sectionSeedRequestCount = 0;
 	let sectionViewRequestCount = 0;
 	const writer = {
 		updateFramingDraft: async (request: Parameters<CaptureWriter["updateFramingDraft"]>[0]) => service.updateFramingDraft(request),
@@ -99,6 +101,7 @@ function makeFixture(name: string, options: FixtureOptions = {}): Fixture {
 		isCanonicalCapture: () => true,
 		refreshCapture: async () => options.refresh ? options.refresh() : readCapture(repository, name),
 		seedSectionViewState: (captureId, sections) => {
+			sectionSeedRequestCount += 1;
 			viewState = reduceViewState(viewState, { type: "seed-section-preferences", captureId, sections });
 		},
 		getSectionViewPreference: (captureId, rawStart) => getSectionViewPreference(viewState, captureId, rawStart),
@@ -124,6 +127,7 @@ function makeFixture(name: string, options: FixtureOptions = {}): Fixture {
 		controller,
 		errors,
 		getViewState: () => viewState,
+		getSectionSeedRequestCount: () => sectionSeedRequestCount,
 		getSectionViewRequestCount: () => sectionViewRequestCount
 	};
 }
@@ -466,6 +470,18 @@ test("seeds application view state from legacy persisted section flags", async (
 			collapseRuns: true,
 			collapsed: true
 		});
+	} finally {
+		closeFixture(fixture);
+	}
+});
+
+test("seeds each authoritative section locator only once", async () => {
+	const fixture = makeFixture("authoritative-section-view-seed-once");
+	try {
+		await fixture.controller.refreshCapture(fixture.capture.id!);
+		await fixture.controller.refreshCapture(fixture.capture.id!);
+
+		assert.equal(fixture.getSectionSeedRequestCount(), 1);
 	} finally {
 		closeFixture(fixture);
 	}

@@ -72,3 +72,37 @@ test("does not overwrite a live preference when an authoritative refresh seeds l
 	});
 	assert.deepEqual(getSectionViewPreference(refreshed, "capture-1", 0), { collapseRuns: false, collapsed: true });
 });
+
+test("preserves view-state identity when an action has no effective change", () => {
+	const seeded = reduceViewState(EMPTY_VIEW_STATE_SNAPSHOT, {
+		type: "seed-section-preferences",
+		captureId: "capture-1",
+		sections: [{ rawStart: 0, collapseRuns: true, collapsed: false }]
+	});
+
+	assert.strictEqual(
+		reduceViewState(seeded, {
+			type: "seed-section-preferences",
+			captureId: "capture-1",
+			sections: [{ rawStart: 0, collapseRuns: false, collapsed: true }]
+		}),
+		seeded
+	);
+	assert.strictEqual(
+		reduceViewState(seeded, {
+			type: "set-section-preference",
+			captureId: "capture-1",
+			rawStart: 0,
+			patch: { collapseRuns: true }
+		}),
+		seeded
+	);
+	assert.strictEqual(
+		reduceViewState(seeded, {
+			type: "reconcile-section-preferences",
+			captureId: "capture-1",
+			rawStarts: [0]
+		}),
+		seeded
+	);
+});

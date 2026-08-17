@@ -40,6 +40,39 @@ test("application store changes ViewState only through typed events", () => {
 	unsubscribe();
 });
 
+test("does not publish or clone the application state for a no-op view event", () => {
+	const store = createTestApplicationStore();
+	let updates = 0;
+	const unsubscribe = store.subscribe(() => updates++);
+	const before = store.getSnapshot();
+
+	store.send({
+		type: "view/section-preferences-seeded",
+		captureId: "capture-1",
+		sections: []
+	});
+
+	assert.strictEqual(store.getSnapshot(), before);
+	assert.strictEqual(selectViewState(store.getSnapshot()), before.viewState);
+	assert.equal(updates, 0);
+
+	store.send({
+		type: "view/section-preferences-seeded",
+		captureId: "capture-1",
+		sections: [{ rawStart: 0, collapseRuns: true, collapsed: false }]
+	});
+	const seeded = store.getSnapshot();
+	store.send({
+		type: "view/section-preferences-seeded",
+		captureId: "capture-1",
+		sections: [{ rawStart: 0, collapseRuns: false, collapsed: true }]
+	});
+
+	assert.strictEqual(store.getSnapshot(), seeded);
+	assert.equal(updates, 1);
+	unsubscribe();
+});
+
 test("application store instances and selectors stay isolated for tests", () => {
 	const first = createApplicationStore();
 	const second = createApplicationStore();

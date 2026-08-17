@@ -16,6 +16,11 @@ export type LiveStateServiceDependencies = {
 	getSendController: () => Pick<SendController, "getStatus"> | undefined;
 	getViewStateSnapshot?: () => ViewStateSnapshot;
 	applicationStore?: Pick<ApplicationStore, "send" | "select" | "subscribe">;
+	deriveMessageStreamSnapshot?: typeof deriveMessageStreamSnapshot;
+};
+
+export type LiveStateRenderOptions = {
+	skipMessageStream?: boolean;
 };
 
 export type LiveStateService = {
@@ -23,7 +28,7 @@ export type LiveStateService = {
 	publishSendState: () => void;
 	publishFramingToolbarState: (capture?: Capture) => void;
 	renderMessages: (options?: MessageStreamDeriveOptions) => void;
-	render: () => void;
+	render: (options?: LiveStateRenderOptions) => void;
 	subscribeToViewStateChanges: () => () => void;
 };
 
@@ -34,6 +39,7 @@ export type LiveStateService = {
 export function createLiveStateService(dependencies: LiveStateServiceDependencies): LiveStateService {
 	const store = dependencies.applicationStore || applicationStore;
 	const getViewState = dependencies.getViewStateSnapshot || (() => store.select(selectViewState));
+	const deriveStream = dependencies.deriveMessageStreamSnapshot || deriveMessageStreamSnapshot;
 
 	function publishCaptureHeaderState(capture = dependencies.capture()): void {
 		const transport = dependencies.getTransport();
@@ -71,19 +77,17 @@ export function createLiveStateService(dependencies: LiveStateServiceDependencie
 
 	function renderMessages(options: MessageStreamDeriveOptions = {}): void {
 		const capture = dependencies.capture();
-		if (!capture) return;
 		store.send({
 			type: "message-stream/changed",
-			state: deriveMessageStreamSnapshot(capture, getViewState(), options)
+			state: deriveStream(capture, getViewState(), options)
 		});
 	}
 
-	function render(): void {
+	function render(options: LiveStateRenderOptions = {}): void {
 		dependencies.getTransport().publishState();
 		publishCaptureHeaderState();
 		publishFramingToolbarState();
-		if (!dependencies.capture()) return;
-		renderMessages();
+		if (!options.skipMessageStream) renderMessages();
 	}
 
 	function subscribeToViewStateChanges(): () => void {

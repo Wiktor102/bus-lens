@@ -559,6 +559,9 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 	};
 	initializedController = lifecycle;
 	snapshots.render();
-	void runtime.ready.then(() => snapshots.render());
+	void runtime.ready.then(() => {
+		const seeded = captureController.seedSectionViewPreferences();
+		snapshots.render({ skipMessageStream: seeded });
+	});
 	return lifecycle;
 }

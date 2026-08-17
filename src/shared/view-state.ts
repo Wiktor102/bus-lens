@@ -83,6 +83,10 @@ function withCaptureSectionPreferences(
 	};
 }
 
+function sameSectionPreference(left: SectionViewPreference, right: SectionViewPreference): boolean {
+	return left.collapseRuns === right.collapseRuns && left.collapsed === right.collapsed;
+}
+
 function setSectionPreference(
 	state: ViewStateSnapshot,
 	captureId: string,
@@ -95,12 +99,14 @@ function setSectionPreference(
 	const currentPreferences = captureSectionPreferences(state, captureId);
 	if (seedOnly && currentPreferences[key]) return state;
 	const current = currentPreferences[key] || DEFAULT_SECTION_VIEW_PREFERENCE;
+	const next = {
+		collapseRuns: patch.collapseRuns === undefined ? current.collapseRuns : Boolean(patch.collapseRuns),
+		collapsed: patch.collapsed === undefined ? current.collapsed : Boolean(patch.collapsed)
+	};
+	if (currentPreferences[key] && sameSectionPreference(currentPreferences[key], next)) return state;
 	return withCaptureSectionPreferences(state, captureId, {
 		...currentPreferences,
-		[key]: Object.freeze({
-			collapseRuns: patch.collapseRuns === undefined ? current.collapseRuns : Boolean(patch.collapseRuns),
-			collapsed: patch.collapsed === undefined ? current.collapsed : Boolean(patch.collapsed)
-		})
+		[key]: Object.freeze(next)
 	});
 }
 
@@ -120,17 +126,17 @@ export function reduceViewState(
 ): ViewStateSnapshot {
 	switch (action.type) {
 		case "set-active-panel":
-			return { ...state, activePanel: action.activePanel };
+			return state.activePanel === action.activePanel ? state : { ...state, activePanel: action.activePanel };
 		case "set-filter-open":
-			return { ...state, filterOpen: action.filterOpen };
+			return state.filterOpen === action.filterOpen ? state : { ...state, filterOpen: action.filterOpen };
 		case "set-filter-query":
-			return { ...state, filterQuery: action.filterQuery };
+			return state.filterQuery === action.filterQuery ? state : { ...state, filterQuery: action.filterQuery };
 		case "set-display-mode":
-			return { ...state, displayMode: action.displayMode };
+			return state.displayMode === action.displayMode ? state : { ...state, displayMode: action.displayMode };
 		case "set-frame-changes":
-			return { ...state, showFrameChanges: action.showFrameChanges };
+			return state.showFrameChanges === action.showFrameChanges ? state : { ...state, showFrameChanges: action.showFrameChanges };
 		case "set-collapse-runs":
-			return { ...state, collapseRuns: action.collapseRuns };
+			return state.collapseRuns === action.collapseRuns ? state : { ...state, collapseRuns: action.collapseRuns };
 		case "seed-section-preferences":
 			return action.sections.reduce(
 				(current, section) => setSectionPreference(current, action.captureId, section.rawStart, section, true),
@@ -145,6 +151,7 @@ export function reduceViewState(
 			const currentPreferences = captureSectionPreferences(state, action.captureId);
 			const preference = currentPreferences[fromKey];
 			if (!preference) return state;
+			if (currentPreferences[toKey] && sameSectionPreference(currentPreferences[toKey], preference)) return state;
 			return withCaptureSectionPreferences(state, action.captureId, {
 				...currentPreferences,
 				[toKey]: preference
@@ -174,10 +181,9 @@ export function reduceViewState(
 		case "reconcile-section-preferences": {
 			const currentPreferences = captureSectionPreferences(state, action.captureId);
 			const validKeys = new Set(action.rawStarts.map(rawStartKey).filter((key): key is string => key !== null));
-			const nextPreferences = Object.fromEntries(
-				Object.entries(currentPreferences).filter(([key]) => validKeys.has(key))
-			) as Readonly<Record<string, SectionViewPreference>>;
-			if (Object.keys(nextPreferences).length === Object.keys(currentPreferences).length) return state;
+			const currentEntries = Object.entries(currentPreferences);
+			if (currentEntries.every(([key]) => validKeys.has(key))) return state;
+			const nextPreferences = Object.fromEntries(currentEntries.filter(([key]) => validKeys.has(key))) as Readonly<Record<string, SectionViewPreference>>;
 			return withCaptureSectionPreferences(state, action.captureId, nextPreferences);
 		}
 		case "clear-section-preferences": {

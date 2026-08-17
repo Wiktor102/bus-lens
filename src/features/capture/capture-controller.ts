@@ -136,6 +136,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	const captureWriteQueues = new Map<string, CaptureWriteQueue>();
 	const patternRemarkWriteQueues = new Map<string, Map<string, PatternRemarkWriteQueue>>();
 	const captureCommandWrites = new Map<string, Set<Promise<unknown>>>();
+	const seededSectionStarts = new Map<string, Set<number>>();
 	let framingCoordinator: FramingCoordinator;
 
 	function captures(): readonly CaptureIndexEntry[] {
@@ -223,16 +224,21 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		return (dependencies.getCapture?.(captureId) || captures().find(item => String(item.id) === captureId)) as ActiveCapture | undefined;
 	}
 
-	function seedSectionViewPreferences(item: Capture | undefined): void {
-		if (!item?.id || !dependencies.seedSectionViewState) return;
-		dependencies.seedSectionViewState(
-			String(item.id),
-			(item.frameSections || []).map(section => ({
-				rawStart: Number(section.start ?? 0),
-				collapseRuns: Boolean(section.collapseRuns),
-				collapsed: Boolean(section.collapsed)
-			}))
-		);
+	function seedSectionViewPreferences(item: Capture | undefined): boolean {
+		if (!item?.id || !dependencies.seedSectionViewState) return false;
+		const captureId = String(item.id);
+		const sections = (item.frameSections || []).map(section => ({
+			rawStart: Number(section.start ?? 0),
+			collapseRuns: Boolean(section.collapseRuns),
+			collapsed: Boolean(section.collapsed)
+		}));
+		const currentStarts = new Set(sections.map(section => section.rawStart));
+		const seededStarts = seededSectionStarts.get(captureId);
+		const pending = sections.filter(section => !seededStarts?.has(section.rawStart));
+		seededSectionStarts.set(captureId, currentStarts);
+		if (!pending.length) return false;
+		dependencies.seedSectionViewState(captureId, pending);
+		return true;
 	}
 
 	function reconcileSectionViewPreferences(item: Capture | undefined): void {
@@ -268,7 +274,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (!item) return;
 		applyFramingSnapshot(item, sections);
 		rebuildPreview(item);
-		dependencies.renderMessages();
 		dependencies.render();
 	}
 
@@ -430,7 +435,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		applyPending: applyPendingFraming,
 		onTerminalFailure: (captureId, error) => {
 			reportFailure(captureId, error);
-			dependencies.render();
 		},
 		onStateChange: captureId => {
 			if (String(dependencies.getActiveId() ?? "") === captureId) dependencies.render();
@@ -691,14 +695,14 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		}));
 	}
 
-	function persistFraming(item: ActiveCapture, _immediate = false): void {
-		if (rejectLockedMutation(item)) return;
-		seedSectionViewPreferences(item);
+	function persistFraming(item: ActiveCapture, _immediate = false): boolean {
+		if (rejectLockedMutation(item)) return false;
 		if (!isCanonical(item)) {
 			persistLegacyCapture(item);
-			return;
+			return false;
 		}
 		queueCaptureWrite(item.id, "framing", framingRequest(item));
+		return true;
 	}
 
 	function selectArchiveCapture(captureId: string) {
@@ -995,6 +999,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			return;
 		}
 		if (compatibilityState) compatibilityState.captures = compatibilityState.captures.filter(candidate => candidate !== item);
+		seededSectionStarts.delete(itemId);
 		dependencies.clearSectionViewState?.(itemId);
 		const current = archiveIndex();
 		persistArchiveIndex({
@@ -1068,7 +1073,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (typeof start !== "number" || !Number.isInteger(start)) return;
 		c.previewMode = "sections";
 		normalizeSections(c);
-		seedSectionViewPreferences(c);
 		if (c.frameSections.some(section => section.start === start)) {
 			dependencies.render();
 			dependencies.showToast(
@@ -1093,9 +1097,9 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			collapsed: false
 		});
 		normalizeSections(c);
+		seedSectionViewPreferences(c);
 		rebuildPreview(c);
-		persistFraming(c);
-		dependencies.render();
+		if (!persistFraming(c)) dependencies.render();
 	}
 
 	function updateSectionFraming(sectionId: string, update: SectionFramingUpdate, toast: (section: ActiveCaptureSection) => string) {
@@ -1106,8 +1110,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (!section) return;
 		applySectionFramingSettings(section, update);
 		rebuildPreview(c);
-		persistFraming(c);
-		dependencies.render();
+		if (!persistFraming(c)) dependencies.render();
 		dependencies.showToast(toast(section));
 	}
 
@@ -1143,7 +1146,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const c = capture();
 		if (!c || rejectLockedMutation(c)) return;
 		normalizeSections(c);
-		seedSectionViewPreferences(c);
 		const section = c.frameSections.find(item => item.id === sectionId);
 		const previousStart = section?.start;
 		if (!moveSectionStart(c, sectionId, action)) return;
@@ -1154,8 +1156,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			dependencies.copySectionViewState?.(String(c.id), previousStart, section.start);
 		}
 		rebuildPreview(c);
-		persistFraming(c, true);
-		dependencies.render();
+		if (!persistFraming(c, true)) dependencies.render();
 		const label =
 			action === "byte-before"
 				? "one byte before"
@@ -1171,24 +1172,24 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const c = capture();
 		if (!c || rejectLockedMutation(c)) return;
 		normalizeSections(c);
-		seedSectionViewPreferences(c);
 		const index = c.frameSections.findIndex(section => section.id === sectionId);
 		if (index <= 0) return;
 		c.frameSections.splice(index, 1);
 		rebuildPreview(c);
-		persistFraming(c, true);
-		dependencies.render();
+		if (!persistFraming(c, true)) dependencies.render();
 	}
 
 	function setSectionCollapse(sectionId: string, collapseRuns: boolean) {
 		const c = capture();
 		if (!c) return;
 		normalizeSections(c);
-		seedSectionViewPreferences(c);
 		const section = c.frameSections.find(item => item.id === sectionId);
 		if (!section) return;
-		if (c.id !== undefined) dependencies.setSectionViewState?.(String(c.id), section.start, { collapseRuns });
-		dependencies.renderMessages();
+		if (c.id !== undefined && dependencies.setSectionViewState) {
+			dependencies.setSectionViewState(String(c.id), section.start, { collapseRuns });
+		} else {
+			dependencies.renderMessages();
+		}
 		dependencies.showToast(collapseRuns ? "Runs collapse in this section" : "Runs expand in this section");
 	}
 
@@ -1196,11 +1197,13 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const c = capture();
 		if (!c) return;
 		normalizeSections(c);
-		seedSectionViewPreferences(c);
 		const section = c.frameSections.find(item => item.id === sectionId);
 		if (!section) return;
-		if (c.id !== undefined) dependencies.setSectionViewState?.(String(c.id), section.start, { collapsed: Boolean(collapsed) });
-		dependencies.renderMessages();
+		if (c.id !== undefined && dependencies.setSectionViewState) {
+			dependencies.setSectionViewState(String(c.id), section.start, { collapsed: Boolean(collapsed) });
+		} else {
+			dependencies.renderMessages();
+		}
 	}
 
 	function commitContextDraft(input: ContextSaveInput) {
@@ -1444,6 +1447,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		clearActiveCaptureMessages,
 		deleteActiveCapture,
 		publishContextDialog,
+		seedSectionViewPreferences: () => seedSectionViewPreferences(capture()),
 		startSectionAtByte,
 		moveSection,
 		deleteSection,
