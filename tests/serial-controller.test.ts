@@ -461,6 +461,7 @@ test("finalization does not deadlock a framing retry already owned by the coordi
 		captureWriter,
 		isCanonicalCapture: () => true,
 		waitForCaptureWrite,
+		trackCaptureWrite,
 		refreshCapture,
 		reportPersistenceFailure: () => {}
 	});
