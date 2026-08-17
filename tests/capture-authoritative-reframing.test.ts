@@ -104,11 +104,11 @@ function makeFixture(name: string, options: FixtureOptions = {}): Fixture {
 		setSectionViewState: (captureId, rawStart, patch) => {
 			viewState = reduceViewState(viewState, { type: "set-section-preference", captureId, rawStart, patch });
 		},
-		moveSectionViewState: (captureId, fromRawStart, toRawStart) => {
-			viewState = reduceViewState(viewState, { type: "move-section-preference", captureId, fromRawStart, toRawStart });
+		copySectionViewState: (captureId, fromRawStart, toRawStart) => {
+			viewState = reduceViewState(viewState, { type: "copy-section-preference", captureId, fromRawStart, toRawStart });
 		},
-		deleteSectionViewState: (captureId, rawStart) => {
-			viewState = reduceViewState(viewState, { type: "delete-section-preference", captureId, rawStart });
+		reconcileSectionViewState: (captureId, rawStarts) => {
+			viewState = reduceViewState(viewState, { type: "reconcile-section-preferences", captureId, rawStarts });
 		},
 		clearSectionViewState: captureId => {
 			viewState = reduceViewState(viewState, { type: "clear-section-preferences", captureId });
@@ -222,6 +222,8 @@ test("a failed section deletion rolls back to the last acknowledged SQLite proje
 		fixture.controller.startSectionAtByte(String(message.id), 0);
 		await fixture.controller.waitForCaptureWrites(fixture.capture.id!);
 		const sectionId = String(fixture.capture.frameSections?.[1]?.id);
+		fixture.controller.setSectionCollapsed(sectionId, true);
+		assert.equal(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, 2)?.collapsed, true);
 		failReframes = true;
 
 		fixture.controller.deleteSection(sectionId);
@@ -230,7 +232,40 @@ test("a failed section deletion rolls back to the last acknowledged SQLite proje
 
 		assert.equal(fixture.capture.frameSections?.length, 2);
 		assert.equal(activeSectionRows(fixture).length, 2);
+		assert.equal(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, 2)?.collapsed, true);
+		assert.equal(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, 1), undefined);
+		assert.deepEqual(Object.keys(fixture.getViewState().sectionPreferences[String(fixture.capture.id)] || {}).sort(), ["0", "2"]);
 		assert.ok(fixture.errors.length >= 1);
+	} finally {
+		closeFixture(fixture);
+	}
+});
+
+test("a failed section move restores its view preference without an optimistic orphan", async () => {
+	let failReframes = false;
+	const fixture = makeFixture("authoritative-move-rollback", {
+		reframe: async (request, service) => {
+			if (failReframes) throw new Error("reframe deliberately failed");
+			return service.reframe(request as ServerReframeRequest);
+		}
+	});
+	try {
+		const message = fixture.capture.messages?.[1];
+		assert.ok(message);
+		fixture.controller.startSectionAtByte(String(message.id), 0);
+		await fixture.controller.waitForCaptureWrites(fixture.capture.id!);
+		const sectionId = String(fixture.capture.frameSections?.[1]?.id);
+		fixture.controller.setSectionCollapsed(sectionId, true);
+		assert.equal(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, 2)?.collapsed, true);
+
+		failReframes = true;
+		fixture.controller.moveSection(sectionId, "byte-before");
+		await fixture.controller.waitForCaptureWrites(fixture.capture.id!);
+
+		assert.equal(fixture.capture.frameSections?.[1]?.start, 2);
+		assert.equal(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, 2)?.collapsed, true);
+		assert.equal(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, 1), undefined);
+		assert.deepEqual(Object.keys(fixture.getViewState().sectionPreferences[String(fixture.capture.id)] || {}).sort(), ["0", "2"]);
 	} finally {
 		closeFixture(fixture);
 	}

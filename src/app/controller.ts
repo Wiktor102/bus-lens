@@ -149,16 +149,16 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 			rawStart,
 			patch
 		}),
-		moveSectionViewState: (captureId, fromRawStart, toRawStart) => applicationStore.send({
-			type: "view/section-preference-moved",
+		copySectionViewState: (captureId, fromRawStart, toRawStart) => applicationStore.send({
+			type: "view/section-preference-copied",
 			captureId,
 			fromRawStart,
 			toRawStart
 		}),
-		deleteSectionViewState: (captureId, rawStart) => applicationStore.send({
-			type: "view/section-preference-deleted",
+		reconcileSectionViewState: (captureId, rawStarts) => applicationStore.send({
+			type: "view/section-preferences-reconciled",
 			captureId,
-			rawStart
+			rawStarts
 		}),
 		clearSectionViewState: captureId => applicationStore.send({
 			type: "view/section-preferences-cleared",

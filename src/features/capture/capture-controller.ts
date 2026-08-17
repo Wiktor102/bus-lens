@@ -77,8 +77,8 @@ export type CaptureControllerDependencies = {
 	refreshCapture?: (captureId: string, expectedActiveProfileId?: string) => Promise<Capture>;
 	seedSectionViewState?: (captureId: string, sections: readonly SectionViewPreferenceSeed[]) => void;
 	setSectionViewState?: (captureId: string, rawStart: number, patch: SectionViewPreferencePatch) => void;
-	moveSectionViewState?: (captureId: string, fromRawStart: number, toRawStart: number) => void;
-	deleteSectionViewState?: (captureId: string, rawStart: number) => void;
+	copySectionViewState?: (captureId: string, fromRawStart: number, toRawStart: number) => void;
+	reconcileSectionViewState?: (captureId: string, rawStarts: readonly number[]) => void;
 	clearSectionViewState?: (captureId: string) => void;
 	reportPersistenceFailure?: (captureId: string, error: unknown) => void;
 };
@@ -233,6 +233,14 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		);
 	}
 
+	function reconcileSectionViewPreferences(item: Capture | undefined): void {
+		if (!item?.id || !dependencies.reconcileSectionViewState) return;
+		dependencies.reconcileSectionViewState(
+			String(item.id),
+			(item.frameSections || []).map(section => Number(section.start ?? 0))
+		);
+	}
+
 	function installAuthoritativeCapture(captureId: string, refreshed: Capture, projectionChanged: boolean): void {
 		const current = capture();
 		// The runtime has already transferred this refresh into its single owned
@@ -265,7 +273,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	async function refreshAuthoritativeCapture(
 		captureId: string,
 		preserveIntent = true,
-		expectedActiveProfileId?: string
+		expectedActiveProfileId?: string,
+		reconcileViewState = !preserveIntent
 	): Promise<Capture> {
 		if (!dependencies.refreshCapture) throw new Error("capture refresh is unavailable");
 		const previousProjectionToken = captureProjectionToken(capture());
@@ -281,6 +290,13 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		// needs the complete authoritative graph copied into the owned object.
 		const projectionChanged = previousProjectionToken !== captureProjectionToken(refreshed);
 		installAuthoritativeCapture(captureId, refreshed, projectionChanged);
+		// A move is staged as a copy and a delete keeps its old locator until the
+		// framing command is acknowledged. Reconcile only after an authoritative
+		// refresh that is not carrying a newer queued intent; otherwise the retry
+		// projection would discard the staged locator before it can be acknowledged.
+		if (reconcileViewState && !framingCoordinator.pendingIntent(captureId)) {
+			reconcileSectionViewPreferences(refreshed);
+		}
 		framingCoordinator.acknowledgeAuthoritativeRefresh(captureId);
 		if (preserveIntent) {
 			const intent = framingCoordinator.pendingIntent(captureId) || framingCoordinator.activeIntent(captureId);
@@ -402,7 +418,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			// pre-command fetch may be deduplicated by QueryClient and return the
 			// previous profile, so the data layer refetches until this exact response
 			// identity is observed before the coordinator can unlock frame commands.
-			await refreshAuthoritativeCapture(captureId, false, reframe.profileId);
+			await refreshAuthoritativeCapture(captureId, false, reframe.profileId, true);
 		}
 	}
 
@@ -1127,7 +1143,10 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const previousStart = section?.start;
 		if (!moveSectionStart(c, sectionId, action)) return;
 		if (c.id && previousStart !== undefined && section?.start !== undefined) {
-			dependencies.moveSectionViewState?.(String(c.id), previousStart, section.start);
+			// Keep the acknowledged locator until the server accepts the new
+			// framing profile. The authoritative refresh will remove whichever
+			// locator is no longer present, including a failed optimistic move.
+			dependencies.copySectionViewState?.(String(c.id), previousStart, section.start);
 		}
 		rebuildPreview(c);
 		persistFraming(c, true);
@@ -1150,11 +1169,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		seedSectionViewPreferences(c);
 		const index = c.frameSections.findIndex(section => section.id === sectionId);
 		if (index <= 0) return;
-		const rawStart = c.frameSections[index]?.start;
 		c.frameSections.splice(index, 1);
-		if (c.id !== undefined && rawStart !== undefined) {
-			dependencies.deleteSectionViewState?.(String(c.id), rawStart);
-		}
 		rebuildPreview(c);
 		persistFraming(c, true);
 		dependencies.render();

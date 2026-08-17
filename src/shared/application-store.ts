@@ -310,8 +310,10 @@ export type ApplicationEvent =
 	| { type: "view/collapse-runs-changed"; collapseRuns: boolean }
 	| { type: "view/section-preferences-seeded"; captureId: string; sections: readonly SectionViewPreferenceSeed[] }
 	| { type: "view/section-preference-changed"; captureId: string; rawStart: number; patch: SectionViewPreferencePatch }
+	| { type: "view/section-preference-copied"; captureId: string; fromRawStart: number; toRawStart: number }
 	| { type: "view/section-preference-moved"; captureId: string; fromRawStart: number; toRawStart: number }
 	| { type: "view/section-preference-deleted"; captureId: string; rawStart: number }
+	| { type: "view/section-preferences-reconciled"; captureId: string; rawStarts: readonly number[] }
 	| { type: "view/section-preferences-cleared"; captureId: string }
 	| { type: "view/replaced"; viewState: ViewStateSnapshot }
 	| { type: "capture/selected-changed"; captureId: string | null }
@@ -418,6 +420,13 @@ export function viewStateActionToApplicationEvent(action: ViewStateAction): Appl
 				rawStart: action.rawStart,
 				patch: action.patch
 			};
+		case "copy-section-preference":
+			return {
+				type: "view/section-preference-copied",
+				captureId: action.captureId,
+				fromRawStart: action.fromRawStart,
+				toRawStart: action.toRawStart
+			};
 		case "move-section-preference":
 			return {
 				type: "view/section-preference-moved",
@@ -427,6 +436,8 @@ export function viewStateActionToApplicationEvent(action: ViewStateAction): Appl
 			};
 		case "delete-section-preference":
 			return { type: "view/section-preference-deleted", captureId: action.captureId, rawStart: action.rawStart };
+		case "reconcile-section-preferences":
+			return { type: "view/section-preferences-reconciled", captureId: action.captureId, rawStarts: action.rawStarts };
 		case "clear-section-preferences":
 			return { type: "view/section-preferences-cleared", captureId: action.captureId };
 	}
@@ -487,6 +498,13 @@ export function createApplicationStore(
 					rawStart: event.rawStart,
 					patch: event.patch
 				}),
+			"view/section-preference-copied": (state, event: { captureId: string; fromRawStart: number; toRawStart: number }) =>
+				withViewState(state, {
+					type: "copy-section-preference",
+					captureId: event.captureId,
+					fromRawStart: event.fromRawStart,
+					toRawStart: event.toRawStart
+				}),
 			"view/section-preference-moved": (state, event: { captureId: string; fromRawStart: number; toRawStart: number }) =>
 				withViewState(state, {
 					type: "move-section-preference",
@@ -499,6 +517,12 @@ export function createApplicationStore(
 					type: "delete-section-preference",
 					captureId: event.captureId,
 					rawStart: event.rawStart
+				}),
+			"view/section-preferences-reconciled": (state, event: { captureId: string; rawStarts: readonly number[] }) =>
+				withViewState(state, {
+					type: "reconcile-section-preferences",
+					captureId: event.captureId,
+					rawStarts: event.rawStarts
 				}),
 			"view/section-preferences-cleared": (state, event: { captureId: string }) =>
 				withViewState(state, { type: "clear-section-preferences", captureId: event.captureId }),

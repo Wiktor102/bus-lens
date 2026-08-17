@@ -37,8 +37,10 @@ export type ViewStateAction =
 	| { type: "set-collapse-runs"; collapseRuns: boolean }
 	| { type: "seed-section-preferences"; captureId: string; sections: readonly SectionViewPreferenceSeed[] }
 	| { type: "set-section-preference"; captureId: string; rawStart: number; patch: SectionViewPreferencePatch }
+	| { type: "copy-section-preference"; captureId: string; fromRawStart: number; toRawStart: number }
 	| { type: "move-section-preference"; captureId: string; fromRawStart: number; toRawStart: number }
 	| { type: "delete-section-preference"; captureId: string; rawStart: number }
+	| { type: "reconcile-section-preferences"; captureId: string; rawStarts: readonly number[] }
 	| { type: "clear-section-preferences"; captureId: string };
 
 export const EMPTY_VIEW_STATE_SNAPSHOT: ViewStateSnapshot = Object.freeze({
@@ -136,6 +138,18 @@ export function reduceViewState(
 			);
 		case "set-section-preference":
 			return setSectionPreference(state, action.captureId, action.rawStart, action.patch);
+		case "copy-section-preference": {
+			const fromKey = rawStartKey(action.fromRawStart);
+			const toKey = rawStartKey(action.toRawStart);
+			if (!fromKey || !toKey || fromKey === toKey) return state;
+			const currentPreferences = captureSectionPreferences(state, action.captureId);
+			const preference = currentPreferences[fromKey];
+			if (!preference) return state;
+			return withCaptureSectionPreferences(state, action.captureId, {
+				...currentPreferences,
+				[toKey]: preference
+			});
+		}
 		case "move-section-preference": {
 			const fromKey = rawStartKey(action.fromRawStart);
 			const toKey = rawStartKey(action.toRawStart);
@@ -155,6 +169,15 @@ export function reduceViewState(
 			if (!currentPreferences[key]) return state;
 			const nextPreferences = { ...currentPreferences };
 			delete nextPreferences[key];
+			return withCaptureSectionPreferences(state, action.captureId, nextPreferences);
+		}
+		case "reconcile-section-preferences": {
+			const currentPreferences = captureSectionPreferences(state, action.captureId);
+			const validKeys = new Set(action.rawStarts.map(rawStartKey).filter((key): key is string => key !== null));
+			const nextPreferences = Object.fromEntries(
+				Object.entries(currentPreferences).filter(([key]) => validKeys.has(key))
+			) as Readonly<Record<string, SectionViewPreference>>;
+			if (Object.keys(nextPreferences).length === Object.keys(currentPreferences).length) return state;
 			return withCaptureSectionPreferences(state, action.captureId, nextPreferences);
 		}
 		case "clear-section-preferences": {
