@@ -153,6 +153,10 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	}
 
 	function rejectLockedMutation(item: Capture | undefined): boolean {
+		if (item?.id && framingCoordinator.isBlocked(String(item.id))) {
+			dependencies.showToast("Capture framing could not be confirmed; refresh before editing");
+			return true;
+		}
 		if (item?.id && dependencies.transport.isCaptureMutationLocked?.(String(item.id))) {
 			dependencies.showToast("Capture is still being saved; editing is temporarily disabled");
 			return true;
@@ -250,6 +254,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			);
 		}
 		installAuthoritativeCapture(captureId, refreshed);
+		framingCoordinator.acknowledgeAuthoritativeRefresh(captureId);
 		if (preserveIntent) {
 			const intent = framingCoordinator.pendingIntent(captureId) || framingCoordinator.activeIntent(captureId);
 			if (intent) applyPendingFraming(captureId, intent);
@@ -600,7 +605,9 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			const running = [
 				...(captureCommandWrites.get(captureId) || []),
 				...(captureQueue?.running ? [captureQueue.running] : []),
-				...(framingCoordinator.isPending(captureId) ? [framingCoordinator.waitFor(captureId)] : []),
+				...(framingCoordinator.isPending(captureId) && !framingCoordinator.isBlocked(captureId)
+					? [framingCoordinator.waitFor(captureId)]
+					: []),
 				...(patternQueues ? [...patternQueues.values()].flatMap(queue => queue.running ? [queue.running] : []) : [])
 			];
 			if (!running.length) return;

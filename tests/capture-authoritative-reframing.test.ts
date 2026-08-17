@@ -16,6 +16,7 @@ const framing = [{ start: 0, framingMode: "length", frameSize: 2, collapseRuns: 
 
 type FixtureOptions = {
 	reframe?: (request: ReframeRequest, service: CanonicalCaptureCommandService) => Promise<unknown>;
+	refresh?: () => Promise<Capture>;
 };
 
 type Fixture = {
@@ -83,7 +84,7 @@ function makeFixture(name: string, options: FixtureOptions = {}): Fixture {
 		publishDialogCommand: () => {},
 		captureWriter: writer,
 		isCanonicalCapture: () => true,
-		refreshCapture: async () => readCapture(repository, name),
+		refreshCapture: async () => options.refresh ? options.refresh() : readCapture(repository, name),
 		reportPersistenceFailure: (_captureId, error) => { errors.push(error); }
 	});
 	return { database, service, repository, capture, controller, errors };
@@ -193,6 +194,53 @@ test("a failed section deletion rolls back to the last acknowledged SQLite proje
 		assert.equal(fixture.capture.frameSections?.length, 2);
 		assert.equal(activeSectionRows(fixture).length, 2);
 		assert.ok(fixture.errors.length >= 1);
+	} finally {
+		closeFixture(fixture);
+	}
+});
+
+test("failed rollback keeps the optimistic framing projection blocked until refresh recovers it", async () => {
+	let failReframes = false;
+	let failRefreshes = false;
+	const fixture = makeFixture("authoritative-blocked-rollback", {
+		reframe: async (request, service) => {
+			if (failReframes) throw new Error("reframe deliberately failed");
+			return service.reframe(request as ServerReframeRequest);
+		},
+		refresh: async () => {
+			if (failRefreshes) throw new Error("refresh deliberately failed");
+			return readCapture(fixture.repository, fixture.capture.id!);
+		}
+	});
+	try {
+		const message = fixture.capture.messages?.[1];
+		assert.ok(message);
+		fixture.controller.startSectionAtByte(String(message.id), 0);
+		await fixture.controller.waitForCaptureWrites(fixture.capture.id!);
+		const sectionId = String(fixture.capture.frameSections?.[1]?.id);
+		const acknowledgedFrameSize = fixture.capture.frameSections?.[0]?.frameSize;
+		failReframes = true;
+		failRefreshes = true;
+
+		fixture.controller.deleteSection(sectionId);
+		await fixture.controller.waitForCaptureWrites(fixture.capture.id!);
+
+		assert.equal(fixture.capture.frameSections?.length, 1);
+		assert.equal(activeSectionRows(fixture).length, 2);
+		assert.equal(fixture.controller.isFramingPending(fixture.capture.id!), true);
+		assert.equal(fixture.controller.addSequenceNote({ start: 1, end: 1, text: "must stay blocked" }), false);
+		fixture.controller.setSectionFrameSize(String(fixture.capture.frameSections?.[0]?.id), 4);
+		assert.equal(fixture.capture.frameSections?.[0]?.frameSize, acknowledgedFrameSize);
+
+		failRefreshes = false;
+		await fixture.controller.refreshCapture(fixture.capture.id!);
+		assert.equal(fixture.controller.isFramingPending(fixture.capture.id!), false);
+		assert.equal(fixture.capture.frameSections?.length, 2);
+
+		failReframes = false;
+		fixture.controller.deleteSection(sectionId);
+		await fixture.controller.waitForCaptureWrites(fixture.capture.id!);
+		assert.equal(activeSectionRows(fixture).length, 1);
 	} finally {
 		closeFixture(fixture);
 	}

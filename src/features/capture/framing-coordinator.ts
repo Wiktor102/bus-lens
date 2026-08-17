@@ -5,6 +5,7 @@ type FramingQueue = {
 	active: FramingSectionRequest[] | null;
 	retries: number;
 	running: Promise<void> | null;
+	blocked: boolean;
 };
 
 export type FramingCoordinatorDependencies = {
@@ -21,8 +22,10 @@ export type FramingCoordinatorDependencies = {
 export type FramingCoordinator = {
 	enqueue: (captureId: string, sections: readonly FramingSectionRequest[]) => void;
 	isPending: (captureId: string) => boolean;
+	isBlocked: (captureId: string) => boolean;
 	pendingIntent: (captureId: string) => readonly FramingSectionRequest[] | null;
 	activeIntent: (captureId: string) => readonly FramingSectionRequest[] | null;
+	acknowledgeAuthoritativeRefresh: (captureId: string) => void;
 	waitFor: (captureId: string) => Promise<void>;
 };
 
@@ -45,13 +48,13 @@ export function createFramingCoordinator(dependencies: FramingCoordinatorDepende
 	function queueFor(captureId: string): FramingQueue {
 		const existing = queues.get(captureId);
 		if (existing) return existing;
-		const queue: FramingQueue = { pending: null, active: null, retries: 0, running: null };
+		const queue: FramingQueue = { pending: null, active: null, retries: 0, running: null, blocked: false };
 		queues.set(captureId, queue);
 		return queue;
 	}
 
 	function clearQueue(captureId: string, queue: FramingQueue): void {
-		if (queue.pending || queue.active || queue.running) return;
+		if (queue.pending || queue.active || queue.running || queue.blocked) return;
 		if (queues.get(captureId) === queue) queues.delete(captureId);
 	}
 
@@ -65,12 +68,16 @@ export function createFramingCoordinator(dependencies: FramingCoordinatorDepende
 		} catch (reloadError) {
 			queue.pending = null;
 			queue.active = null;
+			let restored = false;
 			try {
 				await dependencies.reload(captureId, false);
+				restored = true;
 			} catch {
-				// The original failure is still the actionable error. The second
-				// reload is best effort and the terminal callback reports it.
+				// Keep the queue blocked below: the optimistic projection is still
+				// visible and has not been replaced by an acknowledged projection.
 			}
+			if (!restored) queue.blocked = true;
+			notify(captureId);
 			dependencies.onTerminalFailure(captureId, reloadError);
 			return false;
 		}
@@ -99,11 +106,16 @@ export function createFramingCoordinator(dependencies: FramingCoordinatorDepende
 				// immediately reapply a deleted or otherwise failed local section.
 				queue.pending = null;
 				queue.active = null;
+				let restored = false;
 				try {
 					await dependencies.reload(captureId, false);
+					restored = true;
 				} catch {
-					// Keep the original command error for the user-facing report.
+					// Keep the queue blocked below: the optimistic projection is still
+					// visible and has not been replaced by an acknowledged projection.
 				}
+				if (!restored) queue.blocked = true;
+				notify(captureId);
 				dependencies.onTerminalFailure(captureId, error);
 				break;
 			}
@@ -112,6 +124,7 @@ export function createFramingCoordinator(dependencies: FramingCoordinatorDepende
 
 	function enqueue(captureId: string, sections: readonly FramingSectionRequest[]): void {
 		const queue = queueFor(captureId);
+		if (queue.blocked) return;
 		queue.pending = cloneSections(sections);
 		notify(captureId);
 		if (queue.running) return;
@@ -125,7 +138,11 @@ export function createFramingCoordinator(dependencies: FramingCoordinatorDepende
 
 	function isPending(captureId: string): boolean {
 		const queue = queues.get(captureId);
-		return Boolean(queue?.pending || queue?.running);
+		return Boolean(queue?.blocked || queue?.pending || queue?.running);
+	}
+
+	function isBlocked(captureId: string): boolean {
+		return Boolean(queues.get(captureId)?.blocked);
 	}
 
 	function pendingIntent(captureId: string): readonly FramingSectionRequest[] | null {
@@ -136,6 +153,14 @@ export function createFramingCoordinator(dependencies: FramingCoordinatorDepende
 	function activeIntent(captureId: string): readonly FramingSectionRequest[] | null {
 		const active = queues.get(captureId)?.active;
 		return active ? cloneSections(active) : null;
+	}
+
+	function acknowledgeAuthoritativeRefresh(captureId: string): void {
+		const queue = queues.get(captureId);
+		if (!queue?.blocked) return;
+		queue.blocked = false;
+		notify(captureId);
+		clearQueue(captureId, queue);
 	}
 
 	async function waitFor(captureId: string): Promise<void> {
@@ -151,5 +176,5 @@ export function createFramingCoordinator(dependencies: FramingCoordinatorDepende
 		}
 	}
 
-	return { enqueue, isPending, pendingIntent, activeIntent, waitFor };
+	return { enqueue, isPending, isBlocked, pendingIntent, activeIntent, acknowledgeAuthoritativeRefresh, waitFor };
 }
