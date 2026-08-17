@@ -48,7 +48,7 @@ export type ArchiveCommands = {
 	persistArchiveIndex: (index: ArchiveIndex) => Promise<void>;
 	getCapture: (captureId: string) => Promise<Capture>;
 	/** Force-fetches durable capture state and the byte-free sidebar projection. */
-	refreshCapture: (captureId: string) => Promise<Capture>;
+	refreshCapture: (captureId: string, expectedActiveProfileId?: string) => Promise<Capture>;
 	listCaptures: () => Promise<CaptureListItem[]>;
 	saveLegacyCapture: (capture: Capture) => Promise<void>;
 	createCapture: (request: CreateCaptureRequest) => Promise<CaptureState>;
@@ -384,13 +384,22 @@ export function createArchiveDataLayer(
 		}
 	}
 
-	async function refreshCapture(captureId: string): Promise<Capture> {
-		const [capture] = await Promise.all([
-			queryClient.fetchQuery({ ...queries.capture(captureId), staleTime: 0 }),
-			queryClient.fetchQuery({ ...queries.captures(), staleTime: 0 }),
-			queryClient.fetchQuery({ ...queries.captureSummaries(), staleTime: 0 })
-		]);
-		return capture;
+	async function refreshCapture(captureId: string, expectedActiveProfileId?: string): Promise<Capture> {
+		const maxAttempts = expectedActiveProfileId ? 3 : 1;
+		let lastCapture: Capture | undefined;
+		for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+			const [capture] = await Promise.all([
+				queryClient.fetchQuery({ ...queries.capture(captureId), staleTime: 0 }),
+				queryClient.fetchQuery({ ...queries.captures(), staleTime: 0 }),
+				queryClient.fetchQuery({ ...queries.captureSummaries(), staleTime: 0 })
+			]);
+			lastCapture = capture;
+			if (!expectedActiveProfileId || capture.activeFramingProfileId === expectedActiveProfileId) return capture;
+		}
+		throw new Error(
+			`capture ${captureId} refresh did not observe active framing profile ${expectedActiveProfileId}; ` +
+			`last observed ${lastCapture?.activeFramingProfileId ?? "none"}`
+		);
 	}
 
 	const commands: ArchiveCommands = {

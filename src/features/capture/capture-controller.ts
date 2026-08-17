@@ -70,7 +70,7 @@ export type CaptureControllerDependencies = {
 	isCaptureConversionLocked?: (captureId: string) => boolean;
 	setCaptureStorageStatus?: (captureId: string, status: "legacy-not-canonicalized" | "converting" | "canonical" | "canonicalization-failed") => void;
 	openCanonicalization?: (captureId: string) => void;
-	refreshCapture?: (captureId: string) => Promise<Capture>;
+	refreshCapture?: (captureId: string, expectedActiveProfileId?: string) => Promise<Capture>;
 	reportPersistenceFailure?: (captureId: string, error: unknown) => void;
 };
 
@@ -236,9 +236,19 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		dependencies.render();
 	}
 
-	async function refreshAuthoritativeCapture(captureId: string, preserveIntent = true): Promise<Capture> {
+	async function refreshAuthoritativeCapture(
+		captureId: string,
+		preserveIntent = true,
+		expectedActiveProfileId?: string
+	): Promise<Capture> {
 		if (!dependencies.refreshCapture) throw new Error("capture refresh is unavailable");
-		const refreshed = await dependencies.refreshCapture(captureId);
+		const refreshed = await dependencies.refreshCapture(captureId, expectedActiveProfileId);
+		if (expectedActiveProfileId && refreshed.activeFramingProfileId !== expectedActiveProfileId) {
+			throw new Error(
+				`capture ${captureId} refresh returned active framing profile ${refreshed.activeFramingProfileId ?? "none"}; ` +
+				`expected ${expectedActiveProfileId}`
+			);
+		}
 		installAuthoritativeCapture(captureId, refreshed);
 		if (preserveIntent) {
 			const intent = framingCoordinator.pendingIntent(captureId) || framingCoordinator.activeIntent(captureId);
@@ -356,12 +366,13 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				expectedDataRevision: Number(item.dataRevision ?? 0)
 				});
 			dependencies.trackCaptureWrite?.(captureId, operation);
-			await operation;
+			const reframe = await operation;
 			// Reframe is a durable raw-writer command.  Reload through the named
-			// data-layer path so the full capture query cannot remain stale. The
-			// response contains only the new profile ID; the reload is what installs
-			// the server-generated section and frame identities.
-			await refreshAuthoritativeCapture(captureId, false);
+			// data-layer path so the full capture query cannot remain stale. A
+			// pre-command fetch may be deduplicated by QueryClient and return the
+			// previous profile, so the data layer refetches until this exact response
+			// identity is observed before the coordinator can unlock frame commands.
+			await refreshAuthoritativeCapture(captureId, false, reframe.profileId);
 		}
 	}
 

@@ -36,7 +36,7 @@ export type AppRuntime = {
 	trackCaptureWrite: (captureId: string, write: Promise<unknown>) => void;
 	ensureCanonicalCapture: (captureId: string) => Promise<boolean>;
 	waitForCaptureWrite: (captureId: string) => Promise<void>;
-	refreshCapture: (captureId: string) => Promise<Capture>;
+	refreshCapture: (captureId: string, expectedActiveProfileId?: string) => Promise<Capture>;
 	getCanonicalizationPreflight: (captureId: string) => Promise<CanonicalizationPreflight>;
 	startCanonicalization: (captureId: string) => Promise<CanonicalizationJob>;
 	getCanonicalizationJob: (captureId: string, jobId: string) => Promise<CanonicalizationJob>;
@@ -151,9 +151,9 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 			return getCaptureStorageStatus(captureId) === "canonical";
 		},
 		waitForCaptureWrite,
-		refreshCapture: async captureId => {
+		refreshCapture: async (captureId, expectedActiveProfileId) => {
 			if (!archive) throw new Error("archive data layer is unavailable");
-			const refreshed = await archive.commands.refreshCapture(captureId);
+			const refreshed = await archive.commands.refreshCapture(captureId, expectedActiveProfileId);
 			const status = getCaptureStorageStatus(captureId);
 			if (status) captureStatuses.set(String(captureId), status);
 			if (String(activeId) === String(captureId)) activeCapture = structuredClone(refreshed);
