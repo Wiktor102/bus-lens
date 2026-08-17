@@ -210,15 +210,21 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	}
 
 	function installAuthoritativeCapture(captureId: string, refreshed: Capture): void {
-		const current = captureById(captureId);
-		if (current && current !== refreshed) Object.assign(current, refreshed);
+		const current = capture();
+		// Query owns the value returned by refreshCapture. Keep every mutable
+		// projection in the controller/runtime on its own object graph so an
+		// optimistic edit cannot mutate Query data outside QueryClient.
+		const owned = structuredClone(refreshed);
+		const mutableCurrent = current && String(current.id) === captureId ? current : undefined;
+		if (mutableCurrent) Object.assign(mutableCurrent, owned);
+		const activeProjection = mutableCurrent || owned;
 		if (compatibilityState) {
 			const index = compatibilityState.captures.findIndex(item => String(item.id) === captureId);
-			if (index >= 0 && compatibilityState.captures[index] !== current) {
-				compatibilityState.captures[index] = refreshed as ActiveCapture;
+			if (index >= 0 && compatibilityState.captures[index] !== activeProjection) {
+				compatibilityState.captures[index] = structuredClone(activeProjection) as ActiveCapture;
 			}
 		}
-		if (String(dependencies.getActiveId() ?? "") === captureId) dependencies.setActiveCapture?.(refreshed);
+		if (String(dependencies.getActiveId() ?? "") === captureId) dependencies.setActiveCapture?.(activeProjection);
 	}
 
 	function applyPendingFraming(captureId: string, sections: readonly FramingSectionRequest[]): void {
