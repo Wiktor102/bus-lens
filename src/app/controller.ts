@@ -15,8 +15,10 @@ import {
 	EMPTY_CANONICALIZATION_STATE,
 	IDLE_WORKFLOW,
 	selectCanonicalization,
+	selectViewState,
 	type CanonicalizationState
 } from "../shared/application-store.ts";
+import { getSectionViewPreference } from "../shared/view-state.ts";
 import type { ArchiveDataLayer } from "../data/archive-data-layer.ts";
 import {
 	EMPTY_PERSISTENCE_ERROR,
@@ -143,6 +145,8 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 			captureId,
 			sections
 		}),
+		getSectionViewPreference: (captureId, rawStart) =>
+			getSectionViewPreference(applicationStore.select(selectViewState), captureId, rawStart),
 		setSectionViewState: (captureId, rawStart, patch) => applicationStore.send({
 			type: "view/section-preference-changed",
 			captureId,

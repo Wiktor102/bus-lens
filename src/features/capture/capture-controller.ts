@@ -41,6 +41,7 @@ import type {
 import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
 import type { ArchiveIndex } from "../../persistence/archive-client.ts";
 import type {
+	SectionViewPreference,
 	SectionViewPreferencePatch,
 	SectionViewPreferenceSeed
 } from "../../shared/view-state.ts";
@@ -76,6 +77,7 @@ export type CaptureControllerDependencies = {
 	openCanonicalization?: (captureId: string) => void;
 	refreshCapture?: (captureId: string, expectedActiveProfileId?: string) => Promise<Capture>;
 	seedSectionViewState?: (captureId: string, sections: readonly SectionViewPreferenceSeed[]) => void;
+	getSectionViewPreference?: (captureId: string, rawStart: number) => SectionViewPreference | undefined;
 	setSectionViewState?: (captureId: string, rawStart: number, patch: SectionViewPreferencePatch) => void;
 	copySectionViewState?: (captureId: string, fromRawStart: number, toRawStart: number) => void;
 	reconcileSectionViewState?: (captureId: string, rawStarts: readonly number[]) => void;
@@ -1076,6 +1078,9 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		}
 		const preceding = [...c.frameSections].reverse().find(section => section.start < start);
 		const inherited = preceding || c.frameSections[0];
+		const inheritedViewPreference = c.id !== undefined && inherited
+			? dependencies.getSectionViewPreference?.(String(c.id), inherited.start)
+			: undefined;
 		c.frameSections.push({
 			id: crypto.randomUUID(),
 			start,
@@ -1084,7 +1089,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			frameMarker: inherited?.frameMarker || "",
 			markerPosition: inherited?.markerPosition || "start",
 			frameTimeGap: inherited?.frameTimeGap || 5,
-			collapseRuns: Boolean(inherited?.collapseRuns),
+			collapseRuns: inheritedViewPreference?.collapseRuns ?? Boolean(inherited?.collapseRuns),
 			collapsed: false
 		});
 		normalizeSections(c);

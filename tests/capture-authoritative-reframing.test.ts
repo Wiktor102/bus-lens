@@ -101,6 +101,7 @@ function makeFixture(name: string, options: FixtureOptions = {}): Fixture {
 		seedSectionViewState: (captureId, sections) => {
 			viewState = reduceViewState(viewState, { type: "seed-section-preferences", captureId, sections });
 		},
+		getSectionViewPreference: (captureId, rawStart) => getSectionViewPreference(viewState, captureId, rawStart),
 		setSectionViewState: (captureId, rawStart, patch) => {
 			viewState = reduceViewState(viewState, { type: "set-section-preference", captureId, rawStart, patch });
 		},
@@ -419,6 +420,30 @@ test("section view state is synchronous, profile-independent, and survives refre
 			collapseRuns: true,
 			collapsed: true
 		});
+	} finally {
+		closeFixture(fixture);
+	}
+});
+
+test("new sections inherit the effective store-only collapse-runs preference", async () => {
+	const fixture = makeFixture("authoritative-section-view-inheritance");
+	try {
+		const initialSectionId = String(fixture.capture.frameSections?.[0]?.id);
+		fixture.controller.setSectionCollapse(initialSectionId, true);
+		assert.equal(fixture.capture.frameSections?.[0]?.collapseRuns, false);
+		assert.equal(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, 0)?.collapseRuns, true);
+
+		const message = fixture.capture.messages?.[1];
+		assert.ok(message);
+		fixture.controller.startSectionAtByte(String(message.id), 0);
+
+		const createdSection = fixture.capture.frameSections?.[1];
+		assert.ok(createdSection);
+		assert.equal(createdSection.collapseRuns, true);
+		assert.equal(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, createdSection.start)?.collapseRuns, true);
+
+		await fixture.controller.waitForCaptureWrites(fixture.capture.id!);
+		assert.equal(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, createdSection.start)?.collapseRuns, true);
 	} finally {
 		closeFixture(fixture);
 	}
