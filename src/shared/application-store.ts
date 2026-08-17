@@ -71,7 +71,7 @@ function cloneValue<T>(value: T, seen = new WeakMap<object, unknown>()): T {
 }
 
 function freezeValue<T>(value: T, seen = new WeakSet<object>()): T {
-	if (!value || typeof value !== "object" || seen.has(value as object)) return value;
+	if (!value || typeof value !== "object" || seen.has(value as object) || Object.isFrozen(value as object)) return value;
 	seen.add(value as object);
 
 	if (value instanceof Map) {
@@ -104,6 +104,11 @@ function freezeValue<T>(value: T, seen = new WeakSet<object>()): T {
 
 function cloneAndFreeze<T>(value: T): T {
 	return freezeValue(cloneValue(value));
+}
+
+/** Message-stream projections already own their complete object graph. */
+function freezeShared<T>(value: T): T {
+	return freezeValue(value);
 }
 
 export const EMPTY_CAPTURE_HEADER_RUNTIME: CaptureHeaderRuntimeSnapshot = cloneAndFreeze({
@@ -489,7 +494,7 @@ export function createApplicationStore(
 			"framing-toolbar/changed": (state, event: { state: FramingToolbarState }) =>
 				Object.freeze({ ...state, framingToolbar: cloneAndFreeze(event.state) }),
 			"message-stream/changed": (state, event: { state: MessageStreamSnapshot }) =>
-				Object.freeze({ ...state, messageStream: cloneAndFreeze(event.state) }),
+				Object.freeze({ ...state, messageStream: freezeShared(event.state) }),
 			"toast/changed": (state, event: { state: ToastState }) =>
 				Object.freeze({ ...state, toast: cloneAndFreeze(event.state) }),
 			"persistence-error/changed": (state, event: { state: PersistenceErrorState }) =>

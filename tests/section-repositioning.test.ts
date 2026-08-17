@@ -6,7 +6,10 @@ import type { AppState } from "../src/shared/app-state.ts";
 import {
 	getSectionMoveAvailability,
 	getSectionMoveTarget,
-	moveSection
+	getSectionMoveAvailabilityFromMetadata,
+	getSectionMoveTargetFromMetadata,
+	moveSection,
+	precomputeSectionMoveMetadata
 } from "../src/features/capture/section-repositioning.ts";
 
 function capture(): Capture {
@@ -119,6 +122,21 @@ test("disables movement at capture and neighboring section boundaries", () => {
 		"byte-after": true,
 		"message-before": true,
 		"message-after": false
+	});
+});
+
+test("precomputes section movement targets and availability from one metadata set", () => {
+	const current = capture();
+	const metadata = precomputeSectionMoveMetadata(current);
+
+	assert.equal(metadata.size, 3);
+	assert.equal(getSectionMoveTargetFromMetadata(metadata, "payload", "message-before"), 6);
+	assert.equal(getSectionMoveTargetFromMetadata(metadata, "payload", "message-after"), 10);
+	assert.deepEqual(getSectionMoveAvailabilityFromMetadata(metadata, "payload"), {
+		"byte-before": true,
+		"byte-after": true,
+		"message-before": true,
+		"message-after": true
 	});
 });
 

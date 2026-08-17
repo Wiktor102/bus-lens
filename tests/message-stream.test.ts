@@ -60,6 +60,9 @@ test("derives section headers and message visibility without changing stream cal
 	assert.equal(snapshot.entries.find(entry => entry.type === "section" && entry.section.id === "header")?.section.frameSize, 2);
 	assert.equal(current.messages.length, 4);
 	assert.equal(current.frameSections?.[1].collapseRuns, true);
+	assert.notStrictEqual(snapshot.matchingRows[0].bytes, current.messages[0].bytes);
+	assert.notStrictEqual(snapshot.matchingRows[0].rawOffsets, current.messages[0].rawOffsets);
+	assert.strictEqual(snapshot.matchingRows[0]._runMessages[0].bytes, snapshot.matchingRows[0].bytes);
 
 	current.frameSections![0].collapsed = false;
 	const expanded = deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT);

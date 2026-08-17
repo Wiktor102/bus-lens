@@ -25,7 +25,9 @@ import {
 } from "../analysis/analysis.ts";
 import { collapseAdjacentRuns, countVisibleRowsByPatternOccurrence } from "../analysis/collapse-runs.ts";
 import {
-	getSectionMoveAvailability,
+	getSectionMoveAvailabilityFromMetadata,
+	precomputeSectionMoveMetadata,
+	type SectionMoveMetadata,
 	type SectionMoveAvailability
 } from "../capture/section-repositioning.ts";
 import type { DisplayMode, ViewStateSnapshot } from "../../shared/view-state.ts";
@@ -176,6 +178,12 @@ export function formatDelta(ms: number | null): string {
 }
 
 function copyMessage(message: CaptureMessage): CaptureMessage & { id: string } {
+	const rawOffsets = message.rawOffsets ? [...message.rawOffsets] : undefined;
+	const rawPositions = message._rawPositions
+		? message._rawPositions === message.rawOffsets
+			? rawOffsets
+			: [...message._rawPositions]
+		: undefined;
 	return {
 		...message,
 		id: String(message.id ?? ""),
@@ -183,11 +191,12 @@ function copyMessage(message: CaptureMessage): CaptureMessage & { id: string } {
 		byteTimestamps: message.byteTimestamps ? [...message.byteTimestamps] : undefined,
 		hiddenBytes: message.hiddenBytes ? [...message.hiddenBytes] : undefined,
 		directions: message.directions ? [...message.directions] : undefined,
-		_rawPositions: message._rawPositions ? [...message._rawPositions] : undefined
+		rawOffsets,
+		_rawPositions: rawPositions
 	};
 }
 
-function copySection(section: CaptureSection, index: number, capture: Capture): MessageStreamSection {
+function copySection(section: CaptureSection, index: number, movement: SectionMoveMetadata): MessageStreamSection {
 	const id = String(section.id ?? `section-${index}`);
 	const settings = normalizeSectionFramingSettings(section);
 	return {
@@ -196,15 +205,16 @@ function copySection(section: CaptureSection, index: number, capture: Capture): 
 		...settings,
 		collapseRuns: Boolean(section.collapseRuns),
 		collapsed: Boolean(section.collapsed),
-		moveAvailability: getSectionMoveAvailability(capture, id)
+		moveAvailability: getSectionMoveAvailabilityFromMetadata(movement, id)
 	};
 }
 
 function copySections(capture: Capture): MessageStreamSection[] {
+	const movement = precomputeSectionMoveMetadata(capture);
 	const sourceSections = capture.frameSections?.length
 		? capture.frameSections
 		: [{ id: "section-0", start: 0, frameSize: capture.frameSize || 3, collapseRuns: false, collapsed: false }];
-	return sourceSections.map((section, index) => copySection(section, index, capture));
+	return sourceSections.map((section, index) => copySection(section, index, movement));
 }
 
 function sectionIdForMessage(message: CaptureMessage, sections: MessageStreamSection[]): string | undefined {
@@ -233,24 +243,6 @@ function copyPatterns(patterns: MessagePatterns): MessageStreamPatterns {
 		if (group) membership.set(originalIndex, { ...member, group });
 	});
 	return { groups, membership };
-}
-
-function copyRow(row: MessageStreamRow): MessageStreamRow {
-	return {
-		...copyMessage(row),
-		_originalStart: row._originalStart,
-		_originalEnd: row._originalEnd,
-		_hasSequenceNote: row._hasSequenceNote,
-		_patternOccurrence: row._patternOccurrence,
-		_runStart: row._runStart,
-		_runEnd: row._runEnd,
-		_runMessages: row._runMessages.map(copyMessage),
-		_repeats: row._repeats,
-		_cadence: row._cadence,
-		_cadenceStable: row._cadenceStable,
-		_intervals: [...row._intervals],
-		_delta: row._delta
-	};
 }
 
 function copyAnnotations(capture: Capture): Record<string, MessageStreamAnnotation> {
@@ -304,7 +296,7 @@ function filterRows(
 				_patternOccurrence: patternMember ? `${patternMember.group.id}:${patternMember.occurrenceIndex}` : null,
 				_runStart: message.timestamp,
 				_runEnd: message.timestamp,
-				_runMessages: [copyMessage(message)],
+				_runMessages: [message],
 				_repeats: 1
 			};
 		})
@@ -338,7 +330,7 @@ function filterRows(
 		);
 	}
 
-	return rowsWithDelta(rows.map(summarizeRunCadence)).map(copyRow);
+	return rowsWithDelta(rows.map(summarizeRunCadence));
 }
 
 function buildEntries(

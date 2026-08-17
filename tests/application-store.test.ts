@@ -155,7 +155,7 @@ test("application store owns canonicalization and dialog lifecycle state", () =>
 	assert.equal(dialogSnapshot.folders[0].name, "Archive");
 });
 
-test("application store defensively copies client snapshots at event boundaries", () => {
+test("application store owns message projections without cloning their graph", () => {
 	const store = createTestApplicationStore();
 	const messageStream = {
 		...EMPTY_MESSAGE_STREAM_SNAPSHOT,
@@ -176,7 +176,9 @@ test("application store defensively copies client snapshots at event boundaries"
 	store.send({ type: "framing-toolbar/changed", state: framingToolbar });
 	store.send({ type: "persistence-error/changed", state: persistenceError });
 
-	messageStream.signatureCounts.set("BB", 2);
+	assert.strictEqual(selectMessageStream(store.getSnapshot()), messageStream);
+	assert.strictEqual(selectMessageStream(store.getSnapshot()).signatureCounts, messageStream.signatureCounts);
+	assert.throws(() => messageStream.signatureCounts.set("BB", 2), TypeError);
 	framingToolbar.frameSizeLabel = "mutated";
 	persistenceError.message = "mutated";
 
