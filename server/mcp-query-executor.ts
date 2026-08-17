@@ -144,6 +144,10 @@ function validateMcpQueryRequest(request: McpQueryRequest): McpQueryRequest {
 	switch (request.operation) {
 		case "capture-discovery":
 			return request;
+		case "framing-profiles":
+			return request;
+		case "notes":
+			return request;
 		case "capture-overview":
 			return {
 				...request,
