@@ -36,11 +36,14 @@ import type {
 	CanonicalNoteTarget,
 	CaptureMetadataPatch,
 	CreateCaptureRequest,
-	FramingSectionRequest,
-	FramingSectionViewRequest
+	FramingSectionRequest
 } from "../../persistence/archive-client.ts";
 import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
 import type { ArchiveIndex } from "../../persistence/archive-client.ts";
+import type {
+	SectionViewPreferencePatch,
+	SectionViewPreferenceSeed
+} from "../../shared/view-state.ts";
 
 export type CaptureControllerDependencies = {
 	/** Test-only compatibility input; application wiring uses archive reads instead. */
@@ -72,6 +75,11 @@ export type CaptureControllerDependencies = {
 	setCaptureStorageStatus?: (captureId: string, status: "legacy-not-canonicalized" | "converting" | "canonical" | "canonicalization-failed") => void;
 	openCanonicalization?: (captureId: string) => void;
 	refreshCapture?: (captureId: string, expectedActiveProfileId?: string) => Promise<Capture>;
+	seedSectionViewState?: (captureId: string, sections: readonly SectionViewPreferenceSeed[]) => void;
+	setSectionViewState?: (captureId: string, rawStart: number, patch: SectionViewPreferencePatch) => void;
+	moveSectionViewState?: (captureId: string, fromRawStart: number, toRawStart: number) => void;
+	deleteSectionViewState?: (captureId: string, rawStart: number) => void;
+	clearSectionViewState?: (captureId: string) => void;
 	reportPersistenceFailure?: (captureId: string, error: unknown) => void;
 };
 
@@ -124,7 +132,6 @@ function formatTime(ms: number): string {
 export function createCaptureController(dependencies: CaptureControllerDependencies) {
 	const compatibilityState = dependencies.state;
 	const captureWriteQueues = new Map<string, CaptureWriteQueue>();
-	const sectionViewWrites = new Map<string, Promise<void>>();
 	const patternRemarkWriteQueues = new Map<string, Map<string, PatternRemarkWriteQueue>>();
 	const captureCommandWrites = new Map<string, Set<Promise<unknown>>>();
 	let framingCoordinator: FramingCoordinator;
@@ -214,6 +221,18 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		return (dependencies.getCapture?.(captureId) || captures().find(item => String(item.id) === captureId)) as ActiveCapture | undefined;
 	}
 
+	function seedSectionViewPreferences(item: Capture | undefined): void {
+		if (!item?.id || !dependencies.seedSectionViewState) return;
+		dependencies.seedSectionViewState(
+			String(item.id),
+			(item.frameSections || []).map(section => ({
+				rawStart: Number(section.start ?? 0),
+				collapseRuns: Boolean(section.collapseRuns),
+				collapsed: Boolean(section.collapsed)
+			}))
+		);
+	}
+
 	function installAuthoritativeCapture(captureId: string, refreshed: Capture, projectionChanged: boolean): void {
 		const current = capture();
 		// The runtime has already transferred this refresh into its single owned
@@ -231,6 +250,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			String(dependencies.getActiveId() ?? "") === captureId &&
 			(projectionChanged || activeProjection !== current)
 		) dependencies.setActiveCapture?.(activeProjection);
+		seedSectionViewPreferences(activeProjection);
 	}
 
 	function applyPendingFraming(captureId: string, sections: readonly FramingSectionRequest[]): void {
@@ -341,8 +361,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	async function writeFraming(captureId: string, sections: readonly FramingSectionRequest[]): Promise<void> {
 		const barrier = captureWriteBarrier(captureId);
 		if (barrier) await barrier;
-		const pendingSectionViewWrite = sectionViewWrites.get(captureId);
-		if (pendingSectionViewWrite) await pendingSectionViewWrite;
 		const item = captureById(captureId);
 		if (!item || !isCanonical(item)) throw new Error(`capture ${captureId} is no longer available for framing`);
 		if (dependencies.transport.isRecording() || dependencies.transport.isCaptureFinalizing?.(captureId)) {
@@ -651,74 +669,18 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			frameSize: section.frameSize,
 			frameMarker: section.frameMarker,
 			markerPosition: section.markerPosition,
-			frameTimeGap: section.frameTimeGap,
-			collapseRuns: section.collapseRuns,
-			collapsed: section.collapsed
+			frameTimeGap: section.frameTimeGap
 		}));
-	}
-
-	function queueSectionViewWrite(captureId: string, write: () => Promise<void>): Promise<void> {
-		const previous = sectionViewWrites.get(captureId) ?? Promise.resolve();
-		const next = previous.catch(() => undefined).then(write);
-		sectionViewWrites.set(captureId, next);
-		void next.then(
-			() => {
-				if (sectionViewWrites.get(captureId) === next) sectionViewWrites.delete(captureId);
-			},
-			() => {
-				if (sectionViewWrites.get(captureId) === next) sectionViewWrites.delete(captureId);
-			}
-		);
-		return next;
 	}
 
 	function persistFraming(item: ActiveCapture, _immediate = false): void {
 		if (rejectLockedMutation(item)) return;
+		seedSectionViewPreferences(item);
 		if (!isCanonical(item)) {
 			persistLegacyCapture(item);
 			return;
 		}
 		queueCaptureWrite(item.id, "framing", framingRequest(item));
-	}
-
-	function persistSectionView(item: ActiveCapture, sectionId: string, patch: Pick<FramingSectionViewRequest, "collapseRuns" | "collapsed">): void {
-		if (rejectLockedMutation(item)) return;
-		if (!isCanonical(item)) {
-			persistLegacyCapture(item);
-			return;
-		}
-		if (
-			dependencies.transport.isRecording() ||
-			dependencies.transport.isCaptureFinalizing?.(String(item.id)) ||
-			framingCoordinator.isPending(String(item.id))
-		) {
-			// During recording and while a reframe is in flight, the full framing
-			// intent is the only safe payload. The coordinator will apply it to the
-			// newest acknowledged profile after the server responds.
-			persistFraming(item);
-			return;
-		}
-		const section = item.frameSections.find(candidate => candidate.id === sectionId);
-		const profileId = item.activeFramingProfileId;
-		if (!section || !profileId) return;
-		const request: FramingSectionViewRequest = {
-			captureId: String(item.id),
-			profileId,
-			sectionId,
-			...patch
-		};
-		const operation = queueSectionViewWrite(String(item.id), async () => {
-			const result = dependencies.archiveCommands
-				? await dependencies.archiveCommands.recordingWriter.updateFramingSectionView(request)
-				: await dependencies.captureWriter!.updateFramingSectionView(request);
-			const current = captureById(String(item.id));
-			if (current) current.contentRevision = result.contentRevision;
-			await refreshAuthoritativeCapture(String(item.id), false);
-			dependencies.renderMessages();
-			dependencies.render();
-		});
-		trackCaptureCommand(String(item.id), operation);
-		void operation.catch(error => reconcileFailure(String(item.id), error));
 	}
 
 	function selectArchiveCapture(captureId: string) {
@@ -1015,6 +977,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			return;
 		}
 		if (compatibilityState) compatibilityState.captures = compatibilityState.captures.filter(candidate => candidate !== item);
+		dependencies.clearSectionViewState?.(itemId);
 		const current = archiveIndex();
 		persistArchiveIndex({
 			...current,
@@ -1087,6 +1050,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (typeof start !== "number" || !Number.isInteger(start)) return;
 		c.previewMode = "sections";
 		normalizeSections(c);
+		seedSectionViewPreferences(c);
 		if (c.frameSections.some(section => section.start === start)) {
 			dependencies.render();
 			dependencies.showToast(
@@ -1158,7 +1122,13 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const c = capture();
 		if (!c || rejectLockedMutation(c)) return;
 		normalizeSections(c);
+		seedSectionViewPreferences(c);
+		const section = c.frameSections.find(item => item.id === sectionId);
+		const previousStart = section?.start;
 		if (!moveSectionStart(c, sectionId, action)) return;
+		if (c.id && previousStart !== undefined && section?.start !== undefined) {
+			dependencies.moveSectionViewState?.(String(c.id), previousStart, section.start);
+		}
 		rebuildPreview(c);
 		persistFraming(c, true);
 		dependencies.render();
@@ -1177,9 +1147,14 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const c = capture();
 		if (!c || rejectLockedMutation(c)) return;
 		normalizeSections(c);
+		seedSectionViewPreferences(c);
 		const index = c.frameSections.findIndex(section => section.id === sectionId);
 		if (index <= 0) return;
+		const rawStart = c.frameSections[index]?.start;
 		c.frameSections.splice(index, 1);
+		if (c.id !== undefined && rawStart !== undefined) {
+			dependencies.deleteSectionViewState?.(String(c.id), rawStart);
+		}
 		rebuildPreview(c);
 		persistFraming(c, true);
 		dependencies.render();
@@ -1187,22 +1162,24 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function setSectionCollapse(sectionId: string, collapseRuns: boolean) {
 		const c = capture();
-		if (!c || rejectLockedMutation(c)) return;
+		if (!c) return;
+		normalizeSections(c);
+		seedSectionViewPreferences(c);
 		const section = c.frameSections.find(item => item.id === sectionId);
 		if (!section) return;
-		section.collapseRuns = collapseRuns;
-		persistSectionView(c, sectionId, { collapseRuns });
+		if (c.id !== undefined) dependencies.setSectionViewState?.(String(c.id), section.start, { collapseRuns });
 		dependencies.renderMessages();
 		dependencies.showToast(collapseRuns ? "Runs collapse in this section" : "Runs expand in this section");
 	}
 
 	function setSectionCollapsed(sectionId: string, collapsed: boolean) {
 		const c = capture();
-		if (!c || rejectLockedMutation(c)) return;
+		if (!c) return;
+		normalizeSections(c);
+		seedSectionViewPreferences(c);
 		const section = c.frameSections.find(item => item.id === sectionId);
 		if (!section) return;
-		section.collapsed = Boolean(collapsed);
-		persistSectionView(c, sectionId, { collapsed: Boolean(collapsed) });
+		if (c.id !== undefined) dependencies.setSectionViewState?.(String(c.id), section.start, { collapsed: Boolean(collapsed) });
 		dependencies.renderMessages();
 	}
 

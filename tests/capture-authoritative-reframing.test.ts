@@ -11,6 +11,12 @@ import { createCaptureController } from "../src/features/capture/capture-control
 import type { Capture } from "../src/features/capture/capture-framing.ts";
 import type { CaptureWriter, ReframeRequest } from "../src/persistence/archive-client.ts";
 import type { AppState } from "../src/shared/app-state.ts";
+import {
+	EMPTY_VIEW_STATE_SNAPSHOT,
+	getSectionViewPreference,
+	reduceViewState,
+	type ViewStateSnapshot
+} from "../src/shared/view-state.ts";
 
 const framing = [{ start: 0, framingMode: "length", frameSize: 2, collapseRuns: false, collapsed: false }] as const;
 
@@ -26,6 +32,8 @@ type Fixture = {
 	capture: Capture;
 	controller: ReturnType<typeof createCaptureController>;
 	errors: unknown[];
+	getViewState: () => ViewStateSnapshot;
+	getSectionViewRequestCount: () => number;
 };
 
 function recordAndFinalize(service: CanonicalCaptureCommandService, captureId: string): void {
@@ -56,13 +64,18 @@ function makeFixture(name: string, options: FixtureOptions = {}): Fixture {
 	const capture = readCapture(repository, name);
 	const state = { captures: [capture], folders: [] } as unknown as AppState;
 	const errors: unknown[] = [];
+	let viewState = EMPTY_VIEW_STATE_SNAPSHOT;
+	let sectionViewRequestCount = 0;
 	const writer = {
 		updateFramingDraft: async (request: Parameters<CaptureWriter["updateFramingDraft"]>[0]) => service.updateFramingDraft(request),
 		reframe: async (request: ReframeRequest) => {
 			if (options.reframe) return options.reframe(request, service);
 			return service.reframe(request as ServerReframeRequest);
 		},
-		updateFramingSectionView: async (request: FramingSectionViewRequest) => service.updateFramingSectionView(request),
+		updateFramingSectionView: async (request: FramingSectionViewRequest) => {
+			sectionViewRequestCount += 1;
+			return service.updateFramingSectionView(request);
+		},
 		setFrameVisibility: async (request: Parameters<CaptureWriter["setFrameVisibility"]>[0]) => service.setFrameVisibility(request),
 		setByteVisibility: async (request: Parameters<CaptureWriter["setByteVisibility"]>[0]) => service.setByteVisibility(request)
 	} as unknown as CaptureWriter;
@@ -85,9 +98,33 @@ function makeFixture(name: string, options: FixtureOptions = {}): Fixture {
 		captureWriter: writer,
 		isCanonicalCapture: () => true,
 		refreshCapture: async () => options.refresh ? options.refresh() : readCapture(repository, name),
+		seedSectionViewState: (captureId, sections) => {
+			viewState = reduceViewState(viewState, { type: "seed-section-preferences", captureId, sections });
+		},
+		setSectionViewState: (captureId, rawStart, patch) => {
+			viewState = reduceViewState(viewState, { type: "set-section-preference", captureId, rawStart, patch });
+		},
+		moveSectionViewState: (captureId, fromRawStart, toRawStart) => {
+			viewState = reduceViewState(viewState, { type: "move-section-preference", captureId, fromRawStart, toRawStart });
+		},
+		deleteSectionViewState: (captureId, rawStart) => {
+			viewState = reduceViewState(viewState, { type: "delete-section-preference", captureId, rawStart });
+		},
+		clearSectionViewState: captureId => {
+			viewState = reduceViewState(viewState, { type: "clear-section-preferences", captureId });
+		},
 		reportPersistenceFailure: (_captureId, error) => { errors.push(error); }
 	});
-	return { database, service, repository, capture, controller, errors };
+	return {
+		database,
+		service,
+		repository,
+		capture,
+		controller,
+		errors,
+		getViewState: () => viewState,
+		getSectionViewRequestCount: () => sectionViewRequestCount
+	};
 }
 
 function closeFixture(fixture: Fixture): void {
@@ -322,19 +359,79 @@ test("refresh during a pending reframe keeps acknowledged IDs plus explicit pend
 	}
 });
 
-test("section collapse persists without creating a new framing profile", async () => {
+test("section view state is synchronous, profile-independent, and survives refresh", async () => {
 	const fixture = makeFixture("authoritative-section-view");
 	try {
 		const profileId = activeProfileId(fixture);
 		const frameIds = fixture.capture.messages?.map(message => message.id);
 		const sectionId = String(fixture.capture.frameSections?.[0]?.id);
 		fixture.controller.setSectionCollapsed(sectionId, true);
+		fixture.controller.setSectionCollapse(sectionId, true);
 		await fixture.controller.waitForCaptureWrites(fixture.capture.id!);
 
 		assert.equal(activeProfileId(fixture), profileId);
 		assert.deepEqual(fixture.capture.messages?.map(message => message.id), frameIds);
-		assert.equal(fixture.capture.frameSections?.[0]?.collapsed, true);
-		assert.deepEqual(activeSectionRows(fixture), [{ id: sectionId, start: 0, collapseRuns: 0, collapsed: 1 }]);
+		assert.deepEqual(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, 0), {
+			collapseRuns: true,
+			collapsed: true
+		});
+		assert.equal(fixture.capture.frameSections?.[0]?.collapsed, false);
+		assert.deepEqual(activeSectionRows(fixture), [{ id: sectionId, start: 0, collapseRuns: 0, collapsed: 0 }]);
+		assert.equal(fixture.getSectionViewRequestCount(), 0);
+
+		await fixture.controller.refreshCapture(fixture.capture.id!);
+		assert.deepEqual(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, 0), {
+			collapseRuns: true,
+			collapsed: true
+		});
+	} finally {
+		closeFixture(fixture);
+	}
+});
+
+test("seeds application view state from legacy persisted section flags", async () => {
+	const fixture = makeFixture("authoritative-legacy-section-view");
+	try {
+		fixture.database
+			.prepare(
+				`UPDATE framing_sections
+				 SET collapse_runs = 1, collapsed = 1
+				 WHERE capture_id = @captureId
+				   AND profile_id = (SELECT active_framing_profile_id FROM captures WHERE id = @captureId)`
+			)
+			.run({ captureId: fixture.capture.id });
+
+		await fixture.controller.refreshCapture(fixture.capture.id!);
+		assert.deepEqual(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, 0), {
+			collapseRuns: true,
+			collapsed: true
+		});
+	} finally {
+		closeFixture(fixture);
+	}
+});
+
+test("moving and deleting sections moves and removes their view preferences", async () => {
+	const fixture = makeFixture("authoritative-section-view-lifecycle");
+	try {
+		const secondMessageId = String(fixture.capture.messages?.[1]?.id);
+		fixture.controller.startSectionAtByte(secondMessageId, 0);
+		await fixture.controller.waitForCaptureWrites(fixture.capture.id!);
+		let secondSectionId = String(fixture.capture.frameSections?.[1]?.id);
+		fixture.controller.setSectionCollapsed(secondSectionId, true);
+		await fixture.controller.waitForCaptureWrites(fixture.capture.id!);
+		assert.equal(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, 2)?.collapsed, true);
+
+		fixture.controller.moveSection(secondSectionId, "byte-before");
+		await fixture.controller.waitForCaptureWrites(fixture.capture.id!);
+		assert.equal(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, 2), undefined);
+		assert.equal(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, 1)?.collapsed, true);
+
+		secondSectionId = String(fixture.capture.frameSections?.[1]?.id);
+		fixture.controller.deleteSection(secondSectionId);
+		await fixture.controller.waitForCaptureWrites(fixture.capture.id!);
+		assert.equal(getSectionViewPreference(fixture.getViewState(), fixture.capture.id, 1), undefined);
+		assert.equal(fixture.getSectionViewRequestCount(), 0);
 	} finally {
 		closeFixture(fixture);
 	}

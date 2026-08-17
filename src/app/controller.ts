@@ -138,6 +138,32 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		setCaptureStorageStatus: runtime.setCaptureStorageStatus,
 		openCanonicalization: captureId => openCanonicalizationDialog(captureId),
 		refreshCapture: runtime.refreshCapture,
+		seedSectionViewState: (captureId, sections) => applicationStore.send({
+			type: "view/section-preferences-seeded",
+			captureId,
+			sections
+		}),
+		setSectionViewState: (captureId, rawStart, patch) => applicationStore.send({
+			type: "view/section-preference-changed",
+			captureId,
+			rawStart,
+			patch
+		}),
+		moveSectionViewState: (captureId, fromRawStart, toRawStart) => applicationStore.send({
+			type: "view/section-preference-moved",
+			captureId,
+			fromRawStart,
+			toRawStart
+		}),
+		deleteSectionViewState: (captureId, rawStart) => applicationStore.send({
+			type: "view/section-preference-deleted",
+			captureId,
+			rawStart
+		}),
+		clearSectionViewState: captureId => applicationStore.send({
+			type: "view/section-preferences-cleared",
+			captureId
+		}),
 		reportPersistenceFailure: (captureId, error) => publishPersistenceError({
 			visible: true,
 			captureId,

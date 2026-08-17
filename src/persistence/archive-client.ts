@@ -83,6 +83,9 @@ export type FramingSectionRequest = Readonly<{
 	collapsed?: boolean;
 }>;
 
+/** Framing input for an immutable profile; section presentation is store-owned. */
+export type ReframeSectionRequest = Omit<FramingSectionRequest, "collapseRuns" | "collapsed">;
+
 export type CreateCaptureRequest = Readonly<{
 	captureId?: string;
 	id?: string;
@@ -238,7 +241,7 @@ export type FinalizeSessionResponse = Readonly<{
 
 export type ReframeRequest = Readonly<{
 	captureId: string;
-	sections: readonly FramingSectionRequest[];
+	sections: readonly ReframeSectionRequest[];
 	expectedActiveProfileId?: string | null;
 	expectedProfileId?: string | null;
 	expectedDataRevision: number;

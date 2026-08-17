@@ -166,7 +166,6 @@ function SectionEntry({
 							aria-expanded={!section.collapsed}
 							aria-label={toggleLabel}
 							title={toggleLabel}
-							disabled={mutationsDisabled}
 							onClick={event => {
 								event.stopPropagation();
 								actions.setSectionCollapsed(section.id, !section.collapsed);
@@ -264,7 +263,6 @@ function SectionEntry({
 								data-section-collapse={section.id}
 								type="checkbox"
 								checked={section.collapseRuns}
-								disabled={mutationsDisabled}
 								onChange={event => actions.setSectionCollapse(section.id, event.currentTarget.checked)}
 							/>
 							<span className="switch" />

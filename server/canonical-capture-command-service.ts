@@ -259,7 +259,7 @@ export type FinalizeSessionResponse = Readonly<{
 
 export type ReframeRequest = Readonly<{
 	captureId: string;
-	sections: readonly FramingSectionRequest[];
+	sections: readonly Omit<FramingSectionRequest, "collapseRuns" | "collapsed">[];
 	expectedActiveProfileId?: string | null;
 	expectedProfileId?: string | null;
 	expectedDataRevision: number;
@@ -568,7 +568,8 @@ function framingSectionsFrom(value: CreateCaptureRequest["framing"] | readonly F
 
 function normalizeFramingSections(
 	value: CreateCaptureRequest["framing"] | readonly FramingSectionRequest[],
-	generateId: () => string
+	generateId: () => string,
+	includeViewState = true
 ): FramingSectionRequest[] {
 	const sections = framingSectionsFrom(value);
 	if (!sections.length) throw new CanonicalCaptureValidationError("at least one framing section is required");
@@ -607,8 +608,9 @@ function normalizeFramingSections(
 			frameMarker,
 			markerPosition,
 			...(frameTimeGap === undefined ? {} : { frameTimeGap }),
-			collapseRuns: Boolean(section.collapseRuns),
-			collapsed: Boolean(section.collapsed)
+			...(includeViewState
+				? { collapseRuns: Boolean(section.collapseRuns), collapsed: Boolean(section.collapsed) }
+				: {})
 		};
 	});
 }
@@ -2177,7 +2179,8 @@ export class CanonicalCaptureCommandService {
 		if (!Array.isArray(request.sections)) throw new CanonicalCaptureValidationError("framing sections are required");
 		const requestedSections = normalizeFramingSections(
 			request.sections.map(section => ({ ...section, id: undefined })),
-			this.generateId
+			this.generateId,
+			false
 		);
 
 		const preparation = this.database.transaction(() => {
