@@ -361,6 +361,134 @@ test("finalization waits for an accepted section edit and refreshes that edit", 
 	assert.equal(capture.lifecycle, "finalized");
 });
 
+test("finalization does not deadlock a framing retry already owned by the coordinator", async () => {
+	const capture: Capture = {
+		id: "retry-finalization",
+		storageStatus: "canonical",
+		lifecycle: "finalized",
+		dataRevision: 0,
+		framingDraftRevision: 0,
+		activeFramingProfileId: "profile-before",
+		byteStream: [],
+		frameSections: [{ id: "section", start: 0, framingMode: "length", frameSize: 2 }],
+		messages: [],
+		notes: [],
+		annotations: {},
+		patternRemarks: {}
+	};
+	const events: string[] = [];
+	let draftAttempts = 0;
+	let refreshCount = 0;
+	let beginRetryRefresh!: () => void;
+	const retryRefreshStarted = new Promise<void>(resolve => { beginRetryRefresh = resolve; });
+	let releaseRetryRefresh!: () => void;
+	const retryRefresh = new Promise<void>(resolve => { releaseRetryRefresh = resolve; });
+	const refreshCapture = async (): Promise<Capture> => {
+		refreshCount++;
+		events.push(`refresh:${refreshCount}`);
+		if (refreshCount === 2) {
+			beginRetryRefresh();
+			await retryRefresh;
+		}
+		return {
+			...capture,
+			lifecycle: events.includes("finalize") ? "finalized" : "recording",
+			frameSections: capture.frameSections?.map(section => ({ ...section }))
+		} as Capture;
+	};
+	const captureWriter = {
+		updateFramingDraft: async (request: { captureId: string; sections: readonly FramingSectionRequest[] }) => {
+			draftAttempts++;
+			events.push(`draft:${draftAttempts}`);
+			if (draftAttempts === 1) throw new Error("transient framing failure");
+			return { captureId: request.captureId, revision: 1, sections: request.sections, updatedAt: "now" };
+		}
+	} as unknown as CaptureWriter;
+	const runtimeWrites = new Map<string, Promise<unknown>>();
+	const trackCaptureWrite = (captureId: string, write: Promise<unknown>): void => {
+		const previous = runtimeWrites.get(captureId);
+		const tracked = previous ? Promise.all([previous, write]) : write;
+		runtimeWrites.set(captureId, tracked);
+		void tracked.then(
+			() => { if (runtimeWrites.get(captureId) === tracked) runtimeWrites.delete(captureId); },
+			() => { if (runtimeWrites.get(captureId) === tracked) runtimeWrites.delete(captureId); }
+		);
+	};
+	const waitForCaptureWrite = async (captureId: string): Promise<void> => {
+		await runtimeWrites.get(captureId);
+	};
+	const recordingWriter = {
+		startSession: async (_captureId: string, sessionId: string) => ({ sessionId, nextChunkSequence: 0, nextRawOffset: 0, dataRevision: 0 }),
+		appendChunk: async (request: AppendCaptureChunkRequest) => ({
+			acceptedStartOffset: request.expectedStartOffset,
+			acceptedEndOffset: request.expectedStartOffset,
+			nextRawOffset: request.expectedStartOffset,
+			nextSequence: request.sequence + 1,
+			dataRevision: 0
+		}),
+		finalizeSession: async () => { events.push("finalize"); },
+		refreshCapture
+	};
+	let captureController!: ReturnType<typeof createCaptureController>;
+	const transport = createSerialController({
+		capture: () => capture,
+		getCapture: captureId => captureId === capture.id ? capture : undefined,
+		state: { captures: [capture] } as AppState,
+		showToast: () => {},
+		publishCaptureHeaderState: () => {},
+		publishFramingToolbarState: () => {},
+		publishTransportState: () => {},
+		publishTransportWorkflow: event => events.push(event.type),
+		renderMessages: () => {},
+		stopSendQueue: () => {},
+		recordingWriter,
+		isCanonicalCapture: () => true,
+		waitForCaptureWrite,
+		waitForCaptureWrites: captureId => captureController.waitForCaptureWrites(captureId),
+		trackCaptureWrite
+	});
+	captureController = createCaptureController({
+		capture: () => capture,
+		getCapture: captureId => captureId === capture.id ? capture : undefined,
+		getActiveId: () => capture.id,
+		setActiveId: () => {},
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport,
+		publishDialogCommand: () => {},
+		captureWriter,
+		isCanonicalCapture: () => true,
+		waitForCaptureWrite,
+		refreshCapture,
+		reportPersistenceFailure: () => {}
+	});
+
+	await transport.toggleRecording();
+	captureController.setSectionFrameSize("section", 4);
+	await retryRefreshStarted;
+	await Promise.resolve();
+	const stop = transport.stopRecording();
+	releaseRetryRefresh();
+
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await Promise.race([
+			stop,
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(() => reject(new Error("capture finalization timed out")), 1_000);
+			})
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+
+	assert.equal(draftAttempts, 2);
+	assert.equal(events.includes("finalize"), true);
+	assert.equal(capture.lifecycle, "finalized");
+});
+
 test("append failure keeps recovery bytes and retry resumes from the acknowledged boundary", async () => {
 	const capture: Capture = { id: "recoverable", byteStream: [], frameSections: [{ id: "section", start: 0, framingMode: "length", frameSize: 2 }], messages: [], notes: [], annotations: {} };
 	const requests: Array<{ requestId: string; sequence: number; expectedStartOffset: number }> = [];

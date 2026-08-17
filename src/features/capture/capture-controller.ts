@@ -235,8 +235,17 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (queue.framingPending) applyFramingSnapshot(item, queue.framingPending);
 	}
 
+	function captureWriteBarrier(captureId: string): Promise<void> | undefined {
+		// Finalization waits for this coordinator below. A retry that has already
+		// entered the coordinator must therefore not wait back on finalization's
+		// runtime-barrier promise.
+		if (dependencies.transport.isCaptureFinalizing?.(captureId)) return undefined;
+		return dependencies.waitForCaptureWrite?.(captureId);
+	}
+
 	async function writeMetadata(captureId: string, patch: CaptureMetadataPatch): Promise<void> {
-		if (dependencies.waitForCaptureWrite) await dependencies.waitForCaptureWrite(captureId);
+		const barrier = captureWriteBarrier(captureId);
+		if (barrier) await barrier;
 		const item = captureById(captureId);
 		if (!item || !isCanonical(item)) return;
 		const operation = dependencies.archiveCommands
@@ -260,7 +269,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	}
 
 	async function writeFraming(captureId: string, sections: readonly FramingSectionRequest[]): Promise<void> {
-		if (dependencies.waitForCaptureWrite) await dependencies.waitForCaptureWrite(captureId);
+		const barrier = captureWriteBarrier(captureId);
+		if (barrier) await barrier;
 		const item = captureById(captureId);
 		if (!item || !isCanonical(item)) return;
 		if (dependencies.transport.isRecording() || dependencies.transport.isCaptureFinalizing?.(captureId)) {
@@ -384,7 +394,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		queue: PatternRemarkWriteQueue,
 		text: string
 	): Promise<void> {
-		if (dependencies.waitForCaptureWrite) await dependencies.waitForCaptureWrite(captureId);
+		const barrier = captureWriteBarrier(captureId);
+		if (barrier) await barrier;
 		const item = captureById(captureId);
 		if (!item || !isCanonical(item)) return;
 		const target: CanonicalNoteTarget = { kind: "pattern", sequenceKey: patternKey };
