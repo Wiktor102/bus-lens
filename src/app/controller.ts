@@ -372,6 +372,10 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 			const capture = runtime.capture();
 			const message = capture?.messages?.find(item => item.id === messageId);
 			if (!capture || !message) return;
+			if (capture.id && captureController.isFramingPending(String(capture.id))) {
+				runtime.showToast("Capture framing is still being saved; frame actions are temporarily disabled");
+				return;
+			}
 			if (capture.id && transport.isCaptureMutationLocked(String(capture.id))) {
 				runtime.showToast("Capture is still being saved; editing is temporarily disabled");
 				return;
@@ -424,6 +428,10 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 			const capture = runtime.capture();
 			const message = capture?.messages?.find(item => item.id === messageId);
 			if (!capture || !message || position < 0 || position >= message.bytes.length) return;
+			if (capture.id && captureController.isFramingPending(String(capture.id))) {
+				runtime.showToast("Capture framing is still being saved; frame actions are temporarily disabled");
+				return;
+			}
 			if (capture.id && transport.isCaptureMutationLocked(String(capture.id))) {
 				runtime.showToast("Capture is still being saved; editing is temporarily disabled");
 				return;

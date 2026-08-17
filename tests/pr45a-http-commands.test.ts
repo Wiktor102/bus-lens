@@ -608,6 +608,26 @@ test("HTTP framing drafts stay draft-only while recording and stale reframes are
 		assert.equal(finalProfiles.length, 2);
 		assert.equal(finalProfiles.filter(profile => Boolean(profile.isActive)).length, 1);
 		assert.equal(finalProfiles.find(profile => Boolean(profile.isActive))?.id, newProfile.profileId);
+
+		const activeDocument = await request("/api/captures/framing-capture");
+		status(activeDocument, 200);
+		const activeSections = array(documentBody(activeDocument).frameSections, "active framing sections");
+		const sectionId = String(record(activeSections[0]).id);
+		const sectionView = await request(`/api/captures/framing-capture/framing-sections/${encodeURIComponent(sectionId)}/view`, {
+			method: "PATCH",
+			body: { profileId: newProfile.profileId, collapsed: true }
+		});
+		status(sectionView, 200);
+		assert.equal(record(sectionView.body).sectionId, sectionId);
+		assert.equal(record(sectionView.body).collapsed, true);
+		assert.equal(record(sectionView.body).profileId, newProfile.profileId);
+
+		const afterView = await request("/api/captures/framing-capture");
+		status(afterView, 200);
+		assert.equal(record(array(documentBody(afterView).frameSections, "sections after view update")[0]).collapsed, true);
+		const profilesAfterView = await request("/api/captures/framing-capture/profiles");
+		status(profilesAfterView, 200);
+		assert.equal(array(profilesAfterView.body, "profiles after view update").length, 2);
 	});
 });
 

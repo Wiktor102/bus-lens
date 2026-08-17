@@ -255,6 +255,16 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 						expectedRevision: body.expectedRevision === undefined ? undefined : Number(body.expectedRevision)
 					}));
 				}
+				if (segments[3] === "framing-sections" && segments[4] && segments[5] === "view" && request.method === "PATCH") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					return send(response, 200, commandService.updateFramingSectionView({
+						captureId,
+						sectionId: segments[4],
+						profileId: String(body.profileId ?? ""),
+						collapseRuns: body.collapseRuns === undefined ? undefined : Boolean(body.collapseRuns),
+						collapsed: body.collapsed === undefined ? undefined : Boolean(body.collapsed)
+					}));
+				}
 				if (segments[3] === "framing-revisions" && request.method === "POST") {
 					const body = documentFrom(await jsonBody(request, maxBodyBytes));
 					return send(response, 200, commandService.reframe({

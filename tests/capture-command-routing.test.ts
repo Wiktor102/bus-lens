@@ -68,7 +68,12 @@ test("canonical optimistic mutations route through dedicated commands", async ()
 		publishDialogCommand: () => {},
 		captureWriter: writer,
 		isCanonicalCapture: () => true,
-		refreshCapture: async () => capture,
+		refreshCapture: async () => ({
+			...capture,
+			activeFramingProfileId: "profile-2",
+			frameSections: [{ ...capture.frameSections![0], id: "section-2", frameSize: 1 }],
+			messages: [{ ...capture.messages![0], id: "frame-2", bytes: [1, 2], rawOffsets: [10, 11], _rawPositions: [10, 11] }]
+		}),
 		reportPersistenceFailure: (_captureId, error) => { throw error; }
 	});
 

@@ -28,13 +28,15 @@ import {
 	type SectionFramingUpdate
 } from "./capture-framing.ts";
 import { moveSection as moveSectionStart, type SectionMoveAction } from "./section-repositioning.ts";
+import { createFramingCoordinator, type FramingCoordinator } from "./framing-coordinator.ts";
 import { publishDialogCommand } from "../dialogs/dialog-bridge.ts";
 import type {
 	CaptureWriter,
 	CanonicalNoteTarget,
 	CaptureMetadataPatch,
 	CreateCaptureRequest,
-	FramingSectionRequest
+	FramingSectionRequest,
+	FramingSectionViewRequest
 } from "../../persistence/archive-client.ts";
 import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
 import type { ArchiveIndex } from "../../persistence/archive-client.ts";
@@ -97,9 +99,7 @@ type ControllerCompatibilityState = {
 
 type CaptureWriteQueue = {
 	metadataPending: CaptureMetadataPatch | null;
-	framingPending: FramingSectionRequest[] | null;
 	metadataRetries: number;
-	framingRetries: number;
 	running: Promise<void> | null;
 };
 
@@ -123,8 +123,10 @@ function formatTime(ms: number): string {
 export function createCaptureController(dependencies: CaptureControllerDependencies) {
 	const compatibilityState = dependencies.state;
 	const captureWriteQueues = new Map<string, CaptureWriteQueue>();
+	const sectionViewWrites = new Map<string, Promise<void>>();
 	const patternRemarkWriteQueues = new Map<string, Map<string, PatternRemarkWriteQueue>>();
 	const captureCommandWrites = new Map<string, Set<Promise<unknown>>>();
+	let framingCoordinator: FramingCoordinator;
 
 	function captures(): readonly CaptureIndexEntry[] {
 		return dependencies.getCaptures?.() || compatibilityState?.captures || [];
@@ -160,6 +162,15 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		return true;
 	}
 
+	function rejectFrameTargetMutation(item: Capture | undefined): boolean {
+		if (rejectLockedMutation(item)) return true;
+		if (item?.id && framingCoordinator.isPending(String(item.id))) {
+			dependencies.showToast("Capture framing is still being saved; frame actions are temporarily disabled");
+			return true;
+		}
+		return false;
+	}
+
 	function reportFailure(captureId: string, error: unknown): void {
 		dependencies.reportPersistenceFailure?.(captureId, error);
 	}
@@ -190,12 +201,44 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	function reconcileFailure(captureId: string, error: unknown, fallback?: () => void): void {
 		reportFailure(captureId, error);
 		if (dependencies.refreshCapture) {
-			void dependencies.refreshCapture(captureId).then(() => dependencies.render()).catch(() => fallback?.());
+			void refreshAuthoritativeCapture(captureId).then(() => dependencies.render()).catch(() => fallback?.());
 		} else fallback?.();
 	}
 
 	function captureById(captureId: string): ActiveCapture | undefined {
 		return (dependencies.getCapture?.(captureId) || captures().find(item => String(item.id) === captureId)) as ActiveCapture | undefined;
+	}
+
+	function installAuthoritativeCapture(captureId: string, refreshed: Capture): void {
+		const current = captureById(captureId);
+		if (current && current !== refreshed) Object.assign(current, refreshed);
+		if (compatibilityState) {
+			const index = compatibilityState.captures.findIndex(item => String(item.id) === captureId);
+			if (index >= 0 && compatibilityState.captures[index] !== current) {
+				compatibilityState.captures[index] = refreshed as ActiveCapture;
+			}
+		}
+		if (String(dependencies.getActiveId() ?? "") === captureId) dependencies.setActiveCapture?.(refreshed);
+	}
+
+	function applyPendingFraming(captureId: string, sections: readonly FramingSectionRequest[]): void {
+		const item = captureById(captureId);
+		if (!item) return;
+		applyFramingSnapshot(item, sections);
+		rebuildPreview(item);
+		dependencies.renderMessages();
+		dependencies.render();
+	}
+
+	async function refreshAuthoritativeCapture(captureId: string, preserveIntent = true): Promise<Capture> {
+		if (!dependencies.refreshCapture) throw new Error("capture refresh is unavailable");
+		const refreshed = await dependencies.refreshCapture(captureId);
+		installAuthoritativeCapture(captureId, refreshed);
+		if (preserveIntent) {
+			const intent = framingCoordinator.pendingIntent(captureId) || framingCoordinator.activeIntent(captureId);
+			if (intent) applyPendingFraming(captureId, intent);
+		}
+		return refreshed;
 	}
 
 	function metadataPatchValue(item: ActiveCapture): CaptureMetadataPatch {
@@ -232,7 +275,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const item = captureById(captureId);
 		if (!item) return;
 		if (queue.metadataPending) applyMetadataSnapshot(item, queue.metadataPending);
-		if (queue.framingPending) applyFramingSnapshot(item, queue.framingPending);
 	}
 
 	function captureWriteBarrier(captureId: string): Promise<void> | undefined {
@@ -271,8 +313,10 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	async function writeFraming(captureId: string, sections: readonly FramingSectionRequest[]): Promise<void> {
 		const barrier = captureWriteBarrier(captureId);
 		if (barrier) await barrier;
+		const pendingSectionViewWrite = sectionViewWrites.get(captureId);
+		if (pendingSectionViewWrite) await pendingSectionViewWrite;
 		const item = captureById(captureId);
-		if (!item || !isCanonical(item)) return;
+		if (!item || !isCanonical(item)) throw new Error(`capture ${captureId} is no longer available for framing`);
 		if (dependencies.transport.isRecording() || dependencies.transport.isCaptureFinalizing?.(captureId)) {
 			const operation = dependencies.archiveCommands
 				? dependencies.archiveCommands.recordingWriter.updateFramingDraft({
@@ -306,64 +350,54 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				expectedDataRevision: Number(item.dataRevision ?? 0)
 				});
 			dependencies.trackCaptureWrite?.(captureId, operation);
-			const profile = await operation;
-			const current = captureById(captureId);
-			if (current) {
-				current.activeFramingProfileId = profile.profileId;
-			}
+			await operation;
 			// Reframe is a durable raw-writer command.  Reload through the named
-			// data-layer path so the full capture query cannot remain stale.
-			if (dependencies.refreshCapture) {
-				const refreshed = await dependencies.refreshCapture(captureId);
-				const latest = captureById(captureId);
-				if (latest) Object.assign(latest, refreshed);
-			}
+			// data-layer path so the full capture query cannot remain stale. The
+			// response contains only the new profile ID; the reload is what installs
+			// the server-generated section and frame identities.
+			await refreshAuthoritativeCapture(captureId, false);
 		}
 	}
+
+	framingCoordinator = createFramingCoordinator({
+		write: writeFraming,
+		reload: (captureId, preserveIntent) => refreshAuthoritativeCapture(captureId, preserveIntent).then(() => undefined),
+		applyPending: applyPendingFraming,
+		onTerminalFailure: (captureId, error) => {
+			reportFailure(captureId, error);
+			dependencies.render();
+		},
+		onStateChange: captureId => {
+			if (String(dependencies.getActiveId() ?? "") === captureId) dependencies.render();
+		}
+	});
 
 	async function recoverCaptureWrite(
 		captureId: string,
 		queue: CaptureWriteQueue,
-		kind: "metadata" | "framing",
-		desired: CaptureMetadataPatch | FramingSectionRequest[],
+		_kind: "metadata",
+		desired: CaptureMetadataPatch,
 		error: unknown
 	): Promise<void> {
-		const retries = kind === "metadata" ? queue.metadataRetries : queue.framingRetries;
-		const latest = kind === "metadata"
-			? (queue.metadataPending ?? desired) as CaptureMetadataPatch
-			: (queue.framingPending ?? desired) as FramingSectionRequest[];
+		const retries = queue.metadataRetries;
+		const latest = queue.metadataPending ?? desired;
 		if (retries >= 1 || !dependencies.refreshCapture) {
-			if (kind === "metadata") {
-				queue.metadataPending = null;
-				queue.metadataRetries = 0;
-			} else {
-				queue.framingPending = null;
-				queue.framingRetries = 0;
-			}
+			queue.metadataPending = null;
+			queue.metadataRetries = 0;
 			reapplyPendingSnapshots(captureId, queue);
 			reportFailure(captureId, error);
 			dependencies.render();
 			return;
 		}
-		if (kind === "metadata") {
-			queue.metadataRetries += 1;
-			queue.metadataPending = latest as CaptureMetadataPatch;
-		} else {
-			queue.framingRetries += 1;
-			queue.framingPending = latest as FramingSectionRequest[];
-		}
+		queue.metadataRetries += 1;
+		queue.metadataPending = latest;
 		try {
-			await dependencies.refreshCapture(captureId);
+			await refreshAuthoritativeCapture(captureId);
 			reapplyPendingSnapshots(captureId, queue);
 			dependencies.render();
 		} catch (refreshError) {
-			if (kind === "metadata") {
-				queue.metadataPending = null;
-				queue.metadataRetries = 0;
-			} else {
-				queue.framingPending = null;
-				queue.framingRetries = 0;
-			}
+			queue.metadataPending = null;
+			queue.metadataRetries = 0;
 			reapplyPendingSnapshots(captureId, queue);
 			reportFailure(captureId, refreshError);
 			dependencies.render();
@@ -444,7 +478,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		queue.pendingText = latestText;
 		queue.retries += 1;
 		try {
-			await dependencies.refreshCapture(captureId);
+			await refreshAuthoritativeCapture(captureId);
 			const current = captureById(captureId);
 			const loaded = current?.patternRemarks?.[patternKey];
 			const loadedValue = loaded && typeof loaded === "object" ? loaded as PatternRemarkValue : undefined;
@@ -500,7 +534,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	function drainCaptureWrites(captureId: string, queue: CaptureWriteQueue): Promise<void> {
 		if (queue.running) return queue.running;
 		queue.running = (async () => {
-			while (queue.metadataPending || queue.framingPending) {
+			while (queue.metadataPending) {
 				if (queue.metadataPending) {
 					const patch = queue.metadataPending;
 					queue.metadataPending = null;
@@ -515,24 +549,10 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 						await recoverCaptureWrite(captureId, queue, "metadata", patch, error);
 					}
 				}
-				if (queue.framingPending) {
-					const sections = queue.framingPending;
-					queue.framingPending = null;
-					try {
-						await writeFraming(captureId, sections);
-						if (!queue.framingPending) {
-							const current = captureById(captureId);
-							if (current) applyFramingSnapshot(current, sections);
-						}
-						queue.framingRetries = 0;
-					} catch (error) {
-						await recoverCaptureWrite(captureId, queue, "framing", sections, error);
-					}
-				}
 			}
 		})().finally(() => {
 			queue.running = null;
-			if (!queue.metadataPending && !queue.framingPending) captureWriteQueues.delete(captureId);
+			if (!queue.metadataPending) captureWriteQueues.delete(captureId);
 		});
 		return queue.running;
 	}
@@ -542,16 +562,17 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		kind: "metadata" | "framing",
 		value: CaptureMetadataPatch | FramingSectionRequest[]
 	): void {
+		if (kind === "framing") {
+			framingCoordinator.enqueue(captureId, value as FramingSectionRequest[]);
+			return;
+		}
 		const queue = captureWriteQueues.get(captureId) || {
 			metadataPending: null,
-			framingPending: null,
 			metadataRetries: 0,
-			framingRetries: 0,
 			running: null
 		};
 		captureWriteQueues.set(captureId, queue);
-		if (kind === "metadata") queue.metadataPending = value as CaptureMetadataPatch;
-		else queue.framingPending = value as FramingSectionRequest[];
+		queue.metadataPending = value as CaptureMetadataPatch;
 		void drainCaptureWrites(captureId, queue);
 	}
 
@@ -562,6 +583,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			const running = [
 				...(captureCommandWrites.get(captureId) || []),
 				...(captureQueue?.running ? [captureQueue.running] : []),
+				...(framingCoordinator.isPending(captureId) ? [framingCoordinator.waitFor(captureId)] : []),
 				...(patternQueues ? [...patternQueues.values()].flatMap(queue => queue.running ? [queue.running] : []) : [])
 			];
 			if (!running.length) return;
@@ -593,7 +615,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	function framingRequest(item: ActiveCapture): FramingSectionRequest[] {
 		normalizeSections(item);
 		return item.frameSections.map(section => ({
-			id: section.id,
 			start: section.start,
 			framingMode: section.framingMode,
 			frameSize: section.frameSize,
@@ -605,13 +626,68 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		}));
 	}
 
-	function persistFraming(item: ActiveCapture, immediate = false): void {
+	function queueSectionViewWrite(captureId: string, write: () => Promise<void>): Promise<void> {
+		const previous = sectionViewWrites.get(captureId) ?? Promise.resolve();
+		const next = previous.catch(() => undefined).then(write);
+		sectionViewWrites.set(captureId, next);
+		void next.then(
+			() => {
+				if (sectionViewWrites.get(captureId) === next) sectionViewWrites.delete(captureId);
+			},
+			() => {
+				if (sectionViewWrites.get(captureId) === next) sectionViewWrites.delete(captureId);
+			}
+		);
+		return next;
+	}
+
+	function persistFraming(item: ActiveCapture, _immediate = false): void {
 		if (rejectLockedMutation(item)) return;
 		if (!isCanonical(item)) {
 			persistLegacyCapture(item);
 			return;
 		}
 		queueCaptureWrite(item.id, "framing", framingRequest(item));
+	}
+
+	function persistSectionView(item: ActiveCapture, sectionId: string, patch: Pick<FramingSectionViewRequest, "collapseRuns" | "collapsed">): void {
+		if (rejectLockedMutation(item)) return;
+		if (!isCanonical(item)) {
+			persistLegacyCapture(item);
+			return;
+		}
+		if (
+			dependencies.transport.isRecording() ||
+			dependencies.transport.isCaptureFinalizing?.(String(item.id)) ||
+			framingCoordinator.isPending(String(item.id))
+		) {
+			// During recording and while a reframe is in flight, the full framing
+			// intent is the only safe payload. The coordinator will apply it to the
+			// newest acknowledged profile after the server responds.
+			persistFraming(item);
+			return;
+		}
+		const section = item.frameSections.find(candidate => candidate.id === sectionId);
+		const profileId = item.activeFramingProfileId;
+		if (!section || !profileId) return;
+		const request: FramingSectionViewRequest = {
+			captureId: String(item.id),
+			profileId,
+			sectionId,
+			...patch
+		};
+		const operation = queueSectionViewWrite(String(item.id), async () => {
+			const result = dependencies.archiveCommands
+				? await dependencies.archiveCommands.recordingWriter.updateFramingSectionView(request)
+				: await dependencies.captureWriter!.updateFramingSectionView(request);
+			const current = captureById(String(item.id));
+			if (current) current.contentRevision = result.contentRevision;
+			await refreshAuthoritativeCapture(String(item.id), false);
+			dependencies.renderMessages();
+			dependencies.render();
+		});
+		trackCaptureCommand(String(item.id), operation);
+		void operation.catch(error => reconcileFailure(String(item.id), error));
 	}
 
 	function selectArchiveCapture(captureId: string) {
@@ -741,7 +817,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const c = capture();
 		const noteText = String(rawText || "").trim();
 		if (!c || !noteText) return false;
-		if (rejectLockedMutation(c)) return false;
+		if (rejectFrameTargetMutation(c)) return false;
 		const max = Math.max(1, c.messages.length);
 		const start = Math.max(1, Math.min(max, Number(rawStart) || 1));
 		const end = Math.max(start, Math.min(max, Number(rawEnd) || start));
@@ -1084,7 +1160,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const section = c.frameSections.find(item => item.id === sectionId);
 		if (!section) return;
 		section.collapseRuns = collapseRuns;
-		persistFraming(c);
+		persistSectionView(c, sectionId, { collapseRuns });
 		dependencies.renderMessages();
 		dependencies.showToast(collapseRuns ? "Runs collapse in this section" : "Runs expand in this section");
 	}
@@ -1095,7 +1171,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const section = c.frameSections.find(item => item.id === sectionId);
 		if (!section) return;
 		section.collapsed = Boolean(collapsed);
-		persistFraming(c);
+		persistSectionView(c, sectionId, { collapsed: Boolean(collapsed) });
 		dependencies.renderMessages();
 	}
 
@@ -1175,7 +1251,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function publishAnnotationDialog(type: "message" | "byte", key: string) {
 		const c = capture();
-		if (!c || rejectLockedMutation(c)) return;
+		if (!c || rejectFrameTargetMutation(c)) return;
 		const details = annotationTargetLabel(c, type, key);
 		if (!details) return;
 		const [messageId, positionText] = key.split(":");
@@ -1202,7 +1278,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	function commitAnnotationDraft(input: AnnotationSaveInput) {
 		if (!annotationTextIsValid(input.text)) return false;
 		const c = captureById(String(input.captureId));
-		if (!c || rejectLockedMutation(c)) return false;
+		if (!c || rejectFrameTargetMutation(c)) return false;
 		const details = annotationTargetLabel(c, input.annotationType, input.key);
 		if (!details) return false;
 		const [messageId] = input.key.split(":");
@@ -1257,7 +1333,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function removeAnnotationDraft(input: AnnotationDeleteInput) {
 		const c = captureById(String(input.captureId));
-		if (!c || rejectLockedMutation(c)) return;
+		if (!c || rejectFrameTargetMutation(c)) return;
 		const details = annotationTargetLabel(c, input.annotationType, input.key);
 		if (!details) return;
 		const previous = c.annotations[details.targetKey];
@@ -1279,7 +1355,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function publishPatternRemarkDialog(id: string) {
 		const c = capture();
-		if (rejectLockedMutation(c)) return;
+		if (rejectFrameTargetMutation(c)) return;
 		const patterns = recognizeMessagePatterns(c);
 		const group = patterns.groups.find(item => item.id === id);
 		if (!group || !c) return dependencies.showToast("This sequence is no longer present in the current framing");
@@ -1298,7 +1374,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function commitPatternRemarkDraft(input: PatternRemarkSaveInput) {
 		const c = captureById(String(input.captureId));
-		if (!c || rejectLockedMutation(c)) return false;
+		if (!c || rejectFrameTargetMutation(c)) return false;
 		const text = normalizePatternRemarkText(input.text);
 		c.patternRemarks ||= {};
 		const previous = c.patternRemarks[input.patternKey];
@@ -1351,6 +1427,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		setSectionFrameTimeGap,
 		setSectionCollapse,
 		setSectionCollapsed,
+		isFramingPending: (captureId: string) => framingCoordinator.isPending(captureId),
+		refreshCapture: refreshAuthoritativeCapture,
 		waitForCaptureWrites,
 		commitContextDraft,
 		publishAnnotationDialog,

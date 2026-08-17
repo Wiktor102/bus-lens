@@ -275,6 +275,23 @@ export type ReframeResponse = Readonly<{
 	verified: boolean;
 }>;
 
+export type FramingSectionViewRequest = Readonly<{
+	captureId: string;
+	profileId: string;
+	sectionId: string;
+	collapseRuns?: boolean;
+	collapsed?: boolean;
+}>;
+
+export type FramingSectionViewResponse = Readonly<{
+	captureId: string;
+	profileId: string;
+	sectionId: string;
+	collapseRuns: boolean;
+	collapsed: boolean;
+	contentRevision: number;
+}>;
+
 export type ByteVisibilityRequest = Readonly<{
 	captureId: string;
 	rawOffset: number;
@@ -2355,6 +2372,108 @@ export class CanonicalCaptureCommandService {
 			retainedStartOffset: prepared.retainedStartOffset,
 			verified: true
 		};
+	}
+
+	/**
+	 * Persist section presentation state without creating a new framing profile.
+	 * Collapse state changes the way an acknowledged profile is displayed, not
+	 * the raw spans or the identities of its frames.
+	 */
+	updateFramingSectionView(request: FramingSectionViewRequest): FramingSectionViewResponse {
+		const captureId = requiredString(request.captureId, "captureId");
+		const profileId = requiredString(request.profileId, "profileId");
+		const sectionId = requiredString(request.sectionId, "sectionId");
+		if (request.collapseRuns === undefined && request.collapsed === undefined) {
+			throw new CanonicalCaptureValidationError("section view state must include collapseRuns or collapsed", {
+				captureId,
+				profileId,
+				sectionId
+			});
+		}
+
+		const transaction = this.database.transaction(() => {
+			const capture = this.database
+				.prepare(
+					"SELECT lifecycle, active_framing_profile_id FROM captures WHERE id = @captureId"
+				)
+				.get({ captureId }) as
+				| { lifecycle: string; active_framing_profile_id: string | null }
+				| undefined;
+			if (!capture) throw new CanonicalCaptureNotFoundError(captureId);
+			this.requireCanonicalStorage(captureId);
+			if (capture.lifecycle !== "finalized") {
+				throw new CanonicalCaptureConflictError("section view state can only be updated for a finalized capture", {
+					captureId,
+					lifecycle: capture.lifecycle
+				});
+			}
+			if (capture.active_framing_profile_id !== profileId) {
+				throw new CanonicalCaptureConflictError("active framing profile does not match", {
+					captureId,
+					expectedActiveProfileId: profileId,
+					actualActiveProfileId: capture.active_framing_profile_id
+				});
+			}
+
+			const section = this.database
+				.prepare(
+					`SELECT position, start_offset, collapse_runs, collapsed
+					 FROM framing_sections
+					 WHERE id = @sectionId AND capture_id = @captureId AND profile_id = @profileId`
+				)
+				.get({ captureId, profileId, sectionId }) as
+				| { position: number; start_offset: number; collapse_runs: number; collapsed: number }
+				| undefined;
+			if (!section) throw new CanonicalCaptureNotFoundError(`${captureId}/sections/${sectionId}`);
+
+			const collapseRuns = request.collapseRuns === undefined
+				? Boolean(section.collapse_runs)
+				: Boolean(request.collapseRuns);
+			const collapsed = request.collapsed === undefined
+				? Boolean(section.collapsed)
+				: Boolean(request.collapsed);
+			this.database
+				.prepare(
+					`UPDATE framing_sections
+					 SET collapse_runs = @collapseRuns, collapsed = @collapsed
+					 WHERE id = @sectionId AND capture_id = @captureId AND profile_id = @profileId`
+				)
+				.run({ captureId, profileId, sectionId, collapseRuns: collapseRuns ? 1 : 0, collapsed: collapsed ? 1 : 0 });
+
+			// Keep the next recording draft aligned with the acknowledged view state.
+			// Draft section IDs are intentionally not trusted as canonical identities,
+			// so use the active profile's stable position/start when updating it.
+			const draft = this.database
+				.prepare(
+					"SELECT revision, sections_json FROM framing_drafts WHERE capture_id = @captureId ORDER BY revision DESC LIMIT 1"
+				)
+				.get({ captureId }) as { revision: number; sections_json: string } | undefined;
+			if (draft) {
+				const sections = JSON.parse(draft.sections_json) as unknown;
+				if (Array.isArray(sections)) {
+					const draftSection = isRecord(sections[section.position])
+						? sections[section.position]
+						: sections.find(candidate => isRecord(candidate) && Number(candidate.start) === section.start_offset);
+					if (draftSection) {
+						draftSection.collapseRuns = collapseRuns;
+						draftSection.collapsed = collapsed;
+						this.database
+							.prepare(
+								"UPDATE framing_drafts SET sections_json = @sectionsJson, updated_at = @updatedAt WHERE capture_id = @captureId AND revision = @revision"
+							)
+							.run({ captureId, revision: draft.revision, sectionsJson: JSON.stringify(sections), updatedAt: this.nowIso() });
+					}
+				}
+			}
+
+			return {
+				collapseRuns,
+				collapsed,
+				contentRevision: this.incrementContentRevision(captureId)
+			};
+		});
+		const result = transaction() as { collapseRuns: boolean; collapsed: boolean; contentRevision: number };
+		return { captureId, profileId, sectionId, ...result };
 	}
 
 	private incrementContentRevision(captureId: string): number {

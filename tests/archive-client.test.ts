@@ -85,6 +85,12 @@ test("canonical CaptureWriter commands use dedicated HTTP endpoints", async () =
 			expectedActiveProfileId: "profile",
 			expectedDataRevision: 1
 		});
+		await client.updateFramingSectionView({
+			captureId: "capture",
+			profileId: "profile",
+			sectionId: "section",
+			collapsed: true
+		});
 		await client.setByteVisibility({ captureId: "capture", rawOffset: 1, hidden: true });
 		await client.deleteByteVisibility("capture", 1);
 		await client.setFrameVisibility({ captureId: "capture", frameId: "frame", hidden: true });
@@ -104,6 +110,7 @@ test("canonical CaptureWriter commands use dedicated HTTP endpoints", async () =
 			["/api/captures/capture/sessions/session/finalize", "POST"],
 			["/api/captures/capture/framing-draft", "PATCH"],
 			["/api/captures/capture/framing-revisions", "POST"],
+			["/api/captures/capture/framing-sections/section/view", "PATCH"],
 			["/api/captures/capture/bytes/1/visibility", "PUT"],
 			["/api/captures/capture/bytes/1/visibility", "DELETE"],
 			["/api/captures/capture/frames/frame/visibility", "PUT"],

@@ -254,6 +254,23 @@ export type ReframeResponse = Readonly<{
 	verified: boolean;
 }>;
 
+export type FramingSectionViewRequest = Readonly<{
+	captureId: string;
+	profileId: string;
+	sectionId: string;
+	collapseRuns?: boolean;
+	collapsed?: boolean;
+}>;
+
+export type FramingSectionViewResponse = Readonly<{
+	captureId: string;
+	profileId: string;
+	sectionId: string;
+	collapseRuns: boolean;
+	collapsed: boolean;
+	contentRevision: number;
+}>;
+
 export type ByteVisibilityRequest = Readonly<{
 	captureId: string;
 	rawOffset: number;
@@ -482,6 +499,7 @@ export interface CaptureWriter {
 	finalizeSession(request: FinalizeSessionRequest): Promise<FinalizeSessionResponse>;
 	updateFramingDraft(request: UpdateFramingDraftRequest): Promise<UpdateFramingDraftResponse>;
 	reframe(request: ReframeRequest): Promise<ReframeResponse>;
+	updateFramingSectionView(request: FramingSectionViewRequest): Promise<FramingSectionViewResponse>;
 	setByteVisibility(request: ByteVisibilityRequest): Promise<VisibilityResponse>;
 	deleteByteVisibility(captureId: string, rawOffset: number): Promise<void>;
 	setFrameVisibility(request: FrameVisibilityRequest): Promise<VisibilityResponse>;
@@ -723,6 +741,15 @@ export class ArchiveClient implements CaptureWriter {
 	async reframe(command: ReframeRequest): Promise<ReframeResponse> {
 		const { captureId: _captureId, ...body } = command;
 		return requestJson<ReframeResponse>(`${capturePath(command.captureId)}/framing-revisions`, "POST", body);
+	}
+
+	async updateFramingSectionView(command: FramingSectionViewRequest): Promise<FramingSectionViewResponse> {
+		const { captureId: _captureId, sectionId: _sectionId, profileId: _profileId, ...body } = command;
+		return requestJson<FramingSectionViewResponse>(
+			`${capturePath(command.captureId)}/framing-sections/${encodeURIComponent(command.sectionId)}/view`,
+			"PATCH",
+			{ profileId: command.profileId, ...body }
+		);
 	}
 
 	async setByteVisibility(command: ByteVisibilityRequest): Promise<VisibilityResponse> {
