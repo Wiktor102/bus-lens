@@ -2451,9 +2451,15 @@ export class CanonicalCaptureCommandService {
 			if (draft) {
 				const sections = JSON.parse(draft.sections_json) as unknown;
 				if (Array.isArray(sections)) {
-					const draftSection = isRecord(sections[section.position])
-						? sections[section.position]
-						: sections.find(candidate => isRecord(candidate) && Number(candidate.start) === section.start_offset);
+					const matchesSectionStart = (candidate: unknown): candidate is Record<string, unknown> => {
+						if (!isRecord(candidate)) return false;
+						const normalizedStart = Number(candidate.start);
+						return Number.isSafeInteger(normalizedStart) && normalizedStart >= 0 && normalizedStart === section.start_offset;
+					};
+					const positionalCandidate = sections[section.position];
+					const draftSection = matchesSectionStart(positionalCandidate)
+						? positionalCandidate
+						: sections.find(matchesSectionStart);
 					if (draftSection) {
 						draftSection.collapseRuns = collapseRuns;
 						draftSection.collapsed = collapsed;
