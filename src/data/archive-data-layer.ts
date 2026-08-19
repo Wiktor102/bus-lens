@@ -65,7 +65,7 @@ export type ArchiveCommands = {
 	deleteHistoryItem: (historyItemId: string) => Promise<void>;
 	createNote: (request: Parameters<ArchiveClient["createNote"]>[0]) => Promise<{ note: CanonicalNote; contentRevision: number }>;
 	updateNote: (request: Parameters<ArchiveClient["updateNote"]>[0]) => Promise<{ note: CanonicalNote; contentRevision: number }>;
-	deleteNote: (request: Parameters<ArchiveClient["deleteNote"]>[0]) => Promise<void>;
+	deleteNote: (request: Parameters<ArchiveClient["deleteNote"]>[0]) => Promise<{ contentRevision: number }>;
 	setByteVisibility: (request: Parameters<ArchiveClient["setByteVisibility"]>[0]) => Promise<Awaited<ReturnType<ArchiveClient["setByteVisibility"]>>>;
 	setFrameVisibility: (request: Parameters<ArchiveClient["setFrameVisibility"]>[0]) => Promise<Awaited<ReturnType<ArchiveClient["setFrameVisibility"]>>>;
 	startCanonicalization: (captureId: string) => Promise<CanonicalizationJob>;
@@ -190,6 +190,48 @@ export function createArchiveDataLayer(
 	function rollbackQuery<T>(queryKey: readonly unknown[], previous: T | undefined): void {
 		if (previous === undefined) queryClient.removeQueries({ queryKey, exact: true });
 		else queryClient.setQueryData(queryKey, previous);
+	}
+
+	type NoteMutationResult = {
+		contentRevision: number;
+		note?: CanonicalNote;
+	};
+
+	function patchNoteList<T extends { id?: string }>(
+		notes: readonly T[],
+		result: NoteMutationResult,
+		deletedNoteId?: string
+	): T[] {
+		if (deletedNoteId !== undefined) return notes.filter(note => note.id !== deletedNoteId);
+		if (!result.note) return [...notes];
+		const replacement = result.note as unknown as T;
+		const index = notes.findIndex(note => note.id === result.note?.id);
+		if (index < 0) return [...notes, replacement];
+		return notes.map((note, noteIndex) => noteIndex === index ? replacement : note);
+	}
+
+	function patchNoteCaches(captureId: string, result: NoteMutationResult, deletedNoteId?: string): void {
+		const notesKey = archiveQueryKeys.notes(captureId);
+		queryClient.setQueryData<readonly CanonicalNote[] | undefined>(notesKey, notes => {
+			if (!notes) return notes;
+			return patchNoteList(notes, result, deletedNoteId);
+		});
+
+		queryClient.setQueryData<Capture | undefined>(archiveQueryKeys.capture(captureId), capture => {
+			if (!capture) return capture;
+			return {
+				...capture,
+				contentRevision: result.contentRevision,
+				...(Array.isArray(capture.notes)
+					? { notes: patchNoteList(capture.notes, result, deletedNoteId) }
+					: {})
+			};
+		});
+
+		// The command response is authoritative for the mutation. A notes-only
+		// revalidation is useful for concurrent writers, but it must not delay the
+		// command or invalidate the byte/frame-bearing capture query.
+		void queryClient.invalidateQueries({ queryKey: notesKey, refetchType: "active" }).catch(() => {});
 	}
 
 	function applyMetadataToCaptureList(
@@ -387,20 +429,18 @@ export function createArchiveDataLayer(
 		deleteHistoryItem,
 		createNote: async request => {
 			const result = await client.createNote(request);
-			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.notes(request.captureId) });
-			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.capture(request.captureId) });
+			patchNoteCaches(request.captureId, result);
 			return result;
 		},
 		updateNote: async request => {
 			const result = await client.updateNote(request);
-			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.notes(request.captureId) });
-			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.capture(request.captureId) });
+			patchNoteCaches(request.captureId, result);
 			return result;
 		},
 		deleteNote: async request => {
-			await client.deleteNote(request);
-			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.notes(request.captureId) });
-			await queryClient.invalidateQueries({ queryKey: archiveQueryKeys.capture(request.captureId) });
+			const result = await client.deleteNote(request);
+			patchNoteCaches(request.captureId, result, request.noteId);
+			return result;
 		},
 		setByteVisibility: async request => {
 			const result = await client.setByteVisibility(request);

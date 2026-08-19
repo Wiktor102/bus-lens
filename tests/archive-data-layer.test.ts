@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ArchiveClient, type ArchiveIndex } from "../src/persistence/archive-client.ts";
+import { QueryObserver } from "@tanstack/react-query";
+import { ArchiveClient, type ArchiveIndex, type CanonicalNote } from "../src/persistence/archive-client.ts";
 import { createArchiveDataLayer } from "../src/data/archive-data-layer.ts";
 import { createTestQueryClient } from "../src/test-utils/query-client.ts";
 import type { AppState, SendQueueEntry, SendSettings } from "../src/shared/app-state.ts";
@@ -185,4 +186,114 @@ test("migrates a legacy local archive before removing its compatibility copy", a
 	assert.equal(server.migrations, 1);
 	assert.equal(stored, null);
 	assert.equal(layer.queryClient.getQueryData(layer.queries.captures().queryKey)?.[0]?.id, "legacy");
+});
+
+test("note mutations patch notes and lightweight capture fields without refetching complete captures", async () => {
+	const server = emptyServer();
+	const captureId = "capture-1";
+	const existingNote: CanonicalNote = {
+		id: "note-1",
+		captureId,
+		text: "existing",
+		createdAt: "2026-08-19T00:00:00.000Z",
+		updatedAt: null,
+		target: { kind: "capture" }
+	};
+	const createdNote: CanonicalNote = {
+		...existingNote,
+		id: "note-2",
+		text: "created"
+	};
+	const updatedNote: CanonicalNote = {
+		...existingNote,
+		text: "updated",
+		updatedAt: "2026-08-19T00:01:00.000Z"
+	};
+	const client = createTestClient(server);
+	let completeCaptureLoads = 0;
+	client.loadCapture = async () => {
+		completeCaptureLoads += 1;
+		throw new Error("complete capture should not be refetched");
+	};
+	client.listNotes = async () => [existingNote];
+	client.createNote = async () => ({ note: createdNote, contentRevision: 11 });
+	client.updateNote = async () => ({ note: updatedNote, contentRevision: 12 });
+	client.deleteNote = async () => ({ contentRevision: 13 });
+
+	const queryClient = createTestQueryClient();
+	const layer = createArchiveDataLayer(queryClient, client);
+	await layer.ready;
+	const byteStream = [{ value: 0xaa, timestamp: 1 }];
+	const messages = [{ id: "frame-1", timestamp: 1, bytes: [0xaa] }];
+	queryClient.setQueryData(layer.queries.capture(captureId).queryKey, {
+		id: captureId,
+		byteStream,
+		messages,
+		notes: [existingNote],
+		contentRevision: 10
+	});
+	queryClient.setQueryData(layer.queries.notes(captureId).queryKey, [existingNote]);
+	const captureObserver = new QueryObserver(queryClient, { ...layer.queries.capture(captureId), staleTime: Infinity });
+	const unsubscribe = captureObserver.subscribe(() => {});
+
+	try {
+		await layer.commands.createNote({ captureId, text: createdNote.text, target: createdNote.target });
+		assert.deepEqual(queryClient.getQueryData<readonly CanonicalNote[]>(layer.queries.notes(captureId).queryKey), [existingNote, createdNote]);
+		let cachedCapture = queryClient.getQueryData<{ byteStream: typeof byteStream; messages: typeof messages; notes: readonly CanonicalNote[]; contentRevision: number }>(layer.queries.capture(captureId).queryKey)!;
+		assert.equal(cachedCapture.contentRevision, 11);
+		assert.deepEqual(cachedCapture.notes, [existingNote, createdNote]);
+		assert.equal(cachedCapture.byteStream, byteStream);
+		assert.equal(cachedCapture.messages, messages);
+
+		await layer.commands.updateNote({ captureId, noteId: existingNote.id, text: updatedNote.text });
+		assert.deepEqual(queryClient.getQueryData<readonly CanonicalNote[]>(layer.queries.notes(captureId).queryKey), [updatedNote, createdNote]);
+
+		await layer.commands.deleteNote({ captureId, noteId: createdNote.id });
+		assert.deepEqual(queryClient.getQueryData<readonly CanonicalNote[]>(layer.queries.notes(captureId).queryKey), [updatedNote]);
+		cachedCapture = queryClient.getQueryData(layer.queries.capture(captureId).queryKey)!;
+		assert.equal(cachedCapture.contentRevision, 13);
+		assert.deepEqual(cachedCapture.notes, [updatedNote]);
+	} finally {
+		unsubscribe();
+	}
+
+	assert.equal(completeCaptureLoads, 0);
+});
+
+test("note mutations do not await optional notes revalidation", async () => {
+	const server = emptyServer();
+	const captureId = "capture-1";
+	const note: CanonicalNote = {
+		id: "note-1",
+		captureId,
+		text: "created",
+		createdAt: "2026-08-19T00:00:00.000Z",
+		updatedAt: null,
+		target: { kind: "capture" }
+	};
+	const client = createTestClient(server);
+	let releaseRevalidation!: () => void;
+	const revalidation = new Promise<readonly CanonicalNote[]>(resolve => {
+		releaseRevalidation = () => resolve([note]);
+	});
+	client.listNotes = async () => revalidation;
+	client.createNote = async () => ({ note, contentRevision: 1 });
+
+	const queryClient = createTestQueryClient();
+	const layer = createArchiveDataLayer(queryClient, client);
+	await layer.ready;
+	queryClient.setQueryData(layer.queries.notes(captureId).queryKey, []);
+	const notesObserver = new QueryObserver(queryClient, { ...layer.queries.notes(captureId), staleTime: Infinity });
+	const unsubscribe = notesObserver.subscribe(() => {});
+
+	try {
+		const result = await Promise.race([
+			layer.commands.createNote({ captureId, text: note.text, target: note.target }).then(() => "resolved" as const),
+			new Promise<"timed-out">(resolve => setTimeout(() => resolve("timed-out"), 100))
+		]);
+		assert.equal(result, "resolved");
+	} finally {
+		releaseRevalidation();
+		unsubscribe();
+	}
 });
