@@ -155,11 +155,25 @@ test("invalidates sequence-note rails when notes change in place", () => {
 	const initial = deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT);
 	assert.equal(initial.matchingRows[1]._hasSequenceNote, false);
 	current.notes!.push({ type: "sequence", text: "watch", start: 2, end: 2 });
-	bumpCaptureProjectionGeneration(current);
 
 	const noted = deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT);
 	assert.notStrictEqual(noted.matchingRows, initial.matchingRows);
 	assert.equal(noted.matchingRows[1]._hasSequenceNote, true);
+	assert.equal(noted.matchingRows[1]._sequenceNote?.text, "watch");
+});
+
+test("reuses structural analysis when a note cannot change collapsed runs", () => {
+	const current = sectionedCapture();
+	current.frameSections!.forEach(section => (section.collapseRuns = false));
+	const initial = deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT);
+	current.notes!.push({ type: "sequence", text: "watch", start: 2, end: 2 });
+
+	const noted = deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT);
+
+	assert.equal(noted.matchingRows[1]._sequenceNote?.text, "watch");
+	assert.strictEqual(noted.matchingRows[0], initial.matchingRows[0]);
+	assert.strictEqual(noted.patterns, initial.patterns);
+	assert.strictEqual(noted.frames, initial.frames);
 });
 
 test("uses application section view preferences without changing legacy capture data", () => {

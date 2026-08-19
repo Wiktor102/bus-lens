@@ -882,7 +882,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			end,
 			targetLabel: `rows ${start}–${end}`
 		});
-		bumpCaptureProjectionGeneration(c);
 		const optimistic = notes.at(-1)!;
 		if (isCanonical(c) && c.activeFramingProfileId) {
 			const operation = dependencies.archiveCommands
@@ -912,7 +911,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				c.contentRevision = result.contentRevision;
 			}).catch(error => reconcileFailure(c.id, error, () => {
 				c.notes = notes.filter(note => note !== optimistic);
-				bumpCaptureProjectionGeneration(c);
 				dependencies.render();
 			}));
 		} else persistLegacyCapture(c);

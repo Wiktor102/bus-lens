@@ -342,9 +342,7 @@ function MessageEntry({
 	const visiblePatternRowCount =
 		snapshot.visiblePatternRowCounts.get(message._patternOccurrence || "") || pattern?.length;
 	const originalRow = message._originalStart + 1;
-	const sequenceNote = snapshot.sequenceNotes.find(
-		note => originalRow >= note.start && originalRow <= note.end
-	);
+	const sequenceNote = message._sequenceNote;
 	const messageNote = snapshot.annotations[message.id];
 	const isUnique = snapshot.signatureCounts.get(signature(message)) === 1;
 	const rowLabel =

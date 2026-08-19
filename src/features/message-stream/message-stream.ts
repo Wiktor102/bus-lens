@@ -53,6 +53,7 @@ type MessageStreamBaseRow = CaptureMessage & {
 	_originalStart: number;
 	_originalEnd: number;
 	_hasSequenceNote: boolean;
+	_sequenceNote?: MessageStreamSequenceNote;
 	_patternOccurrence: string | null;
 	_runStart: number;
 	_runEnd: number;
@@ -291,6 +292,22 @@ function copySequenceNotes(capture: Capture): MessageStreamSequenceNote[] {
 		}));
 }
 
+function sequenceNoteRows(capture: Capture): Map<number, MessageStreamSequenceNote> {
+	const rows = new Map<number, MessageStreamSequenceNote>();
+	const maxMessageIndex = (capture.messages?.length || 0) - 1;
+	for (const note of capture.notes || []) {
+		if (note.type !== "sequence") continue;
+		const start = Math.max(0, Math.trunc(Number(note.start)) - 1);
+		const end = Math.min(maxMessageIndex, Math.trunc(Number(note.end)) - 1);
+		if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) continue;
+		const value = { text: String(note.text || ""), start: start + 1, end: end + 1 };
+		for (let index = start; index <= end; index += 1) {
+			if (!rows.has(index)) rows.set(index, value);
+		}
+	}
+	return rows;
+}
+
 function filterRows(
 	capture: Capture,
 	viewState: ViewStateSnapshot,
@@ -298,15 +315,7 @@ function filterRows(
 	sections: MessageStreamSection[],
 	startIndex = 0
 ) {
-	const sequenceNoteRows = new Set<number>();
-	const maxMessageIndex = (capture.messages?.length || 0) - 1;
-	for (const note of capture.notes || []) {
-		if (note.type !== "sequence") continue;
-		const start = Math.max(0, Math.trunc(Number(note.start)) - 1);
-		const end = Math.min(maxMessageIndex, Math.trunc(Number(note.end)) - 1);
-		if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) continue;
-		for (let index = start; index <= end; index++) sequenceNoteRows.add(index);
-	}
+	const notedRows = sequenceNoteRows(capture);
 
 	let rows = (capture.messages || [])
 		.slice(startIndex)
@@ -319,7 +328,8 @@ function filterRows(
 				...message,
 				_originalStart: originalIndex,
 				_originalEnd: originalIndex,
-				_hasSequenceNote: sequenceNoteRows.has(originalIndex),
+				_hasSequenceNote: notedRows.has(originalIndex),
+				_sequenceNote: notedRows.get(originalIndex),
 				_patternOccurrence: patternMember ? `${patternMember.group.id}:${patternMember.occurrenceIndex}` : null,
 				_runStart: message.timestamp,
 				_runEnd: message.timestamp,
@@ -548,6 +558,39 @@ function sameAnalysisProjectionKey(left: AnalysisProjectionKey, right: AnalysisP
 	);
 }
 
+function sameAnalysisProjectionExceptNotes(left: AnalysisProjectionKey, right: AnalysisProjectionKey): boolean {
+	return (
+		left.projectionGeneration === right.projectionGeneration &&
+		left.framingKey === right.framingKey &&
+		left.filterQuery === right.filterQuery &&
+		left.collapseRuns === right.collapseRuns &&
+		left.sectionCollapseRunsKey === right.sectionCollapseRunsKey &&
+		left.showFrameChanges === right.showFrameChanges &&
+		left.patternRemarksKey === right.patternRemarksKey
+	);
+}
+
+function updateSequenceNotePresentation(
+	capture: Capture,
+	viewState: ViewStateSnapshot,
+	projection: MessageStreamAnalysisProjection
+): MessageStreamAnalysisProjection | undefined {
+	const collapseRuns = viewState.collapseRuns || (
+		capture.previewMode === "sections" && projection.sections.some(section => section.collapseRuns)
+	);
+	if (collapseRuns) return undefined;
+	const notedRows = sequenceNoteRows(capture);
+	let changed = false;
+	const matchingRows = projection.matchingRows.map(row => {
+		const sequenceNote = notedRows.get(row._originalStart);
+		const hasSequenceNote = Boolean(sequenceNote);
+		if (sequenceNote === row._sequenceNote && hasSequenceNote === row._hasSequenceNote) return row;
+		changed = true;
+		return { ...row, _hasSequenceNote: hasSequenceNote, _sequenceNote: sequenceNote };
+	});
+	return changed ? { ...projection, matchingRows } : projection;
+}
+
 function deriveMessageStreamAnalysisProjection(
 	capture: Capture,
 	viewState: ViewStateSnapshot
@@ -590,6 +633,13 @@ function getMessageStreamAnalysisProjection(
 	const key = analysisProjectionKey(capture, viewState);
 	const cached = analysisProjectionCache.get(capture);
 	if (cached && sameAnalysisProjectionKey(cached.key, key)) return cached.projection;
+	if (cached && sameAnalysisProjectionExceptNotes(cached.key, key)) {
+		const projection = updateSequenceNotePresentation(capture, viewState, cached.projection);
+		if (projection) {
+			analysisProjectionCache.set(capture, { key, projection });
+			return projection;
+		}
+	}
 	const projection = deriveMessageStreamAnalysisProjection(capture, viewState);
 	analysisProjectionCache.set(capture, { key, projection });
 	return projection;
