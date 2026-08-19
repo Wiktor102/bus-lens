@@ -5,7 +5,7 @@ import type { Capture } from "../features/capture/capture-framing.ts";
 import type { SendController } from "../features/send/send-controller.ts";
 import type { SerialController } from "../features/transport/serial-controller.ts";
 import { applicationStore, selectViewState, type ApplicationStore, type RecordingWorkflowState } from "../shared/application-store.ts";
-import type { ViewStateSnapshot } from "../shared/view-state.ts";
+import { getSectionViewPreference, type ViewStateSnapshot } from "../shared/view-state.ts";
 
 export type LiveStateServiceDependencies = {
 	capture: () => Capture | undefined;
@@ -31,6 +31,21 @@ export type LiveStateService = {
 	render: (options?: LiveStateRenderOptions) => void;
 	subscribeToViewStateChanges: () => () => void;
 };
+
+function sectionViewStateChanged(capture: Capture, previous: ViewStateSnapshot, next: ViewStateSnapshot): boolean {
+	const sections = capture.frameSections?.length
+		? capture.frameSections
+		: [{ start: 0, collapseRuns: false, collapsed: false }];
+	return sections.some(section => {
+		const rawStart = Number(section.start ?? 0);
+		const previousPreference = getSectionViewPreference(previous, String(capture.id ?? ""), rawStart);
+		const nextPreference = getSectionViewPreference(next, String(capture.id ?? ""), rawStart);
+		return (
+			previousPreference?.collapseRuns !== nextPreference?.collapseRuns ||
+			previousPreference?.collapsed !== nextPreference?.collapsed
+		);
+	});
+}
 
 /**
  * Composes high-frequency live projections without making them persistence
@@ -94,13 +109,14 @@ export function createLiveStateService(dependencies: LiveStateServiceDependencie
 		let previousViewState = getViewState();
 		return store.subscribe(() => {
 			const nextViewState = getViewState();
+			const currentCapture = dependencies.capture();
 			const renderChanged =
 				nextViewState.filterQuery !== previousViewState.filterQuery ||
 				nextViewState.displayMode !== previousViewState.displayMode ||
 				nextViewState.showFrameChanges !== previousViewState.showFrameChanges ||
 				nextViewState.collapseRuns !== previousViewState.collapseRuns ||
-				nextViewState.sectionPreferences !== previousViewState.sectionPreferences;
-			if (renderChanged && dependencies.capture()) renderMessages();
+				(currentCapture ? sectionViewStateChanged(currentCapture, previousViewState, nextViewState) : false);
+			if (renderChanged && currentCapture) renderMessages();
 			previousViewState = nextViewState;
 		});
 	}

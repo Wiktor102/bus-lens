@@ -48,6 +48,27 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		getSendController: () => sendController,
 	});
 
+	function sendSectionViewEvent(send: () => void): boolean {
+		const previous = applicationStore.select(selectViewState);
+		send();
+		const next = applicationStore.select(selectViewState);
+		if (next === previous) return false;
+		const current = runtime.capture();
+		if (!current) return true;
+		const sections = current.frameSections?.length
+			? current.frameSections
+			: [{ start: 0, collapseRuns: false, collapsed: false }];
+		return sections.some(section => {
+			const rawStart = Number(section.start ?? 0);
+			const previousPreference = getSectionViewPreference(previous, String(current.id ?? ""), rawStart);
+			const nextPreference = getSectionViewPreference(next, String(current.id ?? ""), rawStart);
+			return (
+				previousPreference?.collapseRuns !== nextPreference?.collapseRuns ||
+				previousPreference?.collapsed !== nextPreference?.collapsed
+			);
+		});
+	}
+
 	transport = createSerialController({
 		capture: runtime.capture,
 		getArchiveIndex: archiveReads?.index,
@@ -140,11 +161,11 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		setCaptureStorageStatus: runtime.setCaptureStorageStatus,
 		openCanonicalization: captureId => openCanonicalizationDialog(captureId),
 		refreshCapture: runtime.refreshCapture,
-		seedSectionViewState: (captureId, sections) => applicationStore.send({
+		seedSectionViewState: (captureId, sections) => sendSectionViewEvent(() => applicationStore.send({
 			type: "view/section-preferences-seeded",
 			captureId,
 			sections
-		}),
+		})),
 		getSectionViewPreference: (captureId, rawStart) =>
 			getSectionViewPreference(applicationStore.select(selectViewState), captureId, rawStart),
 		setSectionViewState: (captureId, rawStart, patch) => applicationStore.send({
@@ -153,17 +174,17 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 			rawStart,
 			patch
 		}),
-		copySectionViewState: (captureId, fromRawStart, toRawStart) => applicationStore.send({
+		copySectionViewState: (captureId, fromRawStart, toRawStart) => sendSectionViewEvent(() => applicationStore.send({
 			type: "view/section-preference-copied",
 			captureId,
 			fromRawStart,
 			toRawStart
-		}),
-		reconcileSectionViewState: (captureId, rawStarts) => applicationStore.send({
+		})),
+		reconcileSectionViewState: (captureId, rawStarts) => sendSectionViewEvent(() => applicationStore.send({
 			type: "view/section-preferences-reconciled",
 			captureId,
 			rawStarts
-		}),
+		})),
 		clearSectionViewState: captureId => applicationStore.send({
 			type: "view/section-preferences-cleared",
 			captureId
