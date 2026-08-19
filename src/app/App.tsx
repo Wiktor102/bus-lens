@@ -841,7 +841,7 @@ function AnalysisPanel({ active }: { active: boolean }) {
 const AnalysisPanelShell = memo(function AnalysisPanelShell({ active }: { active: boolean }) {
 	return (
 		<div id="patternsPanel" className={`tab-panel ${active ? "active" : ""}`.trim()}>
-			<AnalysisPanelContent />
+			{active ? <AnalysisPanelContent /> : null}
 		</div>
 	);
 });
@@ -969,14 +969,49 @@ function NotesPanel({ active }: { active: boolean }) {
 }
 
 const NotesPanelShell = memo(function NotesPanelShell({ active }: { active: boolean }) {
+	const [sequenceStart, setSequenceStart] = useState("1");
+	const [sequenceEnd, setSequenceEnd] = useState("2");
+	const [noteText, setNoteText] = useState("");
+	const [originFilter, setOriginFilter] = useState<"all" | "human" | "agent">("all");
 	return (
 		<div id="notesPanel" className={`tab-panel ${active ? "active" : ""}`.trim()}>
-			<NotesPanelContent />
+			{active ? (
+				<NotesPanelContent
+					sequenceStart={sequenceStart}
+					sequenceEnd={sequenceEnd}
+					noteText={noteText}
+					originFilter={originFilter}
+					onSequenceStartChange={setSequenceStart}
+					onSequenceEndChange={setSequenceEnd}
+					onNoteTextChange={setNoteText}
+					onOriginFilterChange={setOriginFilter}
+				/>
+			) : null}
 		</div>
 	);
 });
 
-function NotesPanelContent() {
+type NotesPanelContentProps = {
+	sequenceStart: string;
+	sequenceEnd: string;
+	noteText: string;
+	originFilter: "all" | "human" | "agent";
+	onSequenceStartChange: (value: string) => void;
+	onSequenceEndChange: (value: string) => void;
+	onNoteTextChange: (value: string) => void;
+	onOriginFilterChange: (value: "all" | "human" | "agent") => void;
+};
+
+function NotesPanelContent({
+	sequenceStart,
+	sequenceEnd,
+	noteText,
+	originFilter,
+	onSequenceStartChange,
+	onSequenceEndChange,
+	onNoteTextChange,
+	onOriginFilterChange
+}: NotesPanelContentProps) {
 	const activeCapture = useSelectedArchiveCapture();
 	const notesQuery = useArchiveNotes(activeCapture.captureId);
 	const snapshot = deriveNotesSnapshot(
@@ -988,10 +1023,6 @@ function NotesPanelContent() {
 	const mutationLocked = transport.recordingCaptureId === activeCapture.captureId &&
 		(recordingWorkflow.status === "starting" || recordingWorkflow.status === "finalizing" || recordingWorkflow.status === "failed");
 	const actions = getNotesActions();
-	const [sequenceStart, setSequenceStart] = useState("1");
-	const [sequenceEnd, setSequenceEnd] = useState("2");
-	const [noteText, setNoteText] = useState("");
-	const [originFilter, setOriginFilter] = useState<"all" | "human" | "agent">("all");
 	const visibleNotes = snapshot.notes.filter(note => originFilter === "all" || (note.authorType ?? "human") === originFilter);
 
 	return (
@@ -1007,7 +1038,7 @@ function NotesPanelContent() {
 							value={originFilter}
 							onChange={event => {
 								const value = event.currentTarget.value as "all" | "human" | "agent";
-								setOriginFilter(value);
+								onOriginFilterChange(value);
 							}}
 						>
 							<option value="all">All notes</option>
@@ -1049,7 +1080,7 @@ function NotesPanelContent() {
 								text: noteText
 							})
 						)
-							setNoteText("");
+							onNoteTextChange("");
 					}}
 				>
 					<span className="eyebrow">Sequence observation</span>
@@ -1063,7 +1094,10 @@ function NotesPanelContent() {
 								min="1"
 								disabled={mutationLocked}
 								value={sequenceStart}
-								onChange={event => setSequenceStart(event.currentTarget.value)}
+								onChange={event => {
+									const value = event.currentTarget.value;
+									onSequenceStartChange(value);
+								}}
 							/>
 						</label>
 						<label className="field">
@@ -1074,7 +1108,10 @@ function NotesPanelContent() {
 								min="1"
 								disabled={mutationLocked}
 								value={sequenceEnd}
-								onChange={event => setSequenceEnd(event.currentTarget.value)}
+								onChange={event => {
+									const value = event.currentTarget.value;
+									onSequenceEndChange(value);
+								}}
 							/>
 						</label>
 					</div>
@@ -1084,7 +1121,10 @@ function NotesPanelContent() {
 						disabled={mutationLocked}
 						placeholder="What does this message sequence appear to represent?"
 						value={noteText}
-						onChange={event => setNoteText(event.currentTarget.value)}
+						onChange={event => {
+							const value = event.currentTarget.value;
+							onNoteTextChange(value);
+						}}
 					/>
 					<button className="btn btn-primary" type="submit" disabled={mutationLocked}>
 						Add sequence note
