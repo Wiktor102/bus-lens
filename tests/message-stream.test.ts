@@ -76,6 +76,36 @@ test("derives section headers and message visibility without changing stream cal
 	]);
 });
 
+test("reuses the analysis projection when only a section is collapsed", () => {
+	const current = sectionedCapture();
+	const initial = deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT);
+	const expanded = deriveMessageStreamSnapshot(current, {
+		...EMPTY_VIEW_STATE_SNAPSHOT,
+		sectionPreferences: {
+			"capture-1": {
+				"0": { collapseRuns: false, collapsed: false }
+			}
+		}
+	});
+
+	assert.deepEqual(entrySummary(expanded), [
+		"section:header",
+		"message:0",
+		"message:1",
+		"section:payload",
+		"message:2",
+		"message:3"
+	]);
+	assert.notStrictEqual(expanded.entries, initial.entries);
+	assert.strictEqual(expanded.matchingRows, initial.matchingRows);
+	assert.strictEqual(expanded.frames, initial.frames);
+	assert.strictEqual(expanded.signatureCounts, initial.signatureCounts);
+	assert.strictEqual(expanded.countsByPosition, initial.countsByPosition);
+	assert.strictEqual(expanded.patterns, initial.patterns);
+	assert.strictEqual(expanded.patternNumbers, initial.patternNumbers);
+	assert.strictEqual(expanded.visiblePatternRowCounts, initial.visiblePatternRowCounts);
+});
+
 test("uses application section view preferences without changing legacy capture data", () => {
 	const current = sectionedCapture();
 	const viewState = {

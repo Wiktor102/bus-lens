@@ -217,12 +217,29 @@ function copySection(
 	};
 }
 
-function copySections(capture: Capture, viewState: ViewStateSnapshot): MessageStreamSection[] {
-	const movement = precomputeSectionMoveMetadata(capture);
-	const sourceSections = capture.frameSections?.length
+function sourceSections(capture: Capture): CaptureSection[] {
+	return capture.frameSections?.length
 		? capture.frameSections
 		: [{ id: "section-0", start: 0, frameSize: capture.frameSize || 3, collapseRuns: false, collapsed: false }];
-	return sourceSections.map((section, index) => copySection(section, index, capture, viewState, movement));
+}
+
+function copySections(capture: Capture, viewState: ViewStateSnapshot): MessageStreamSection[] {
+	const movement = precomputeSectionMoveMetadata(capture);
+	return sourceSections(capture).map((section, index) => copySection(section, index, capture, viewState, movement));
+}
+
+function assembleSectionPresentation(
+	capture: Capture,
+	viewState: ViewStateSnapshot,
+	sections: MessageStreamSection[]
+): MessageStreamSection[] {
+	const sourceById = new Map(sourceSections(capture).map((section, index) => [String(section.id ?? `section-${index}`), section]));
+	return sections.map(section => {
+		const source = sourceById.get(section.id);
+		const preference = getSectionViewPreference(viewState, String(capture.id ?? ""), section.start);
+		const collapsed = preference?.collapsed ?? Boolean(source?.collapsed);
+		return section.collapsed === collapsed ? section : { ...section, collapsed };
+	});
 }
 
 function sectionIdForMessage(message: CaptureMessage, sections: MessageStreamSection[]): string | undefined {
@@ -391,6 +408,47 @@ function buildEntries(
 	return entries;
 }
 
+type MessageStreamAnalysisProjection = {
+	sections: MessageStreamSection[];
+	matchingRows: MessageStreamRow[];
+	frames: TransitionFrame[][];
+	signatureCounts: Map<string, number>;
+	countsByPosition: Map<number, number>[];
+	patterns: MessageStreamPatterns;
+	patternNumbers: Map<string, number>;
+	visiblePatternRowCounts: Map<string, number>;
+	visibleMessageCount: number;
+	telegramCount: number;
+};
+
+type AnalysisProjectionKey = {
+	messages: CaptureMessage[] | undefined;
+	messageCount: number;
+	lastMessage: CaptureMessage | undefined;
+	lastMessageByteCount: number;
+	lastMessageLastByte: number | undefined;
+	byteStream: Capture["byteStream"];
+	byteStreamLength: number;
+	firstByte: NonNullable<Capture["byteStream"]>[number] | undefined;
+	lastByte: NonNullable<Capture["byteStream"]>[number] | undefined;
+	dataRevision: number | undefined;
+	contentRevision: number | undefined;
+	framingKey: string;
+	filterQuery: string;
+	collapseRuns: boolean;
+	sectionCollapseRunsKey: string;
+	showFrameChanges: boolean;
+	patternRemarksKey: string;
+	notesKey: string;
+};
+
+type AnalysisProjectionCacheEntry = {
+	key: AnalysisProjectionKey;
+	projection: MessageStreamAnalysisProjection;
+};
+
+const analysisProjectionCache = new WeakMap<object, AnalysisProjectionCacheEntry>();
+
 type LiveMessageSummary = {
 	visible: boolean;
 	signature: string;
@@ -422,20 +480,41 @@ const liveSnapshotCache = new WeakMap<object, LiveSnapshotCache>();
 
 function framingKey(capture: Capture): string {
 	return JSON.stringify(
-		(capture.frameSections || []).map(section => [
-			section.id,
-			section.start,
-			section.framingMode,
-			section.frameSize,
-			section.frameMarker,
-			section.markerPosition,
-			section.frameTimeGap
-		])
+		{
+			previewMode: capture.previewMode,
+			frameSize: capture.frameSize,
+			frameMarker: capture.frameMarker,
+			markerPosition: capture.markerPosition,
+			frameTimeGap: capture.frameTimeGap,
+			sections: sourceSections(capture).map(section => [
+				section.id,
+				section.start,
+				section.framingMode,
+				section.frameSize,
+				section.frameMarker,
+				section.markerPosition,
+				section.frameTimeGap
+			])
+		}
 	);
 }
 
 function sectionViewKey(capture: Capture, viewState: ViewStateSnapshot): string {
 	return JSON.stringify(viewState.sectionPreferences[String(capture.id ?? "")] || {});
+}
+
+function sectionCollapseRunsKey(capture: Capture, viewState: ViewStateSnapshot): string {
+	return JSON.stringify(
+		sourceSections(capture).map((section, index) => {
+			const rawStart = Number(section.start || 0);
+			const preference = getSectionViewPreference(viewState, String(capture.id ?? ""), rawStart);
+			return [
+				String(section.id ?? `section-${index}`),
+				rawStart,
+				preference?.collapseRuns ?? Boolean(section.collapseRuns)
+			];
+		})
+	);
 }
 
 function patternRemarksKey(capture: Capture): string {
@@ -448,6 +527,102 @@ function notesKey(capture: Capture): string {
 
 function annotationsKey(capture: Capture): string {
 	return JSON.stringify(capture.annotations || {});
+}
+
+function analysisProjectionKey(capture: Capture, viewState: ViewStateSnapshot): AnalysisProjectionKey {
+	const messages = capture.messages;
+	const byteStream = capture.byteStream;
+	const lastMessage = messages?.at(-1);
+	return {
+		messages,
+		messageCount: messages?.length || 0,
+		lastMessage,
+		lastMessageByteCount: lastMessage?.bytes.length || 0,
+		lastMessageLastByte: lastMessage?.bytes.at(-1),
+		byteStream,
+		byteStreamLength: byteStream?.length || 0,
+		firstByte: byteStream?.[0],
+		lastByte: byteStream?.at(-1),
+		dataRevision: capture.dataRevision,
+		contentRevision: capture.contentRevision,
+		framingKey: framingKey(capture),
+		filterQuery: viewState.filterQuery,
+		collapseRuns: viewState.collapseRuns || capture.previewMode === "sections",
+		sectionCollapseRunsKey: sectionCollapseRunsKey(capture, viewState),
+		showFrameChanges: viewState.showFrameChanges,
+		patternRemarksKey: patternRemarksKey(capture),
+		notesKey: notesKey(capture)
+	};
+}
+
+function sameAnalysisProjectionKey(left: AnalysisProjectionKey, right: AnalysisProjectionKey): boolean {
+	return (
+		left.messages === right.messages &&
+		left.messageCount === right.messageCount &&
+		left.lastMessage === right.lastMessage &&
+		left.lastMessageByteCount === right.lastMessageByteCount &&
+		left.lastMessageLastByte === right.lastMessageLastByte &&
+		left.byteStream === right.byteStream &&
+		left.byteStreamLength === right.byteStreamLength &&
+		left.firstByte === right.firstByte &&
+		left.lastByte === right.lastByte &&
+		left.dataRevision === right.dataRevision &&
+		left.contentRevision === right.contentRevision &&
+		left.framingKey === right.framingKey &&
+		left.filterQuery === right.filterQuery &&
+		left.collapseRuns === right.collapseRuns &&
+		left.sectionCollapseRunsKey === right.sectionCollapseRunsKey &&
+		left.showFrameChanges === right.showFrameChanges &&
+		left.patternRemarksKey === right.patternRemarksKey &&
+		left.notesKey === right.notesKey
+	);
+}
+
+function deriveMessageStreamAnalysisProjection(
+	capture: Capture,
+	viewState: ViewStateSnapshot
+): MessageStreamAnalysisProjection {
+	const sections = copySections(capture, viewState);
+	const rawPatterns = recognizeMessagePatterns(capture);
+	const patterns = copyPatterns(rawPatterns);
+	const matchingRows = filterRows(capture, viewState, rawPatterns, sections);
+	const visible = visibleMessages(capture);
+	const signatureCounts = getCounts(visible);
+	const countsByPosition = Array.from({ length: frameWidth(capture) }, (_, position) => {
+		const counts = new Map<number, number>();
+		visible.forEach(message => {
+			const byte = visibleByteEntries(message)[position]?.value;
+			if (byte !== undefined) counts.set(byte, (counts.get(byte) || 0) + 1);
+		});
+		return counts;
+	});
+	const frames = viewState.showFrameChanges
+		? transitionFrames(matchingRows)
+		: matchingRows.map(row => visibleByteEntries(row).map(() => ({ incoming: null, outgoing: null })));
+	return {
+		sections,
+		matchingRows,
+		frames,
+		signatureCounts,
+		countsByPosition,
+		patterns,
+		patternNumbers: new Map(patterns.groups.map((group, index) => [group.id, index + 1])),
+		visiblePatternRowCounts: countVisibleRowsByPatternOccurrence(matchingRows),
+		visibleMessageCount: visible.length,
+		telegramCount: matchingRows.reduce((sum, row) => sum + row._repeats, 0)
+	};
+}
+
+function getMessageStreamAnalysisProjection(
+	capture: Capture,
+	viewState: ViewStateSnapshot
+): MessageStreamAnalysisProjection {
+	const key = analysisProjectionKey(capture, viewState);
+	const cached = analysisProjectionCache.get(capture);
+	if (cached && sameAnalysisProjectionKey(cached.key, key)) return cached.projection;
+	const projection = deriveMessageStreamAnalysisProjection(capture, viewState);
+	analysisProjectionCache.set(capture, { key, projection });
+	return projection;
 }
 
 function liveMessageSummary(message: CaptureMessage): LiveMessageSummary {
@@ -668,6 +843,36 @@ function snapshotFromParts({
 	};
 }
 
+function projectionFromSnapshot(
+	snapshot: MessageStreamSnapshot,
+	sections: MessageStreamSection[],
+	visibleMessageCount: number
+): MessageStreamAnalysisProjection {
+	return {
+		sections,
+		matchingRows: snapshot.matchingRows,
+		frames: snapshot.frames,
+		signatureCounts: snapshot.signatureCounts,
+		countsByPosition: snapshot.countsByPosition,
+		patterns: snapshot.patterns,
+		patternNumbers: snapshot.patternNumbers,
+		visiblePatternRowCounts: snapshot.visiblePatternRowCounts,
+		visibleMessageCount,
+		telegramCount: snapshot.matchingRows.reduce((sum, row) => sum + row._repeats, 0)
+	};
+}
+
+function rememberMessageStreamAnalysisProjection(
+	capture: Capture,
+	viewState: ViewStateSnapshot,
+	projection: MessageStreamAnalysisProjection
+): void {
+	analysisProjectionCache.set(capture, {
+		key: analysisProjectionKey(capture, viewState),
+		projection
+	});
+}
+
 function deriveLiveMessageStreamSnapshot(
 	capture: Capture,
 	viewState: ViewStateSnapshot,
@@ -731,6 +936,15 @@ function deriveLiveMessageStreamSnapshot(
 		visibleMessageCount: cached.visibleMessageCount - oldVisibleMessageCount + currentVisibleMessageCount,
 		telegramCount
 	});
+	rememberMessageStreamAnalysisProjection(
+		capture,
+		viewState,
+		projectionFromSnapshot(
+			snapshot,
+			sections,
+			cached.visibleMessageCount - oldVisibleMessageCount + currentVisibleMessageCount
+		)
+	);
 	const nextTailStart = liveTailStart(capture, snapshot, viewState.collapseRuns || capture.previewMode === "sections");
 	const tailOffset = nextTailStart - cached.tailStart;
 	const nextTailMessages = tailOffset >= 0 && tailOffset <= currentTailMessages.length
@@ -766,38 +980,31 @@ export function deriveMessageStreamSnapshot(
 		const liveSnapshot = cached && deriveLiveMessageStreamSnapshot(capture, viewState, cached);
 		if (liveSnapshot) return liveSnapshot;
 	}
-	const sections = copySections(capture, viewState);
-	const rawPatterns = recognizeMessagePatterns(capture);
-	const patterns = copyPatterns(rawPatterns);
-	const matchingRows = filterRows(capture, viewState, rawPatterns, sections);
-	const visible = visibleMessages(capture);
-	const signatureCounts = getCounts(visible);
-	const countsByPosition = Array.from({ length: frameWidth(capture) }, (_, position) => {
-		const counts = new Map<number, number>();
-		visible.forEach(message => {
-			const byte = visibleByteEntries(message)[position]?.value;
-			if (byte !== undefined) counts.set(byte, (counts.get(byte) || 0) + 1);
-		});
-		return counts;
-	});
-	const frames = viewState.showFrameChanges
-		? transitionFrames(matchingRows)
-		: matchingRows.map(row => visibleByteEntries(row).map(() => ({ incoming: null, outgoing: null })));
+	const projection = getMessageStreamAnalysisProjection(capture, viewState);
+	const sections = assembleSectionPresentation(capture, viewState, projection.sections);
 	const snapshot = snapshotFromParts({
 		capture,
 		viewState,
-		matchingRows,
-		entries: buildEntries(capture, viewState, sections, matchingRows),
-		frames,
-		signatureCounts,
-		countsByPosition,
-		patterns,
-		patternNumbers: new Map(patterns.groups.map((group, index) => [group.id, index + 1])),
-		visiblePatternRowCounts: countVisibleRowsByPatternOccurrence(matchingRows),
-		visibleMessageCount: visible.length,
-		telegramCount: matchingRows.reduce((sum, row) => sum + row._repeats, 0)
+		matchingRows: projection.matchingRows,
+		entries: buildEntries(capture, viewState, sections, projection.matchingRows),
+		frames: projection.frames,
+		signatureCounts: projection.signatureCounts,
+		countsByPosition: projection.countsByPosition,
+		patterns: projection.patterns,
+		patternNumbers: projection.patternNumbers,
+		visiblePatternRowCounts: projection.visiblePatternRowCounts,
+		visibleMessageCount: projection.visibleMessageCount,
+		telegramCount: projection.telegramCount
 	});
-	rememberLiveSnapshot(capture, snapshot, sections, viewState, viewState.collapseRuns || capture.previewMode === "sections", visible.length);
+	rememberLiveSnapshot(
+		capture,
+		snapshot,
+		sections,
+		viewState,
+		viewState.collapseRuns || capture.previewMode === "sections",
+		projection.visibleMessageCount,
+		projection.telegramCount
+	);
 	return snapshot;
 }
 
