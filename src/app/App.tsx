@@ -1022,6 +1022,7 @@ function NotesPanelContent({
 	const recordingWorkflow = useApplicationSelector(selectRecordingWorkflow);
 	const mutationLocked = transport.recordingCaptureId === activeCapture.captureId &&
 		(recordingWorkflow.status === "starting" || recordingWorkflow.status === "finalizing" || recordingWorkflow.status === "failed");
+	const composerDisabled = mutationLocked || !snapshot.captureId;
 	const actions = getNotesActions();
 	const visibleNotes = snapshot.notes.filter(note => originFilter === "all" || (note.authorType ?? "human") === originFilter);
 
@@ -1092,7 +1093,7 @@ function NotesPanelContent({
 								id="sequenceStart"
 								type="number"
 								min="1"
-								disabled={mutationLocked}
+								disabled={composerDisabled}
 								value={sequenceStart}
 								onChange={event => {
 									const value = event.currentTarget.value;
@@ -1106,7 +1107,7 @@ function NotesPanelContent({
 								id="sequenceEnd"
 								type="number"
 								min="1"
-								disabled={mutationLocked}
+								disabled={composerDisabled}
 								value={sequenceEnd}
 								onChange={event => {
 									const value = event.currentTarget.value;
@@ -1118,7 +1119,7 @@ function NotesPanelContent({
 					<textarea
 						id="captureNoteText"
 						required
-						disabled={mutationLocked}
+						disabled={composerDisabled}
 						placeholder="What does this message sequence appear to represent?"
 						value={noteText}
 						onChange={event => {
@@ -1126,7 +1127,7 @@ function NotesPanelContent({
 							onNoteTextChange(value);
 						}}
 					/>
-					<button className="btn btn-primary" type="submit" disabled={mutationLocked}>
+					<button className="btn btn-primary" type="submit" disabled={composerDisabled}>
 						Add sequence note
 					</button>
 				</form>

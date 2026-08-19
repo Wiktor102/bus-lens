@@ -13,7 +13,9 @@ export type NotesActions = {
 /** Typed command action; notes are derived from the selected capture query. */
 const actions: NotesActions = {
 	addSequenceNote: input => {
-		applicationStore.sendCommand({ type: "notes/add-sequence", ...input });
+		const text = String(input.text ?? "").trim();
+		if (!text) return false;
+		applicationStore.sendCommand({ type: "notes/add-sequence", ...input, text });
 		return true;
 	}
 };
