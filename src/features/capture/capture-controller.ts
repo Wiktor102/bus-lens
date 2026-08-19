@@ -22,6 +22,7 @@ import {
 	normalizeSections,
 	rebuildPreview,
 	signature,
+	captureProjectionToken,
 	type CaptureMessage,
 	type Capture,
 	type NormalizedCaptureSection,
@@ -213,22 +214,23 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		return (dependencies.getCapture?.(captureId) || captures().find(item => String(item.id) === captureId)) as ActiveCapture | undefined;
 	}
 
-	function installAuthoritativeCapture(captureId: string, refreshed: Capture): void {
+	function installAuthoritativeCapture(captureId: string, refreshed: Capture, projectionChanged: boolean): void {
 		const current = capture();
-		// Query owns the value returned by refreshCapture. Keep every mutable
-		// projection in the controller/runtime on its own object graph so an
-		// optimistic edit cannot mutate Query data outside QueryClient.
-		const owned = structuredClone(refreshed);
+		// The runtime has already transferred this refresh into its single owned
+		// mutable projection. Never clone the full graph again in the controller.
 		const mutableCurrent = current && String(current.id) === captureId ? current : undefined;
-		if (mutableCurrent) Object.assign(mutableCurrent, owned);
-		const activeProjection = mutableCurrent || owned;
+		if (mutableCurrent && mutableCurrent !== refreshed) Object.assign(mutableCurrent, refreshed);
+		const activeProjection = mutableCurrent || refreshed;
 		if (compatibilityState) {
 			const index = compatibilityState.captures.findIndex(item => String(item.id) === captureId);
 			if (index >= 0 && compatibilityState.captures[index] !== activeProjection) {
-				compatibilityState.captures[index] = structuredClone(activeProjection) as ActiveCapture;
+				compatibilityState.captures[index] = activeProjection as ActiveCapture;
 			}
 		}
-		if (String(dependencies.getActiveId() ?? "") === captureId) dependencies.setActiveCapture?.(activeProjection);
+		if (
+			String(dependencies.getActiveId() ?? "") === captureId &&
+			(projectionChanged || activeProjection !== current)
+		) dependencies.setActiveCapture?.(activeProjection);
 	}
 
 	function applyPendingFraming(captureId: string, sections: readonly FramingSectionRequest[]): void {
@@ -246,6 +248,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		expectedActiveProfileId?: string
 	): Promise<Capture> {
 		if (!dependencies.refreshCapture) throw new Error("capture refresh is unavailable");
+		const previousProjectionToken = captureProjectionToken(capture());
 		const refreshed = await dependencies.refreshCapture(captureId, expectedActiveProfileId);
 		if (expectedActiveProfileId && refreshed.activeFramingProfileId !== expectedActiveProfileId) {
 			throw new Error(
@@ -253,7 +256,11 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				`expected ${expectedActiveProfileId}`
 			);
 		}
-		installAuthoritativeCapture(captureId, refreshed);
+		// Keep the comparison scalar and explicit. The result is intentionally
+		// not used to decide installation: a failed optimistic command still
+		// needs the complete authoritative graph copied into the owned object.
+		const projectionChanged = previousProjectionToken !== captureProjectionToken(refreshed);
+		installAuthoritativeCapture(captureId, refreshed, projectionChanged);
 		framingCoordinator.acknowledgeAuthoritativeRefresh(captureId);
 		if (preserveIntent) {
 			const intent = framingCoordinator.pendingIntent(captureId) || framingCoordinator.activeIntent(captureId);

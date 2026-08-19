@@ -120,11 +120,12 @@ test("authoritative refresh gives optimistic framing edits owned state outside Q
 	});
 
 	try {
-		await controller.refreshCapture(captureId);
+		const refreshed = await controller.refreshCapture(captureId);
 		const queryCapture = archive.reads.capture(captureId);
 		const activeCapture = runtime.capture();
 		assert.ok(queryCapture);
 		assert.ok(activeCapture);
+		assert.strictEqual(refreshed, activeCapture);
 		assert.notEqual(activeCapture, queryCapture);
 		assert.notEqual(activeCapture.frameSections, queryCapture.frameSections);
 		const querySnapshot = structuredClone(queryCapture);

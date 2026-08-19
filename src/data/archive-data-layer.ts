@@ -3,6 +3,7 @@ import {
 	archiveQueryKeys,
 	createArchiveMutationSuccessHandler,
 	createArchiveQueryOptions,
+	captureListItem,
 	invalidateArchiveMutationCache,
 	normalizeArchiveSettings,
 	type ArchiveMutationName
@@ -47,7 +48,7 @@ export type ArchiveCommands = {
 	getArchiveIndex: () => Promise<ArchiveIndex>;
 	persistArchiveIndex: (index: ArchiveIndex) => Promise<void>;
 	getCapture: (captureId: string) => Promise<Capture>;
-	/** Force-fetches durable capture state and the byte-free sidebar projection. */
+	/** Force-fetches the durable active capture projection. */
 	refreshCapture: (captureId: string, expectedActiveProfileId?: string) => Promise<Capture>;
 	listCaptures: () => Promise<CaptureListItem[]>;
 	saveLegacyCapture: (capture: Capture) => Promise<void>;
@@ -266,6 +267,42 @@ export function createArchiveDataLayer(
 		);
 	}
 
+	function patchKnownCaptureProjections(capture: Capture): void {
+		const captureId = String(capture.id ?? "");
+		if (!captureId) return;
+		const projected = captureListItem(capture);
+
+		queryClient.setQueryData<CaptureListItem[] | undefined>(archiveQueryKeys.captures(), captures => {
+			if (!captures) return captures;
+			const index = captures.findIndex(item => item.id === captureId);
+			if (index < 0) return captures;
+			const next = [...captures];
+			// Preserve optional sidebar fields when an older/compatibility document
+			// did not carry them, while still applying every known command result.
+			next[index] = { ...captures[index], ...projected };
+			return next;
+		});
+
+		queryClient.setQueryData<CanonicalCaptureSummary[] | undefined>(archiveQueryKeys.captureSummaries(), summaries => {
+			if (!summaries) return summaries;
+			const index = summaries.findIndex(item => item.id === captureId);
+			if (index < 0) return summaries;
+			const previous = summaries[index];
+			const next = [...summaries];
+			next[index] = {
+				...previous,
+				name: projected.name,
+				...(capture.storageStatus === undefined ? {} : { status: capture.storageStatus }),
+				...(capture.lifecycle === undefined ? {} : { lifecycle: capture.lifecycle }),
+				...(capture.byteCount === undefined ? {} : { byteCount: capture.byteCount }),
+				...(capture.createdAt === undefined ? {} : { createdAt: capture.createdAt }),
+				...(capture.updatedAt === undefined ? {} : { updatedAt: capture.updatedAt }),
+				...(capture.folderId === undefined ? {} : { folderId: capture.folderId ?? null })
+			};
+			return next;
+		});
+	}
+
 	async function saveFolder(folder: StoredFolder): Promise<void> {
 		const previous = queryClient.getQueryData<StoredFolder[]>(archiveQueryKeys.folders());
 		if (previous) {
@@ -388,12 +425,9 @@ export function createArchiveDataLayer(
 		const maxAttempts = expectedActiveProfileId ? 3 : 1;
 		let lastCapture: Capture | undefined;
 		for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-			const [capture] = await Promise.all([
-				queryClient.fetchQuery({ ...queries.capture(captureId), staleTime: 0 }),
-				queryClient.fetchQuery({ ...queries.captures(), staleTime: 0 }),
-				queryClient.fetchQuery({ ...queries.captureSummaries(), staleTime: 0 })
-			]);
+			const capture = await queryClient.fetchQuery({ ...queries.capture(captureId), staleTime: 0 });
 			lastCapture = capture;
+			patchKnownCaptureProjections(capture);
 			if (!expectedActiveProfileId || capture.activeFramingProfileId === expectedActiveProfileId) return capture;
 		}
 		throw new Error(

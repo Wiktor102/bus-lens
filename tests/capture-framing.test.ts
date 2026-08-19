@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	appendLivePreview,
+	captureProjectionToken,
 	frameWidth,
 	hexByte,
 	makeMessage,
@@ -12,6 +13,7 @@ import {
 	parseTime,
 	rebuildPreview,
 	signature,
+	type Capture,
 	visibleByteEntries,
 	visibleMessages,
 	visiblePositionForRawByte
@@ -26,6 +28,27 @@ function capture(values: number[], timestamps = values.map((_, index) => index))
 		notes: []
 	};
 }
+
+test("capture projection tokens use authoritative revisions instead of capture serialization", () => {
+	const current = {
+		activeFramingProfileId: "profile-1",
+		dataRevision: 4,
+		contentRevision: 7,
+		retainedStartOffset: 12,
+		messages: [{ bytes: Array.from({ length: 50_000 }, () => 0) }]
+	} as Capture;
+	const initial = captureProjectionToken(current);
+
+	current.updatedAt = "metadata-only";
+	current.metadataRevision = 3;
+	assert.equal(captureProjectionToken(current), initial);
+
+	current.activeFramingProfileId = "profile-2";
+	assert.notEqual(captureProjectionToken(current), initial);
+	current.activeFramingProfileId = "profile-1";
+	current.contentRevision = 8;
+	assert.notEqual(captureProjectionToken(current), initial);
+});
 
 test("creates messages and parses monitor timestamps", () => {
 	const message = makeMessage("0a ff 01", 1234, 7);

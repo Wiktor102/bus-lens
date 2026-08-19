@@ -113,6 +113,22 @@ export type Capture = Omit<CaptureSummaryData, "notes"> & {
 	framingDraftRevision?: number;
 };
 
+/**
+ * The server-owned versions that identify the active byte/frame projection.
+ * Metadata and framing drafts are intentionally excluded: neither changes the
+ * materialized stream. This is deliberately scalar so refresh reconciliation
+ * never serializes a capture document.
+ */
+export function captureProjectionToken(capture: Capture | undefined): string {
+	if (!capture) return "";
+	return [
+		capture.activeFramingProfileId ?? "",
+		Number.isSafeInteger(capture.dataRevision) ? capture.dataRevision : "",
+		Number.isSafeInteger(capture.contentRevision) ? capture.contentRevision : "",
+		Number.isSafeInteger(capture.retainedStartOffset) ? capture.retainedStartOffset : ""
+	].join("|");
+}
+
 export type PreviewByteRecord = RawByteRecord & { rawPosition: number };
 type ExistingMessage = { id?: string; hidden: boolean };
 

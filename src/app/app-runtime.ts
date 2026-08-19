@@ -47,6 +47,10 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 	const archive = dependencies.archive;
 	let activeId: string | null | undefined = applicationStore.select(selectSelectedCaptureId);
 	let activeCapture: Capture | undefined;
+	// Query owns durable snapshots; this map owns the mutable projections used by
+	// the runtime and controllers. Reframes replace the existing graph in place
+	// so consumers keep one stable object without sharing Query arrays.
+	const ownedCaptures = new Map<string, Capture>();
 	let unloading = false;
 	const captureStatuses = new Map<string, CanonicalCaptureSummary["status"]>();
 	const activeCaptureWrites = new Map<string, Promise<unknown>>();
@@ -54,6 +58,8 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 
 	function cachedCapture(captureId: string | null | undefined): Capture | undefined {
 		if (!captureId) return undefined;
+		const owned = ownedCaptures.get(String(captureId));
+		if (owned) return owned;
 		if (activeCapture && String(activeCapture.id) === String(captureId)) return activeCapture;
 		return archive?.reads.capture(String(captureId));
 	}
@@ -61,15 +67,28 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 	function setActiveCapture(capture: Capture | undefined): void {
 		activeCapture = capture;
 		if (capture?.id !== undefined) {
+			ownedCaptures.set(String(capture.id), capture);
 			activeId = String(capture.id);
 			applicationStore.send({ type: "capture/selected-changed", captureId: activeId });
 		}
 	}
 
+	function ownCapture(source: Capture): Capture {
+		const id = String(source.id ?? "");
+		const copy = structuredClone(source);
+		const existing = id ? ownedCaptures.get(id) : undefined;
+		if (existing) {
+			Object.assign(existing, copy);
+			return existing;
+		}
+		if (id) ownedCaptures.set(id, copy);
+		return copy;
+	}
+
 	async function loadCapture(captureId: string): Promise<Capture | undefined> {
 		const id = String(captureId);
 		const loaded = archive ? await archive.commands.getCapture(id) : cachedCapture(id);
-		const capture = loaded ? structuredClone(loaded) : undefined;
+		const capture = loaded ? ownCapture(loaded) : undefined;
 		if (capture && String(activeId) === id) activeCapture = capture;
 		return capture;
 	}
@@ -156,8 +175,9 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 			const refreshed = await archive.commands.refreshCapture(captureId, expectedActiveProfileId);
 			const status = getCaptureStorageStatus(captureId);
 			if (status) captureStatuses.set(String(captureId), status);
-			if (String(activeId) === String(captureId)) activeCapture = structuredClone(refreshed);
-			return refreshed;
+			const owned = ownCapture(refreshed);
+			if (String(activeId) === String(captureId)) activeCapture = owned;
+			return owned;
 		},
 		getCanonicalizationPreflight: captureId => archive
 			? archive.commands.getCanonicalizationPreflight(captureId)

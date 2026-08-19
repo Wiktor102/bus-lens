@@ -106,6 +106,83 @@ test("reconstructs authoritative archive queries after reload", async () => {
 	assert.equal(layer.queryClient.getQueryData(layer.queries.captures().queryKey)?.[0]?.name, "Stored");
 });
 
+test("authoritative refresh fetches only the active capture and patches cached sidebar projections", async () => {
+	const server = emptyServer();
+	server.state.captures = [{
+		id: "capture-1",
+		name: "Before",
+		description: "before",
+		view: "binary",
+		folderId: null,
+		params: [{ key: "mode", value: "before" }],
+		storageStatus: "canonical",
+		lifecycle: "finalized",
+		byteCount: 1,
+		createdAt: "created",
+		updatedAt: "before",
+		dataRevision: 1,
+		contentRevision: 1,
+		activeFramingProfileId: "profile-1",
+		byteStream: [{ value: 1, timestamp: 1 }],
+		messages: [{ id: "frame-1", timestamp: 1, bytes: [1], hidden: false }],
+		notes: [],
+		annotations: {},
+		patternRemarks: {}
+	}];
+	const client = createTestClient(server);
+	let detailLoads = 0;
+	let listLoads = 0;
+	let summaryLoads = 0;
+	client.loadCapture = async () => {
+		detailLoads += 1;
+		return structuredClone(server.state.captures[0]);
+	};
+	client.listCaptures = async () => {
+		listLoads += 1;
+		return structuredClone(server.state.captures);
+	};
+	client.listCaptureSummaries = async () => {
+		summaryLoads += 1;
+		return server.state.captures.map(capture => ({
+			id: String(capture.id),
+			status: "legacy-not-canonicalized" as const,
+			name: String(capture.name ?? ""),
+			lifecycle: String(capture.lifecycle ?? ""),
+			byteCount: capture.byteStream?.length ?? 0,
+			createdAt: String(capture.createdAt ?? ""),
+			updatedAt: String(capture.updatedAt ?? ""),
+			folderId: capture.folderId ?? null
+		}));
+	};
+
+	const layer = createArchiveDataLayer(createTestQueryClient(), client);
+	await layer.ready;
+	listLoads = 0;
+	summaryLoads = 0;
+	server.state.captures[0] = {
+		...server.state.captures[0],
+		name: "After",
+		updatedAt: "after",
+		byteCount: 3,
+		messages: [
+			{ id: "frame-1", timestamp: 1, bytes: [1], hidden: false },
+			{ id: "frame-2", timestamp: 2, bytes: [2], hidden: false }
+		],
+		byteStream: [{ value: 1, timestamp: 1 }, { value: 2, timestamp: 2 }, { value: 3, timestamp: 3 }],
+		activeFramingProfileId: "profile-2"
+	};
+
+	await layer.commands.refreshCapture("capture-1", "profile-2");
+
+	assert.equal(detailLoads, 1);
+	assert.equal(listLoads, 0);
+	assert.equal(summaryLoads, 0);
+	assert.equal(layer.queryClient.getQueryData(layer.queries.captures().queryKey)?.[0]?.name, "After");
+	assert.equal(layer.queryClient.getQueryData(layer.queries.captures().queryKey)?.[0]?.messageCount, 2);
+	assert.equal(layer.queryClient.getQueryData(layer.queries.captureSummaries().queryKey)?.[0]?.name, "After");
+	assert.equal(layer.queryClient.getQueryData(layer.queries.captureSummaries().queryKey)?.[0]?.updatedAt, "after");
+});
+
 test("rolls back a failed archive-index mutation and permits retry", async () => {
 	const server = emptyServer();
 	server.index = { activeId: null, unfiledCollapsed: false, captures: [], folders: [] };

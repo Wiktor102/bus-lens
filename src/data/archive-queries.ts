@@ -146,6 +146,43 @@ export function normalizeArchiveSettings(settings: Partial<SendSettings> | undef
 	};
 }
 
+/**
+ * Derive the byte-free sidebar representation from either a full capture
+ * document or an already projected list item. Keeping this outside the query
+ * factory lets command results update the list without refetching it.
+ */
+export function captureListItem(capture: Capture | CaptureListItem): CaptureListItem {
+	const source = capture as Capture & CaptureListItem & { parameters?: unknown };
+	const parameters = Array.isArray(source.params)
+		? source.params
+		: Array.isArray(source.parameters)
+			? source.parameters
+			: [];
+	return {
+		id: String(source.id ?? ""),
+		name: String(source.name ?? "Untitled capture"),
+		description: String(source.description ?? ""),
+		view: String(source.view ?? ""),
+		folderId: source.folderId ? String(source.folderId) : null,
+		params: parameters.flatMap(parameter => {
+			if (!parameter || typeof parameter !== "object") return [];
+			const value = parameter as { key?: unknown; value?: unknown };
+			const key = String(value.key ?? "").trim();
+			return key ? [{ key, value: String(value.value ?? "") }] : [];
+		}),
+		messageCount: Number.isSafeInteger(source.messageCount)
+			? Math.max(0, Number(source.messageCount))
+			: Array.isArray(source.messages)
+				? source.messages.filter(message => !message.hidden).length
+				: 0,
+		...(source.storageStatus ? { storageStatus: source.storageStatus } : {}),
+		...(source.lifecycle === undefined ? {} : { lifecycle: String(source.lifecycle) }),
+		...(source.byteCount === undefined ? {} : { byteCount: Number(source.byteCount) }),
+		...(source.createdAt === undefined ? {} : { createdAt: String(source.createdAt) }),
+		...(source.updatedAt === undefined ? {} : { updatedAt: String(source.updatedAt) })
+	};
+}
+
 export type ArchiveMutationCachePolicy = {
 	[Name in ArchiveMutationName]: (
 		variables: ArchiveMutationVariables<Name>,
@@ -222,38 +259,6 @@ export function createArchiveMutationSuccessHandler<Name extends ArchiveMutation
 }
 
 export function createArchiveQueryOptions(client: ArchiveQuerySource) {
-	function captureListItem(capture: Capture | CaptureListItem): CaptureListItem {
-		const source = capture as Capture & CaptureListItem & { parameters?: unknown };
-		const parameters = Array.isArray(source.params)
-			? source.params
-			: Array.isArray(source.parameters)
-				? source.parameters
-				: [];
-		return {
-			id: String(source.id ?? ""),
-			name: String(source.name ?? "Untitled capture"),
-			description: String(source.description ?? ""),
-			view: String(source.view ?? ""),
-			folderId: source.folderId ? String(source.folderId) : null,
-			params: parameters.flatMap(parameter => {
-				if (!parameter || typeof parameter !== "object") return [];
-				const value = parameter as { key?: unknown; value?: unknown };
-				const key = String(value.key ?? "").trim();
-				return key ? [{ key, value: String(value.value ?? "") }] : [];
-			}),
-			messageCount: Number.isSafeInteger(source.messageCount)
-				? Math.max(0, Number(source.messageCount))
-				: Array.isArray(source.messages)
-					? source.messages.filter(message => !message.hidden).length
-					: 0,
-			...(source.storageStatus ? { storageStatus: source.storageStatus } : {}),
-			...(source.lifecycle === undefined ? {} : { lifecycle: String(source.lifecycle) }),
-			...(source.byteCount === undefined ? {} : { byteCount: Number(source.byteCount) }),
-			...(source.createdAt === undefined ? {} : { createdAt: String(source.createdAt) }),
-			...(source.updatedAt === undefined ? {} : { updatedAt: String(source.updatedAt) })
-		};
-	}
-
 	return {
 		snapshot: () => queryOptions<AppState, Error, AppState, ReturnType<typeof archiveQueryKeys.snapshot>>({
 			queryKey: archiveQueryKeys.snapshot(),
