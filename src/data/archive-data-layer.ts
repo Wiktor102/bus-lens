@@ -498,16 +498,11 @@ export function createArchiveDataLayer(
 			patchNoteCaches(request.captureId, result, request.noteId);
 			return result;
 		},
-		setByteVisibility: async request => {
-			const result = await client.setByteVisibility(request);
-			await refreshCapture(request.captureId);
-			return result;
-		},
-		setFrameVisibility: async request => {
-			const result = await client.setFrameVisibility(request);
-			await refreshCapture(request.captureId);
-			return result;
-		},
+		// The interaction controller owns the single authoritative refresh after
+		// applying and tracking its optimistic visibility change. Refreshing here
+		// as well fetched and parsed the complete capture twice per click.
+		setByteVisibility: request => client.setByteVisibility(request),
+		setFrameVisibility: request => client.setFrameVisibility(request),
 		startCanonicalization: captureId => run("startCanonicalization", captureId, () => client.startCanonicalization(captureId)),
 		getCanonicalizationPreflight: captureId => queryClient.fetchQuery({ ...queries.canonicalizationPreflight(captureId), staleTime: 0 }),
 		getCanonicalizationJob: (captureId, jobId) => queryClient.fetchQuery({ ...queries.canonicalizationJob(captureId, jobId), staleTime: 0 }),

@@ -374,3 +374,35 @@ test("note mutations do not await optional notes revalidation", async () => {
 		unsubscribe();
 	}
 });
+
+test("visibility commands leave the authoritative refresh to the interaction owner", async () => {
+	const server = emptyServer();
+	const client = createTestClient(server);
+	let completeCaptureLoads = 0;
+	client.loadCapture = async captureId => {
+		completeCaptureLoads += 1;
+		return { id: captureId, messages: [], byteStream: [] };
+	};
+	client.setByteVisibility = async request => ({
+		captureId: request.captureId,
+		startRawOffset: request.rawOffset,
+		endRawOffset: request.rawOffset,
+		hidden: request.hidden,
+		contentRevision: 1
+	});
+	client.setFrameVisibility = async request => ({
+		captureId: request.captureId,
+		frameId: request.frameId,
+		startRawOffset: 0,
+		endRawOffset: 1,
+		hidden: request.hidden,
+		contentRevision: 2
+	});
+	const layer = createArchiveDataLayer(createTestQueryClient(), client);
+	await layer.ready;
+
+	await layer.commands.setByteVisibility({ captureId: "capture-1", rawOffset: 7, hidden: true });
+	await layer.commands.setFrameVisibility({ captureId: "capture-1", frameId: "frame-1", hidden: true });
+
+	assert.equal(completeCaptureLoads, 0);
+});
