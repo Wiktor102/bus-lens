@@ -60,7 +60,7 @@ export type CaptureControllerDependencies = {
 	setSelectedCaptureId?: (captureId: string | null) => void;
 	trackCaptureWrite?: (captureId: string, write: Promise<unknown>) => void;
 	archiveCommands?: ArchiveCommands;
-	render: () => void;
+	render: (options?: CaptureRenderOptions) => void;
 	renderMessages: (options?: MessageStreamDeriveOptions) => void;
 	showToast: (message: string) => void;
 	confirm: (message: string) => boolean;
@@ -76,11 +76,11 @@ export type CaptureControllerDependencies = {
 	setCaptureStorageStatus?: (captureId: string, status: "legacy-not-canonicalized" | "converting" | "canonical" | "canonicalization-failed") => void;
 	openCanonicalization?: (captureId: string) => void;
 	refreshCapture?: (captureId: string, expectedActiveProfileId?: string) => Promise<Capture>;
-	seedSectionViewState?: (captureId: string, sections: readonly SectionViewPreferenceSeed[]) => void;
+	seedSectionViewState?: (captureId: string, sections: readonly SectionViewPreferenceSeed[]) => boolean | void;
 	getSectionViewPreference?: (captureId: string, rawStart: number) => SectionViewPreference | undefined;
 	setSectionViewState?: (captureId: string, rawStart: number, patch: SectionViewPreferencePatch) => void;
-	copySectionViewState?: (captureId: string, fromRawStart: number, toRawStart: number) => void;
-	reconcileSectionViewState?: (captureId: string, rawStarts: readonly number[]) => void;
+	copySectionViewState?: (captureId: string, fromRawStart: number, toRawStart: number) => boolean | void;
+	reconcileSectionViewState?: (captureId: string, rawStarts: readonly number[]) => boolean | void;
 	clearSectionViewState?: (captureId: string) => void;
 	reportPersistenceFailure?: (captureId: string, error: unknown) => void;
 };
@@ -106,6 +106,10 @@ type ControllerCompatibilityState = {
 	captures: ActiveCapture[];
 	folders: StoredFolder[];
 	unfiledCollapsed?: boolean;
+};
+
+type CaptureRenderOptions = {
+	skipMessageStream?: boolean;
 };
 
 type CaptureWriteQueue = {
@@ -237,19 +241,18 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const pending = sections.filter(section => !seededStarts?.has(section.rawStart));
 		seededSectionStarts.set(captureId, currentStarts);
 		if (!pending.length) return false;
-		dependencies.seedSectionViewState(captureId, pending);
-		return true;
+		return dependencies.seedSectionViewState(captureId, pending) === true;
 	}
 
-	function reconcileSectionViewPreferences(item: Capture | undefined): void {
-		if (!item?.id || !dependencies.reconcileSectionViewState) return;
-		dependencies.reconcileSectionViewState(
+	function reconcileSectionViewPreferences(item: Capture | undefined): boolean {
+		if (!item?.id || !dependencies.reconcileSectionViewState) return false;
+		return dependencies.reconcileSectionViewState(
 			String(item.id),
 			(item.frameSections || []).map(section => Number(section.start ?? 0))
-		);
+		) === true;
 	}
 
-	function installAuthoritativeCapture(captureId: string, refreshed: Capture, projectionChanged: boolean): void {
+	function installAuthoritativeCapture(captureId: string, refreshed: Capture, projectionChanged: boolean): boolean {
 		const current = capture();
 		// The runtime has already transferred this refresh into its single owned
 		// mutable projection. Never clone the full graph again in the controller.
@@ -266,7 +269,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			String(dependencies.getActiveId() ?? "") === captureId &&
 			(projectionChanged || activeProjection !== current)
 		) dependencies.setActiveCapture?.(activeProjection);
-		seedSectionViewPreferences(activeProjection);
+		return seedSectionViewPreferences(activeProjection);
 	}
 
 	function applyPendingFraming(captureId: string, sections: readonly FramingSectionRequest[]): void {
@@ -274,15 +277,22 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (!item) return;
 		applyFramingSnapshot(item, sections);
 		rebuildPreview(item);
-		dependencies.render();
+		dependencies.renderMessages();
 	}
 
-	async function refreshAuthoritativeCapture(
+	type AuthoritativeRefreshResult = {
+		capture: Capture;
+		projectionChanged: boolean;
+		viewStateChanged: boolean;
+		pendingIntentApplied: boolean;
+	};
+
+	async function refreshAuthoritativeCaptureState(
 		captureId: string,
 		preserveIntent = true,
 		expectedActiveProfileId?: string,
 		reconcileViewState = !preserveIntent
-	): Promise<Capture> {
+	): Promise<AuthoritativeRefreshResult> {
 		if (!dependencies.refreshCapture) throw new Error("capture refresh is unavailable");
 		const previousProjectionToken = captureProjectionToken(capture());
 		const refreshed = await dependencies.refreshCapture(captureId, expectedActiveProfileId);
@@ -292,24 +302,43 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				`expected ${expectedActiveProfileId}`
 			);
 		}
-		// Keep the comparison scalar and explicit. The result is intentionally
-		// not used to decide installation: a failed optimistic command still
-		// needs the complete authoritative graph copied into the owned object.
 		const projectionChanged = previousProjectionToken !== captureProjectionToken(refreshed);
-		installAuthoritativeCapture(captureId, refreshed, projectionChanged);
+		let viewStateChanged = installAuthoritativeCapture(captureId, refreshed, projectionChanged);
 		// A move is staged as a copy and a delete keeps its old locator until the
 		// framing command is acknowledged. Reconcile only after an authoritative
 		// refresh that is not carrying a newer queued intent; otherwise the retry
 		// projection would discard the staged locator before it can be acknowledged.
 		if (reconcileViewState && !framingCoordinator.pendingIntent(captureId)) {
-			reconcileSectionViewPreferences(refreshed);
+			viewStateChanged = reconcileSectionViewPreferences(refreshed) || viewStateChanged;
 		}
 		framingCoordinator.acknowledgeAuthoritativeRefresh(captureId);
+		let pendingIntentApplied = false;
 		if (preserveIntent) {
 			const intent = framingCoordinator.pendingIntent(captureId) || framingCoordinator.activeIntent(captureId);
-			if (intent) applyPendingFraming(captureId, intent);
+			if (intent) {
+				applyPendingFraming(captureId, intent);
+				pendingIntentApplied = true;
+			}
 		}
-		return refreshed;
+		return {
+			capture: refreshed,
+			projectionChanged,
+			viewStateChanged,
+			pendingIntentApplied
+		};
+	}
+
+	async function refreshAuthoritativeCapture(
+		captureId: string,
+		preserveIntent = true,
+		expectedActiveProfileId?: string,
+		reconcileViewState = !preserveIntent
+	): Promise<Capture> {
+		return (await refreshAuthoritativeCaptureState(captureId, preserveIntent, expectedActiveProfileId, reconcileViewState)).capture;
+	}
+
+	function renderAuthoritativeRefresh(result: AuthoritativeRefreshResult): void {
+		if (result.projectionChanged && !result.viewStateChanged && !result.pendingIntentApplied) dependencies.render();
 	}
 
 	function metadataPatchValue(item: ActiveCapture): CaptureMetadataPatch {
@@ -425,19 +454,23 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			// pre-command fetch may be deduplicated by QueryClient and return the
 			// previous profile, so the data layer refetches until this exact response
 			// identity is observed before the coordinator can unlock frame commands.
-			await refreshAuthoritativeCapture(captureId, false, reframe.profileId, true);
+			const refresh = await refreshAuthoritativeCaptureState(captureId, false, reframe.profileId, true);
+			renderAuthoritativeRefresh(refresh);
 		}
 	}
 
 	framingCoordinator = createFramingCoordinator({
 		write: writeFraming,
-		reload: (captureId, preserveIntent) => refreshAuthoritativeCapture(captureId, preserveIntent).then(() => undefined),
+		reload: async (captureId, preserveIntent) => {
+			const refresh = await refreshAuthoritativeCaptureState(captureId, preserveIntent);
+			renderAuthoritativeRefresh(refresh);
+		},
 		applyPending: applyPendingFraming,
 		onTerminalFailure: (captureId, error) => {
 			reportFailure(captureId, error);
 		},
 		onStateChange: captureId => {
-			if (String(dependencies.getActiveId() ?? "") === captureId) dependencies.render();
+			if (String(dependencies.getActiveId() ?? "") === captureId) dependencies.render({ skipMessageStream: true });
 		}
 	});
 
@@ -1097,9 +1130,9 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			collapsed: false
 		});
 		normalizeSections(c);
-		seedSectionViewPreferences(c);
 		rebuildPreview(c);
-		if (!persistFraming(c)) dependencies.render();
+		if (!seedSectionViewPreferences(c)) dependencies.renderMessages();
+		if (!persistFraming(c)) dependencies.render({ skipMessageStream: true });
 	}
 
 	function updateSectionFraming(sectionId: string, update: SectionFramingUpdate, toast: (section: ActiveCaptureSection) => string) {
@@ -1110,7 +1143,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (!section) return;
 		applySectionFramingSettings(section, update);
 		rebuildPreview(c);
-		if (!persistFraming(c)) dependencies.render();
+		dependencies.renderMessages();
+		if (!persistFraming(c)) dependencies.render({ skipMessageStream: true });
 		dependencies.showToast(toast(section));
 	}
 
@@ -1149,14 +1183,17 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const section = c.frameSections.find(item => item.id === sectionId);
 		const previousStart = section?.start;
 		if (!moveSectionStart(c, sectionId, action)) return;
+		rebuildPreview(c);
+		let viewStateChanged = false;
 		if (c.id && previousStart !== undefined && section?.start !== undefined) {
 			// Keep the acknowledged locator until the server accepts the new
 			// framing profile. The authoritative refresh will remove whichever
 			// locator is no longer present, including a failed optimistic move.
-			dependencies.copySectionViewState?.(String(c.id), previousStart, section.start);
+			viewStateChanged = dependencies.copySectionViewState?.(String(c.id), previousStart, section.start) === true;
 		}
-		rebuildPreview(c);
-		if (!persistFraming(c, true)) dependencies.render();
+		viewStateChanged = seedSectionViewPreferences(c) || viewStateChanged;
+		if (!viewStateChanged) dependencies.renderMessages();
+		if (!persistFraming(c, true)) dependencies.render({ skipMessageStream: true });
 		const label =
 			action === "byte-before"
 				? "one byte before"
@@ -1176,7 +1213,8 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (index <= 0) return;
 		c.frameSections.splice(index, 1);
 		rebuildPreview(c);
-		if (!persistFraming(c, true)) dependencies.render();
+		if (!seedSectionViewPreferences(c)) dependencies.renderMessages();
+		if (!persistFraming(c, true)) dependencies.render({ skipMessageStream: true });
 	}
 
 	function setSectionCollapse(sectionId: string, collapseRuns: boolean) {
