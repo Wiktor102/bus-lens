@@ -321,6 +321,29 @@ test("omits hidden raw bytes before framing and keeps visible-byte positions exp
 	assert.deepEqual(visibleMessages(current).map(item => item.bytes), [[4, 5]]);
 });
 
+test("migrates legacy hidden bytes without searching the raw stream per framed byte", () => {
+	const current = capture(Array.from({ length: 1_000 }, (_, index) => index % 256));
+	current.frameSize = 2;
+	rebuildPreview(current);
+	current.messages[250].hiddenBytes![1] = true;
+
+	let rawStreamSearches = 0;
+	const byteStream = current.byteStream!;
+	const find = byteStream.find;
+	Object.defineProperty(byteStream, "find", {
+		configurable: true,
+		value(...args: Parameters<typeof find>) {
+			rawStreamSearches += 1;
+			return find.apply(this, args);
+		}
+	});
+
+	normalizeCapture(current);
+
+	assert.equal(rawStreamSearches, 0);
+	assert.equal(byteStream[501].hidden, true);
+});
+
 test("reuses message IDs when a raw range is rebuilt unchanged", () => {
 	const current = capture([9, 8, 7, 6]);
 	current.frameSize = 2;

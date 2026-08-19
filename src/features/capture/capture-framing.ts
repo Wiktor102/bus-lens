@@ -314,15 +314,23 @@ export function normalizeCapture(capture: Capture, generateId = createId): Captu
 	});
 	normalizeRawOffsets(capture);
 	// Older exports stored byte visibility on framed messages rather than raw
-	// byte records. Copy it across before the preview is rebuilt.
+	// byte records. Collect those offsets once before walking the raw stream;
+	// searching the full stream once per framed byte makes every subsequent
+	// preview rebuild quadratic on large captures.
+	const legacyHiddenRawOffsets = new Set<number>();
 	capture.messages.forEach(message => {
 		if (!Number.isInteger(message._byteStart) && !Array.isArray(message.rawOffsets) && !Array.isArray(message._rawPositions)) return;
 		message.hiddenBytes?.forEach((hidden, index) => {
+			if (!hidden) return;
 			const rawPosition = message.rawOffsets?.[index] ?? message._rawPositions?.[index] ?? (message._byteStart as number) + index;
-			const rawByte = capture.byteStream?.find(record => record.rawOffset === rawPosition);
-				if (hidden && rawByte) rawByte.hidden = true;
+			legacyHiddenRawOffsets.add(rawPosition);
 		});
 	});
+	if (legacyHiddenRawOffsets.size) {
+		capture.byteStream.forEach(record => {
+			if (legacyHiddenRawOffsets.has(record.rawOffset!)) record.hidden = true;
+		});
+	}
 	if (!hasPersistedSections) {
 		capture.frameSections = migrateLegacySections(capture, legacyPreviewMode, generateId);
 	}
