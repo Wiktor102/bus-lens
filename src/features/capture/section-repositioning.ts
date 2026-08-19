@@ -26,16 +26,17 @@ type SectionState = NormalizedCaptureSection;
 type FramedMessageStarts = Map<string, number[]>;
 
 function effectiveSections(capture: Capture): SectionState[] {
-	const streamLength = capture.byteStream?.length || 0;
+	const stream = capture.byteStream || [];
+	const firstRawOffset = stream[0]?.rawOffset ?? 0;
+	const lastRawOffset = stream.at(-1)?.rawOffset ?? Math.max(0, stream.length - 1);
 	const sourceSections: CaptureSection[] = capture.frameSections?.length
 		? capture.frameSections
-		: [{ id: "section-0", start: 0, frameSize: capture.frameSize || DEFAULT_FRAME_SIZE, collapseRuns: false }];
-	const maxStart = Math.max(0, streamLength - 1);
+		: [{ id: "section-0", start: firstRawOffset, frameSize: capture.frameSize || DEFAULT_FRAME_SIZE, collapseRuns: false }];
 
 	return sourceSections
 		.map((section, index) => ({
 			id: String(section.id ?? `section-${index}`),
-			start: Math.max(0, Math.min(maxStart, Math.trunc(Number(section.start) || 0))),
+			start: Math.max(firstRawOffset, Math.min(lastRawOffset, Math.trunc(Number(section.start) || firstRawOffset))),
 			...normalizeSectionFramingSettings(section, capture.frameSections?.length ? DEFAULT_FRAME_SIZE : capture.frameSize || DEFAULT_FRAME_SIZE),
 			collapseRuns: Boolean(section.collapseRuns),
 			collapsed: Boolean(section.collapsed)
@@ -43,23 +44,21 @@ function effectiveSections(capture: Capture): SectionState[] {
 		.sort((left, right) => left.start - right.start);
 }
 
-function firstVisibleIndexAtOrAfter(rawPositions: number[], rawStart: number): number {
-	return rawPositions.findIndex(position => position >= rawStart);
-}
-
 function framedMessageStarts(capture: Capture, sections: SectionState[]): FramedMessageStarts {
 	const stream: PreviewByteRecord[] = (capture.byteStream || [])
-		.map((record, rawPosition) => ({ ...record, rawPosition }))
+		.map((record, retainedIndex) => ({ ...record, rawPosition: record.rawOffset ?? retainedIndex }))
 		.filter(record => !record.hidden);
-	const rawPositions = stream.map(record => record.rawPosition);
 	const starts: FramedMessageStarts = new Map();
+	let compactIndex = 0;
 
 	sections.forEach((section, sectionIndex) => {
-		const compactStart = firstVisibleIndexAtOrAfter(rawPositions, section.start);
+		while (compactIndex < stream.length && stream[compactIndex].rawPosition < section.start) compactIndex += 1;
+		const compactStart = compactIndex;
 		const nextSectionStart = sections[sectionIndex + 1]?.start;
-		const nextCompactStart =
-			nextSectionStart === undefined ? stream.length : firstVisibleIndexAtOrAfter(rawPositions, nextSectionStart);
-		const compactEnd = nextCompactStart < 0 ? stream.length : nextCompactStart;
+		if (nextSectionStart !== undefined) {
+			while (compactIndex < stream.length && stream[compactIndex].rawPosition < nextSectionStart) compactIndex += 1;
+		}
+		const compactEnd = nextSectionStart === undefined ? stream.length : compactIndex;
 		const sectionStarts: number[] = [];
 		if (compactStart >= 0 && compactStart < compactEnd) {
 			frameSectionRanges(stream, compactStart, compactEnd, section).forEach(([start]) => {
@@ -88,6 +87,7 @@ function unavailable(): SectionMoveAvailability {
  */
 export function precomputeSectionMoveMetadata(capture: Capture): SectionMoveMetadata {
 	const streamLength = capture.byteStream?.length || 0;
+	const retainedEnd = (capture.byteStream?.at(-1)?.rawOffset ?? Math.max(0, streamLength - 1)) + 1;
 	const sections = effectiveSections(capture);
 	const messageStarts = streamLength ? framedMessageStarts(capture, sections) : new Map<string, number[]>();
 	const metadata = new Map<string, SectionMoveMetadataEntry>();
@@ -96,14 +96,14 @@ export function precomputeSectionMoveMetadata(capture: Capture): SectionMoveMeta
 		const previous = sections[index - 1];
 		const next = sections[index + 1];
 		const lowerBoundary = previous?.start ?? -1;
-		const upperBoundary = next?.start ?? streamLength;
+		const upperBoundary = next?.start ?? retainedEnd;
 		const byteBefore = section.start - 1;
 		const byteAfter = section.start + 1;
 		const previousMessage = previous ? messageStarts.get(previous.id)?.at(-1) : undefined;
 		const nextMessage = messageStarts.get(section.id)?.[1];
 		const targets: SectionMoveTargets = {
 			"byte-before": byteBefore > lowerBoundary ? byteBefore : null,
-			"byte-after": byteAfter < upperBoundary && byteAfter < streamLength ? byteAfter : null,
+			"byte-after": byteAfter < upperBoundary ? byteAfter : null,
 			"message-before":
 				previousMessage !== undefined && previousMessage > (previous?.start ?? -1) && previousMessage < section.start
 					? previousMessage

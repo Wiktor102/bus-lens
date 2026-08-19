@@ -641,14 +641,19 @@ export function rebuildPreview(capture: Capture, generateId = createId): void {
 	const ranges: Array<[number, number, string?]> = [];
 	normalizeSections(capture, generateId);
 	const sections = capture.frameSections || [];
+	let streamIndex = 0;
 	sections.forEach((section, sectionIndex) => {
 		// Section starts are persisted as raw positions. Translate them to the
-		// compact stream so deleting bytes before a section shifts it naturally.
-		const start = stream.findIndex(record => record.rawPosition >= (section.start ?? 0));
+		// compact stream with one forward cursor so hundreds of sections do not
+		// each rescan the full capture.
+		while (streamIndex < stream.length && stream[streamIndex].rawPosition < (section.start ?? 0)) streamIndex += 1;
+		const start = streamIndex;
 		const nextRawStart = sections[sectionIndex + 1]?.start;
-		const nextStart = nextRawStart === undefined ? -1 : stream.findIndex(record => record.rawPosition >= nextRawStart);
-		const sectionEnd = nextStart < 0 ? stream.length : nextStart;
-		if (start < 0 || start >= sectionEnd) return;
+		if (nextRawStart !== undefined) {
+			while (streamIndex < stream.length && stream[streamIndex].rawPosition < nextRawStart) streamIndex += 1;
+		}
+		const sectionEnd = nextRawStart === undefined ? stream.length : streamIndex;
+		if (start >= sectionEnd) return;
 		frameSectionRanges(stream, start, sectionEnd, section).forEach(([rangeStart, rangeEnd]) => {
 			ranges.push([rangeStart, rangeEnd, section.id]);
 		});

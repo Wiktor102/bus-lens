@@ -140,6 +140,19 @@ test("precomputes section movement targets and availability from one metadata se
 	});
 });
 
+test("uses absolute raw offsets for retained capture movement", () => {
+	const current = capture();
+	current.byteStream = current.byteStream!.map((record, index) => ({ ...record, rawOffset: index + 100 }));
+	current.frameSections = current.frameSections!.map(section => ({ ...section, start: section.start! + 100 }));
+	rebuildPreview(current);
+	const metadata = precomputeSectionMoveMetadata(current);
+
+	assert.equal(getSectionMoveTargetFromMetadata(metadata, "payload", "byte-before"), 107);
+	assert.equal(getSectionMoveTargetFromMetadata(metadata, "payload", "message-before"), 106);
+	assert.equal(getSectionMoveTargetFromMetadata(metadata, "payload", "message-after"), 110);
+	assert.equal(getSectionMoveTargetFromMetadata(metadata, "tail", "byte-after"), 117);
+});
+
 test("new sections default to length framing while retaining useful preceding settings", () => {
 	const current = {
 		id: "capture-inherit",
