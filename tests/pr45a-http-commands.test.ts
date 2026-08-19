@@ -660,7 +660,8 @@ test("HTTP note CRUD preserves stable range raw-span evidence", async () => {
 		assert.equal(record(record(updatedBody.note ?? updatedBody).target).endRawOffset, 3);
 
 		const deleted = await request(`/api/captures/note-capture/notes/${encodeURIComponent(noteId)}`, { method: "DELETE" });
-		status(deleted, 204);
+		status(deleted, 200);
+		assert.equal(record(deleted.body).contentRevision, 3);
 		const afterDelete = await request("/api/captures/note-capture/notes");
 		status(afterDelete, 200);
 		assert.deepEqual(afterDelete.body, []);

@@ -290,8 +290,7 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 						}));
 					}
 					if (noteId && request.method === "DELETE") {
-						commandService.deleteNote({ captureId, noteId });
-						return send(response, 204, {});
+						return send(response, 200, commandService.deleteNote({ captureId, noteId }));
 					}
 				}
 				if (segments[3] === "bytes" && segments[4] && segments[5] === "visibility") {

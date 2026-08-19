@@ -489,7 +489,7 @@ export interface CaptureWriter {
 	listNotes(captureId: string): Promise<readonly CanonicalNote[]>;
 	createNote(request: CreateNoteRequest): Promise<NoteResponse>;
 	updateNote(request: UpdateNoteRequest): Promise<NoteResponse>;
-	deleteNote(request: DeleteNoteRequest): Promise<void>;
+	deleteNote(request: DeleteNoteRequest): Promise<ContentRevisionResponse>;
 	clearData(request: ClearCaptureDataRequest): Promise<ClearCaptureDataResponse>;
 	duplicate(request: DuplicateCaptureRequest): Promise<DuplicateCaptureResponse>;
 	delete(captureId: string): Promise<void>;
@@ -756,8 +756,8 @@ export class ArchiveClient implements CaptureWriter {
 		return requestJson<NoteResponse>(notePath(command.captureId, command.noteId), "PATCH", body);
 	}
 
-	async deleteNote(command: DeleteNoteRequest): Promise<void> {
-		await request<void>(notePath(command.captureId, command.noteId), { method: "DELETE" });
+	async deleteNote(command: DeleteNoteRequest): Promise<ContentRevisionResponse> {
+		return requestJson<ContentRevisionResponse>(notePath(command.captureId, command.noteId), "DELETE");
 	}
 
 	async clearData(command: ClearCaptureDataRequest): Promise<ClearCaptureDataResponse> {

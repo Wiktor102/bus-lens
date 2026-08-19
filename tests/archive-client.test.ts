@@ -59,6 +59,7 @@ test("canonical CaptureWriter commands use dedicated HTTP endpoints", async () =
 		const path = String(input);
 		const method = init?.method ?? "GET";
 		calls.push({ path, method, body: bodyOf(init) });
+		if (path.endsWith("/notes/note") && method === "DELETE") return jsonResponse({ contentRevision: 3 });
 		if (method === "DELETE") return new Response(null, { status: 204 });
 		if (path.endsWith("/notes") && method === "GET") return jsonResponse([]);
 		return jsonResponse({});
@@ -91,7 +92,7 @@ test("canonical CaptureWriter commands use dedicated HTTP endpoints", async () =
 		await client.listNotes("capture");
 		await client.createNote({ captureId: "capture", text: "note", target: { kind: "capture" } });
 		await client.updateNote({ captureId: "capture", noteId: "note", text: "updated" });
-		await client.deleteNote({ captureId: "capture", noteId: "note" });
+		assert.deepEqual(await client.deleteNote({ captureId: "capture", noteId: "note" }), { contentRevision: 3 });
 		await client.clearData({ captureId: "capture" });
 		await client.duplicate({ captureId: "capture", duplicateCaptureId: "copy" });
 		await client.delete("capture");
