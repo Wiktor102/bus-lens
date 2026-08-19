@@ -17,6 +17,7 @@ import type { RawByteRecord } from "./capture-summary.ts";
 import type { MessageStreamDeriveOptions } from "../message-stream/message-stream.ts";
 import {
 	applySectionFramingSettings,
+	bumpCaptureProjectionGeneration,
 	hexByte,
 	normalizeCapture,
 	normalizeSections,
@@ -259,6 +260,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		const mutableCurrent = current && String(current.id) === captureId ? current : undefined;
 		if (mutableCurrent && mutableCurrent !== refreshed) Object.assign(mutableCurrent, refreshed);
 		const activeProjection = mutableCurrent || refreshed;
+		if (projectionChanged) bumpCaptureProjectionGeneration(activeProjection);
 		if (compatibilityState) {
 			const index = compatibilityState.captures.findIndex(item => String(item.id) === captureId);
 			if (index >= 0 && compatibilityState.captures[index] !== activeProjection) {
@@ -593,6 +595,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 						...(queue.noteId ? { noteId: queue.noteId } : {})
 					};
 				} else delete current.patternRemarks[patternKey];
+				bumpCaptureProjectionGeneration(current);
 			}
 			dependencies.renderMessages();
 		} catch (refreshError) {
@@ -879,6 +882,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			end,
 			targetLabel: `rows ${start}–${end}`
 		});
+		bumpCaptureProjectionGeneration(c);
 		const optimistic = notes.at(-1)!;
 		if (isCanonical(c) && c.activeFramingProfileId) {
 			const operation = dependencies.archiveCommands
@@ -908,6 +912,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				c.contentRevision = result.contentRevision;
 			}).catch(error => reconcileFailure(c.id, error, () => {
 				c.notes = notes.filter(note => note !== optimistic);
+				bumpCaptureProjectionGeneration(c);
 				dependencies.render();
 			}));
 		} else persistLegacyCapture(c);
@@ -963,7 +968,10 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				.then(() => dependencies.refreshCapture?.(String(copy.id)))
 				.then(refreshed => {
 					if (refreshed) {
-						if (compatibilityState) Object.assign(copy, refreshed);
+						if (compatibilityState) {
+							Object.assign(copy, refreshed);
+							bumpCaptureProjectionGeneration(copy);
+						}
 						dependencies.setActiveCapture?.(refreshed);
 					}
 					dependencies.render();
@@ -1051,6 +1059,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			c.messages = [];
 			c.annotations = {};
 			c.patternRemarks = {};
+			bumpCaptureProjectionGeneration(c);
 			if (isCanonical(c)) {
 				const operation = dependencies.archiveCommands
 					? dependencies.archiveCommands.clearCaptureData(c.id)
@@ -1282,9 +1291,12 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 					dependencies.trackCaptureWrite?.(String(c.id), createWrite);
 					void createWrite
 						.then(() => dependencies.refreshCapture?.(String(c.id)))
-				.then(refreshed => {
+					.then(refreshed => {
 						if (refreshed) {
-							if (compatibilityState) Object.assign(c, refreshed);
+							if (compatibilityState) {
+								Object.assign(c, refreshed);
+								bumpCaptureProjectionGeneration(c);
+							}
 							dependencies.setActiveCapture?.(refreshed);
 						}
 						persistArchiveIndex();
@@ -1455,6 +1467,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			...(previousNoteId ? { noteId: previousNoteId } : {})
 		};
 		else delete c.patternRemarks[input.patternKey];
+		bumpCaptureProjectionGeneration(c);
 		if (isCanonical(c)) {
 			queuePatternRemarkWrite(c.id, input.patternKey, text, previousNoteId);
 		} else persistLegacyCapture(c);

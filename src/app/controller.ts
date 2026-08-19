@@ -1,6 +1,10 @@
 import { createAppRuntime } from "./app-runtime.ts";
 import { download } from "../features/data-transfer/browser-download.ts";
-import { rebuildPreview, visibleByteEntries } from "../features/capture/capture-framing.ts";
+import {
+	bumpCaptureProjectionGeneration,
+	rebuildPreview,
+	visibleByteEntries
+} from "../features/capture/capture-framing.ts";
 import { createCaptureController } from "../features/capture/capture-controller.ts";
 import { createDataTransferController } from "../features/data-transfer/data-transfer.ts";
 import { publishDialogCommand } from "../features/dialogs/dialog-bridge.ts";
@@ -437,6 +441,7 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 			}
 			const previousHidden = Boolean(message.hidden);
 			message.hidden = true;
+			bumpCaptureProjectionGeneration(capture);
 			if (capture?.id && runtime.isCanonicalCapture(String(capture.id))) {
 				const operation = options.archive
 					? options.archive.commands.setFrameVisibility({
@@ -451,11 +456,15 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 					});
 				const persistence = operation.then(async result => {
 					capture.contentRevision = result.contentRevision;
-					if (options.archive) Object.assign(capture, await runtime.refreshCapture(String(capture.id)));
+					if (options.archive) {
+						Object.assign(capture, await runtime.refreshCapture(String(capture.id)));
+						bumpCaptureProjectionGeneration(capture);
+					}
 				});
 				runtime.trackCaptureWrite(String(capture.id), persistence);
 				void persistence.catch(error => {
 					message.hidden = previousHidden;
+					bumpCaptureProjectionGeneration(capture);
 					publishPersistenceError({
 						visible: true,
 						captureId: String(capture.id),
@@ -468,6 +477,7 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 			} else if (options.archive) {
 				void options.archive.commands.saveLegacyCapture(capture).catch(error => {
 					message.hidden = previousHidden;
+					bumpCaptureProjectionGeneration(capture);
 					snapshots.render();
 					runtime.showToast(`Message could not be hidden: ${error instanceof Error ? error.message : String(error)}`);
 				});
@@ -512,7 +522,10 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 					});
 				const persistence = operation.then(async result => {
 					capture.contentRevision = result.contentRevision;
-					if (options.archive) Object.assign(capture, await runtime.refreshCapture(String(capture.id)));
+					if (options.archive) {
+						Object.assign(capture, await runtime.refreshCapture(String(capture.id)));
+						bumpCaptureProjectionGeneration(capture);
+					}
 				});
 				runtime.trackCaptureWrite(String(capture.id), persistence);
 				void persistence.catch(error => {

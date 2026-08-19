@@ -129,6 +129,36 @@ export function captureProjectionToken(capture: Capture | undefined): string {
 	].join("|");
 }
 
+export type CaptureProjectionMutation = "replace" | "append";
+
+type CaptureProjectionState = {
+	generation: number;
+	mutation: CaptureProjectionMutation;
+};
+
+// Projection generations are runtime metadata. Keeping them outside Capture
+// prevents the cache's invalidation bookkeeping from leaking into persisted
+// capture documents while still giving every mutable capture a monotonic epoch.
+const captureProjectionState = new WeakMap<object, CaptureProjectionState>();
+
+export function captureProjectionGeneration(capture: Capture): number {
+	return captureProjectionState.get(capture)?.generation || 0;
+}
+
+export function captureProjectionMutation(capture: Capture): CaptureProjectionMutation {
+	return captureProjectionState.get(capture)?.mutation || "replace";
+}
+
+/** Call once for every mutation that can affect message-stream analysis. */
+export function bumpCaptureProjectionGeneration(
+	capture: Capture,
+	mutation: CaptureProjectionMutation = "replace"
+): number {
+	const generation = captureProjectionGeneration(capture) + 1;
+	captureProjectionState.set(capture, { generation, mutation });
+	return generation;
+}
+
 export type PreviewByteRecord = RawByteRecord & { rawPosition: number };
 type ExistingMessage = { id?: string; hidden: boolean };
 
@@ -527,6 +557,10 @@ function appendMarkerEndFramedPreview(
  * context, such as a marker-start section or a newly introduced section.
  */
 export function appendLivePreview(capture: Capture, previousByteStreamLength: number, generateId = createId): boolean {
+	const markAppended = (result: boolean): boolean => {
+		if (result) bumpCaptureProjectionGeneration(capture, "append");
+		return result;
+	};
 	const stream = capture.byteStream || [];
 	if (previousByteStreamLength < 0 || previousByteStreamLength > stream.length) return false;
 	const sections = capture.frameSections || [];
@@ -557,14 +591,14 @@ export function appendLivePreview(capture: Capture, previousByteStreamLength: nu
 			const rawPosition = record.rawOffset ?? 0;
 			return rawPosition >= sectionStart;
 		})) return false;
-		return appendLengthFramedPreview(capture, section, appended, sectionMessages, generateId);
+		return markAppended(appendLengthFramedPreview(capture, section, appended, sectionMessages, generateId));
 	}
 	if (settings.framingMode === "time") {
 		if (!sectionMessages.length && stream.slice(0, previousByteStreamLength).some(record => {
 			const rawPosition = record.rawOffset ?? 0;
 			return rawPosition >= sectionStart;
 		})) return false;
-		return appendTimeFramedPreview(capture, section, appended, sectionMessages, generateId);
+		return markAppended(appendTimeFramedPreview(capture, section, appended, sectionMessages, generateId));
 	}
 	if (!sectionMessages.length) {
 		// A marker-end section has no visible messages until its first marker.
@@ -582,12 +616,13 @@ export function appendLivePreview(capture: Capture, previousByteStreamLength: nu
 			const candidate = markerCandidate[index + markerIndex]?.value;
 			return candidate === value;
 		}))) return false;
-		return true;
+		return markAppended(true);
 	}
-	return appendMarkerEndFramedPreview(capture, section, appended, sectionMessages, generateId);
+	return markAppended(appendMarkerEndFramedPreview(capture, section, appended, sectionMessages, generateId));
 }
 
 export function rebuildPreview(capture: Capture, generateId = createId): void {
+	bumpCaptureProjectionGeneration(capture);
 	normalizeCapture(capture, generateId);
 	// A hidden byte is omitted before framing, rather than merely omitted while
 	// rendering. This makes every framing mode behave exactly as though the byte

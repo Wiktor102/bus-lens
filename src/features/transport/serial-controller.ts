@@ -3,7 +3,12 @@ import type { ArchiveIndex } from "../../persistence/archive-client.ts";
 import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
 import type { ApplicationEvent, RecordingWorkflowState, TransportViewState } from "../../shared/application-store.ts";
 import { recordReceivedByte } from "../capture/capture-summary.ts";
-import { appendLivePreview, rebuildPreview, type Capture } from "../capture/capture-framing.ts";
+import {
+	appendLivePreview,
+	bumpCaptureProjectionGeneration,
+	rebuildPreview,
+	type Capture
+} from "../capture/capture-framing.ts";
 import type { MessageStreamDeriveOptions } from "../message-stream/message-stream.ts";
 import {
 	CaptureAppendQueue,
@@ -262,7 +267,10 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			const refreshed = await refreshCapture(captureId);
 			if (applyToRuntime) {
 				const capture = captureById(captureId);
-				if (capture) Object.assign(capture, refreshed);
+				if (capture) {
+					Object.assign(capture, refreshed);
+					bumpCaptureProjectionGeneration(capture);
+				}
 			}
 		});
 		projectionRefresh = next.catch(() => {});

@@ -5,6 +5,8 @@ import {
 	signature,
 	visibleByteEntries,
 	visibleMessages,
+	captureProjectionGeneration,
+	captureProjectionMutation,
 	type Capture,
 	type CaptureMessage,
 	type CaptureSection,
@@ -422,17 +424,7 @@ type MessageStreamAnalysisProjection = {
 };
 
 type AnalysisProjectionKey = {
-	messages: CaptureMessage[] | undefined;
-	messageCount: number;
-	lastMessage: CaptureMessage | undefined;
-	lastMessageByteCount: number;
-	lastMessageLastByte: number | undefined;
-	byteStream: Capture["byteStream"];
-	byteStreamLength: number;
-	firstByte: NonNullable<Capture["byteStream"]>[number] | undefined;
-	lastByte: NonNullable<Capture["byteStream"]>[number] | undefined;
-	dataRevision: number | undefined;
-	contentRevision: number | undefined;
+	projectionGeneration: number;
 	framingKey: string;
 	filterQuery: string;
 	collapseRuns: boolean;
@@ -457,6 +449,7 @@ type LiveMessageSummary = {
 
 type LiveSnapshotCache = {
 	snapshot: MessageStreamSnapshot;
+	projectionGeneration: number;
 	sections: MessageStreamSection[];
 	messageCount: number;
 	lastSectionMessageCount: number;
@@ -530,21 +523,8 @@ function annotationsKey(capture: Capture): string {
 }
 
 function analysisProjectionKey(capture: Capture, viewState: ViewStateSnapshot): AnalysisProjectionKey {
-	const messages = capture.messages;
-	const byteStream = capture.byteStream;
-	const lastMessage = messages?.at(-1);
 	return {
-		messages,
-		messageCount: messages?.length || 0,
-		lastMessage,
-		lastMessageByteCount: lastMessage?.bytes.length || 0,
-		lastMessageLastByte: lastMessage?.bytes.at(-1),
-		byteStream,
-		byteStreamLength: byteStream?.length || 0,
-		firstByte: byteStream?.[0],
-		lastByte: byteStream?.at(-1),
-		dataRevision: capture.dataRevision,
-		contentRevision: capture.contentRevision,
+		projectionGeneration: captureProjectionGeneration(capture),
 		framingKey: framingKey(capture),
 		filterQuery: viewState.filterQuery,
 		collapseRuns: viewState.collapseRuns || capture.previewMode === "sections",
@@ -557,17 +537,7 @@ function analysisProjectionKey(capture: Capture, viewState: ViewStateSnapshot): 
 
 function sameAnalysisProjectionKey(left: AnalysisProjectionKey, right: AnalysisProjectionKey): boolean {
 	return (
-		left.messages === right.messages &&
-		left.messageCount === right.messageCount &&
-		left.lastMessage === right.lastMessage &&
-		left.lastMessageByteCount === right.lastMessageByteCount &&
-		left.lastMessageLastByte === right.lastMessageLastByte &&
-		left.byteStream === right.byteStream &&
-		left.byteStreamLength === right.byteStreamLength &&
-		left.firstByte === right.firstByte &&
-		left.lastByte === right.lastByte &&
-		left.dataRevision === right.dataRevision &&
-		left.contentRevision === right.contentRevision &&
+		left.projectionGeneration === right.projectionGeneration &&
 		left.framingKey === right.framingKey &&
 		left.filterQuery === right.filterQuery &&
 		left.collapseRuns === right.collapseRuns &&
@@ -690,6 +660,7 @@ function rememberLiveSnapshot(
 	const tailRowIndex = snapshot.matchingRows.findIndex(row => row._originalEnd >= tailStart);
 	liveSnapshotCache.set(capture, {
 		snapshot,
+		projectionGeneration: captureProjectionGeneration(capture),
 		sections,
 		messageCount: messages.length,
 		lastSectionMessageCount,
@@ -702,9 +673,9 @@ function rememberLiveSnapshot(
 		visibleMessageCount,
 		telegramCount,
 		collapseRuns,
-			framingKey: framingKey(capture),
-			sectionViewKey: sectionViewKey(capture, viewState),
-			patternRemarksKey: patternRemarksKey(capture),
+		framingKey: framingKey(capture),
+		sectionViewKey: sectionViewKey(capture, viewState),
+		patternRemarksKey: patternRemarksKey(capture),
 		notesKey: notesKey(capture),
 		annotationsKey: annotationsKey(capture)
 	});
@@ -717,6 +688,7 @@ function canReuseLiveSnapshot(
 ): boolean {
 	const messages = capture.messages || [];
 	const stream = capture.byteStream || [];
+	const generationDelta = captureProjectionGeneration(capture) - cached.projectionGeneration;
 	if (
 		cached.snapshot.captureId !== String(capture.id ?? "") ||
 		cached.snapshot.filterQuery !== viewState.filterQuery ||
@@ -728,6 +700,8 @@ function canReuseLiveSnapshot(
 		cached.patternRemarksKey !== patternRemarksKey(capture) ||
 		cached.notesKey !== notesKey(capture) ||
 		cached.annotationsKey !== annotationsKey(capture) ||
+		(generationDelta !== 0 &&
+			(captureProjectionMutation(capture) !== "append" || generationDelta !== 1)) ||
 		messages.length < cached.messageCount ||
 		stream.length < cached.byteStreamLength ||
 		stream[0]?.rawOffset !== cached.firstRawOffset
