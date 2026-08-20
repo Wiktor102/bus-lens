@@ -61,6 +61,59 @@ test("hydrates the active capture through archive reads and named commands", asy
 	assert.equal(runtime.getCapture(stored.id)?.id, stored.id);
 });
 
+test("renders an asynchronously selected capture after clearing the previous projection", async () => {
+	applicationStore.send({ type: "capture/selected-changed", captureId: null });
+	const first = capture("first");
+	const second = capture("second");
+	let releaseSecond!: (value: Capture) => void;
+	const secondLoad = new Promise<Capture>(resolve => { releaseSecond = resolve; });
+	const archive = {
+		ready: Promise.resolve(),
+		reads: {
+			index: () => ({ activeId: first.id, unfiledCollapsed: false, captures: [
+				{ id: first.id, folderId: null, position: 0 },
+				{ id: second.id, folderId: null, position: 1 }
+			], folders: [] }),
+			capture: () => undefined,
+			captureSummaries: () => [],
+			captures: () => [first, second],
+			folders: () => [],
+			queue: () => [],
+			history: () => [],
+			settings: () => ({ draft: "", delayMs: 100, baudRate: 115200 })
+		},
+		commands: {
+			getCapture: (captureId: string) => captureId === first.id ? Promise.resolve(first) : secondLoad,
+			recordingWriter: {}
+		}
+	} as unknown as ArchiveDataLayer;
+	const runtime = createAppRuntime({ archive });
+	await runtime.ready;
+	const renderedCaptureIds: Array<string | null> = [];
+	const controller = createCaptureController({
+		capture: runtime.capture,
+		getActiveId: runtime.getActiveId,
+		setActiveId: runtime.setActiveId,
+		render: () => { renderedCaptureIds.push(runtime.capture()?.id ?? null); },
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => false, stopRecording: async () => {} },
+		publishDialogCommand: () => {}
+	});
+
+	controller.selectArchiveCapture(second.id!);
+	assert.equal(runtime.getActiveId(), second.id);
+	assert.equal(runtime.capture(), undefined);
+	assert.deepEqual(renderedCaptureIds, [null]);
+
+	releaseSecond(second);
+	await secondLoad;
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.equal(runtime.capture()?.id, second.id);
+	assert.deepEqual(renderedCaptureIds, [null, second.id]);
+});
+
 test("waits for a named capture command before recording or canonicalization", async () => {
 	let release!: () => void;
 	const write = new Promise<void>(resolve => { release = resolve; });

@@ -56,7 +56,7 @@ export type CaptureControllerDependencies = {
 	getFolders?: () => readonly StoredFolder[] | undefined;
 	getArchiveIndex?: () => ArchiveIndex | undefined;
 	getActiveId: () => string | null | undefined;
-	setActiveId: (captureId: string | null | undefined) => void;
+	setActiveId: (captureId: string | null | undefined) => void | Promise<Capture | undefined>;
 	setActiveCapture?: (capture: Capture | undefined) => void;
 	setSelectedCaptureId?: (captureId: string | null) => void;
 	trackCaptureWrite?: (captureId: string, write: Promise<unknown>) => void;
@@ -193,6 +193,15 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 
 	function reportFailure(captureId: string, error: unknown): void {
 		dependencies.reportPersistenceFailure?.(captureId, error);
+	}
+
+	function activateCaptureId(captureId: string | null | undefined): void {
+		const loading = dependencies.setActiveId(captureId);
+		if (!loading) return;
+		const expectedId = captureId ? String(captureId) : null;
+		void loading.then(() => {
+			if ((dependencies.getActiveId() ?? null) === expectedId) dependencies.render();
+		}).catch(error => reportFailure(expectedId ?? "archive", error));
 	}
 
 	function archiveIndex(overrides: Partial<ArchiveIndex> = {}): ArchiveIndex {
@@ -742,7 +751,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	}
 
 	function selectArchiveCapture(captureId: string) {
-		dependencies.setActiveId(captureId);
+		activateCaptureId(captureId);
 		dependencies.setSelectedCaptureId?.(captureId);
 		persistArchiveIndex(archiveIndex({ activeId: captureId }));
 		dependencies.render();
@@ -957,7 +966,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		copy.annotations = {};
 		if (compatibilityState) compatibilityState.captures.unshift(copy);
 		dependencies.setActiveCapture?.(copy);
-		dependencies.setActiveId(copy.id);
+		activateCaptureId(copy.id);
 		dependencies.setSelectedCaptureId?.(String(copy.id));
 		if (isCanonical(source)) {
 			const duplicateWrite = (dependencies.archiveCommands
@@ -976,7 +985,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				})
 				.catch(error => {
 					if (compatibilityState) compatibilityState.captures = compatibilityState.captures.filter(item => item !== copy);
-					dependencies.setActiveId(source.id);
+					activateCaptureId(source.id);
 					dependencies.setActiveCapture?.(source);
 					dependencies.setSelectedCaptureId?.(String(source.id));
 					reportFailure(source.id, error);
@@ -1019,7 +1028,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (!item) return;
 		if (deletingActiveCapture) {
 			const next = captures().find(captureItem => String(captureItem.id) !== String(captureId));
-			dependencies.setActiveId(next?.id ? String(next.id) : null);
+			activateCaptureId(next?.id ? String(next.id) : null);
 			dependencies.setSelectedCaptureId?.(next?.id ? String(next.id) : null);
 		}
 		const itemId = String(item.id);
@@ -1029,7 +1038,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		} catch (error) {
 			if (compatibilityState) compatibilityState.captures.unshift(item);
 			if (deletingActiveCapture) {
-				dependencies.setActiveId(itemId);
+				activateCaptureId(itemId);
 				dependencies.setActiveCapture?.(item);
 				dependencies.setSelectedCaptureId?.(itemId);
 			}
@@ -1268,7 +1277,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			dependencies.setCaptureStorageStatus?.(String(c.id), "canonical");
 			if (compatibilityState) compatibilityState.captures.unshift(c);
 			dependencies.setActiveCapture?.(c);
-			dependencies.setActiveId(c.id);
+			activateCaptureId(c.id);
 			dependencies.setSelectedCaptureId?.(String(c.id));
 			const request: CreateCaptureRequest = {
 				captureId: String(c.id),
@@ -1302,7 +1311,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 					})
 					.catch(error => {
 						if (compatibilityState) compatibilityState.captures = compatibilityState.captures.filter(item => item !== c);
-						dependencies.setActiveId(previousId ?? null);
+						activateCaptureId(previousId ?? null);
 						dependencies.setSelectedCaptureId?.(previousId ? String(previousId) : null);
 						reportFailure(String(c.id), error);
 						dependencies.render();
@@ -1312,7 +1321,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 						dependencies.trackCaptureWrite?.(String(c.id), createWrite);
 						void createWrite.catch(error => {
 						if (compatibilityState) compatibilityState.captures = compatibilityState.captures.filter(item => item !== c);
-						dependencies.setActiveId(previousId ?? null);
+						activateCaptureId(previousId ?? null);
 						reportFailure(String(c.id), error);
 					});
 					}
