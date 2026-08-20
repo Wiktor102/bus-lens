@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type FormEvent, type CSSProperties, type ReactNode } from "react";
 import { useApplicationSelector, useApplicationStore } from "../../app/application-store-provider.tsx";
 import { selectCanonicalization, selectDialog } from "../../shared/application-store.ts";
 import { getDialogActions } from "./dialog-bridge";
@@ -28,17 +28,20 @@ function DialogHeading({
 	title,
 	titleId,
 	className,
+	leading,
 	onClose
 }: {
 	eyebrow: string;
 	title: string;
 	titleId?: string;
 	className?: string;
+	leading?: ReactNode;
 	onClose?: () => void;
 }) {
 	return (
 		<div className={`modal-heading ${className || ""}`.trim()}>
-			<div>
+			{leading}
+			<div className="modal-heading-copy">
 				<span className="eyebrow">{eyebrow}</span>
 				<h2 id={titleId}>{title}</h2>
 			</div>
@@ -100,14 +103,16 @@ export function ConfirmationDialog() {
 				dismiss();
 			}}
 		>
-			<div className="confirmation-signal" aria-hidden="true">
-				<AlertTriangle />
-			</div>
 			<DialogHeading
 				eyebrow={confirmationCommand?.eyebrow || "Confirm action"}
 				title={confirmationCommand?.title || "Are you sure?"}
 				titleId="confirmationTitle"
 				className="confirmation-heading"
+				leading={
+					<span className="confirmation-signal" aria-hidden="true">
+						<AlertTriangle />
+					</span>
+				}
 				onClose={dismiss}
 			/>
 			<div className="confirmation-copy">

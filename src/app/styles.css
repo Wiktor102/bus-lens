@@ -2258,26 +2258,18 @@ tr:hover .row-action,
 .confirmation-modal {
 	position: relative;
 	width: min(520px, calc(100vw - 30px));
-	padding: 24px;
+	padding: 22px 24px 20px;
 	border-color: color-mix(in srgb, var(--red) 48%, var(--line));
 	background:
 		linear-gradient(135deg, color-mix(in srgb, var(--red) 7%, transparent), transparent 36%),
 		#141815;
 }
-.confirmation-modal::before {
-	content: "";
-	position: absolute;
-	inset: 0 0 auto;
-	height: 3px;
-	background: var(--red);
-	box-shadow: 0 0 18px color-mix(in srgb, var(--red) 42%, transparent);
-}
 .confirmation-signal {
 	display: grid;
 	place-items: center;
-	width: 38px;
-	height: 38px;
-	margin-bottom: 15px;
+	flex: 0 0 36px;
+	width: 36px;
+	height: 36px;
 	border: 1px solid color-mix(in srgb, var(--red) 48%, var(--line));
 	background: color-mix(in srgb, var(--red) 10%, var(--panel));
 	color: var(--red);
@@ -2286,30 +2278,53 @@ tr:hover .row-action,
 	width: 19px;
 	height: 19px;
 }
-.confirmation-heading {
-	margin-bottom: 15px;
+.confirmation-modal .confirmation-heading {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	align-items: center;
+	gap: 14px;
+	border-bottom: 0;
+	padding-bottom: 0;
+	margin-bottom: 20px;
 }
-.confirmation-heading h2 {
-	max-width: 380px;
+.confirmation-modal .confirmation-heading .modal-heading-copy {
+	min-width: 0;
+}
+.confirmation-modal .confirmation-heading .eyebrow {
+	font-size: 11px;
+	line-height: 1.25;
+	letter-spacing: 0.11em;
+}
+
+.confirmation-modal .confirmation-heading h2 {
+	max-width: none;
+	margin-top: 3px;
 }
 .confirmation-copy {
-	margin: -2px 0 21px;
-	padding-left: 12px;
-	border-left: 2px solid var(--red);
+	margin: 0 0 20px;
+	padding: 0;
 }
 .confirmation-copy p {
 	margin: 0;
-	font-size: 13px;
-	line-height: 1.5;
+	font-size: 14px;
+	line-height: 1.45;
 }
 .confirmation-copy p + p {
-	margin-top: 7px;
+	margin-top: 8px;
 	color: var(--muted);
-	font: 10px/1.55 var(--mono);
+	font: 12px/1.55 var(--sans);
 }
-.confirmation-actions {
-	justify-content: space-between;
+.confirmation-modal .confirmation-actions {
+	justify-content: flex-end;
+	gap: 10px;
+	border-top: 0;
+	padding-top: 0;
 	margin-top: 0;
+}
+.confirmation-actions .btn {
+	min-height: 38px;
+	padding: 10px 14px;
+	font-size: 13px;
 }
 .confirmation-confirm {
 	display: inline-flex;
