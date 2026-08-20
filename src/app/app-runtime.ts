@@ -24,7 +24,7 @@ export type AppRuntime = {
 	getCapture: (captureId: string) => Capture | undefined;
 	loadCapture: (captureId: string) => Promise<Capture | undefined>;
 	getActiveId: () => string | null | undefined;
-	setActiveId: (captureId: string | null | undefined) => void;
+	setActiveId: (captureId: string | null | undefined) => void | Promise<Capture | undefined>;
 	setActiveCapture: (capture: Capture | undefined) => void;
 	beginUnload: () => void;
 	showToast: (message: string) => void;
@@ -145,12 +145,22 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 		loadCapture,
 		getActiveId: () => activeId,
 		setActiveId: captureId => {
-			activeId = captureId;
-			applicationStore.send({ type: "capture/selected-changed", captureId: captureId ? String(captureId) : null });
-			const cached = cachedCapture(captureId ? String(captureId) : null);
-			if (cached) activeCapture = cached;
-			else if (captureId) void loadCapture(String(captureId));
-			else activeCapture = undefined;
+			const id = captureId ? String(captureId) : null;
+			activeId = id;
+			applicationStore.send({ type: "capture/selected-changed", captureId: id });
+			if (!id) {
+				activeCapture = undefined;
+				return;
+			}
+			const owned = ownedCaptures.get(id);
+			if (owned) {
+				activeCapture = owned;
+				return;
+			}
+			// Do not expose the previous capture while this selection is loading.
+			// loadCapture only installs its result when this ID is still active.
+			activeCapture = undefined;
+			return loadCapture(id);
 		},
 		setActiveCapture,
 		beginUnload: () => { unloading = true; },
