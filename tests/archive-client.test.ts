@@ -59,6 +59,7 @@ test("canonical CaptureWriter commands use dedicated HTTP endpoints", async () =
 		const path = String(input);
 		const method = init?.method ?? "GET";
 		calls.push({ path, method, body: bodyOf(init) });
+		if (path.endsWith("/notes/note") && method === "DELETE") return jsonResponse({ contentRevision: 3 });
 		if (method === "DELETE") return new Response(null, { status: 204 });
 		if (path.endsWith("/notes") && method === "GET") return jsonResponse([]);
 		return jsonResponse({});
@@ -84,6 +85,12 @@ test("canonical CaptureWriter commands use dedicated HTTP endpoints", async () =
 			expectedActiveProfileId: "profile",
 			expectedDataRevision: 1
 		});
+		await client.updateFramingSectionView({
+			captureId: "capture",
+			profileId: "profile",
+			sectionId: "section",
+			collapsed: true
+		});
 		await client.setByteVisibility({ captureId: "capture", rawOffset: 1, hidden: true });
 		await client.deleteByteVisibility("capture", 1);
 		await client.setFrameVisibility({ captureId: "capture", frameId: "frame", hidden: true });
@@ -91,7 +98,7 @@ test("canonical CaptureWriter commands use dedicated HTTP endpoints", async () =
 		await client.listNotes("capture");
 		await client.createNote({ captureId: "capture", text: "note", target: { kind: "capture" } });
 		await client.updateNote({ captureId: "capture", noteId: "note", text: "updated" });
-		await client.deleteNote({ captureId: "capture", noteId: "note" });
+		assert.deepEqual(await client.deleteNote({ captureId: "capture", noteId: "note" }), { contentRevision: 3 });
 		await client.clearData({ captureId: "capture" });
 		await client.duplicate({ captureId: "capture", duplicateCaptureId: "copy" });
 		await client.delete("capture");
@@ -103,6 +110,7 @@ test("canonical CaptureWriter commands use dedicated HTTP endpoints", async () =
 			["/api/captures/capture/sessions/session/finalize", "POST"],
 			["/api/captures/capture/framing-draft", "PATCH"],
 			["/api/captures/capture/framing-revisions", "POST"],
+			["/api/captures/capture/framing-sections/section/view", "PATCH"],
 			["/api/captures/capture/bytes/1/visibility", "PUT"],
 			["/api/captures/capture/bytes/1/visibility", "DELETE"],
 			["/api/captures/capture/frames/frame/visibility", "PUT"],

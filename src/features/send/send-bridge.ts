@@ -1,6 +1,6 @@
-import { createExternalStore } from "../../shared/external-store.ts";
-import { EMPTY_SEND_SNAPSHOT, type SendSnapshot } from "./send.ts";
+import { applicationStore } from "../../shared/application-store.ts";
 
+/** Typed command actions; queue/history data remains Query-owned. */
 export type SendActions = {
 	setDraft: (value: string) => void;
 	setDelay: (value: number) => void;
@@ -8,7 +8,6 @@ export type SendActions = {
 	addToQueue: (bytes: readonly number[]) => boolean;
 	sendQueueItem: (id: string) => void;
 	removeQueueItem: (id: string) => void;
-	loadHistory: (id: string) => string | null;
 	replayHistory: (id: string) => void;
 	runQueue: () => Promise<void>;
 	stopQueue: () => void;
@@ -16,25 +15,24 @@ export type SendActions = {
 	clearHistory: () => void;
 };
 
-const noopActions: SendActions = {
-	setDraft: () => {},
-	setDelay: () => {},
-	send: async () => false,
-	addToQueue: () => false,
-	sendQueueItem: () => {},
-	removeQueueItem: () => {},
-	loadHistory: () => null,
-	replayHistory: () => {},
-	runQueue: async () => {},
-	stopQueue: () => {},
-	clearQueue: () => {},
-	clearHistory: () => {}
+const actions: SendActions = {
+	setDraft: value => applicationStore.sendCommand({ type: "send/set-draft", value }),
+	setDelay: value => applicationStore.sendCommand({ type: "send/set-delay", value }),
+	send: bytes => new Promise(resolve => {
+		applicationStore.sendCommand({ type: "send/send", bytes: [...bytes], respond: resolve });
+	}),
+	addToQueue: bytes => {
+		if (!bytes.length) return false;
+		applicationStore.sendCommand({ type: "send/add-to-queue", bytes: [...bytes] });
+		return true;
+	},
+	sendQueueItem: id => applicationStore.sendCommand({ type: "send/send-queue-item", id }),
+	removeQueueItem: id => applicationStore.sendCommand({ type: "send/remove-queue-item", id }),
+	replayHistory: id => applicationStore.sendCommand({ type: "send/replay-history", id }),
+	runQueue: async () => { applicationStore.sendCommand({ type: "send/run-queue" }); },
+	stopQueue: () => applicationStore.sendCommand({ type: "send/stop-queue" }),
+	clearQueue: () => applicationStore.sendCommand({ type: "send/clear-queue" }),
+	clearHistory: () => applicationStore.sendCommand({ type: "send/clear-history" })
 };
 
-const sendStore = createExternalStore<SendSnapshot, SendActions>(EMPTY_SEND_SNAPSHOT, noopActions);
-
-export const getSendSnapshot = sendStore.getSnapshot;
-export const subscribeToSend = sendStore.subscribe;
-export const publishSendSnapshot = sendStore.publish;
-export const registerSendActions = sendStore.registerActions;
-export const getSendActions = sendStore.getActions;
+export const getSendActions = (): SendActions => actions;

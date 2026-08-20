@@ -4,7 +4,6 @@ import {
 	useLayoutEffect,
 	useRef,
 	useState,
-	useSyncExternalStore,
 	type CSSProperties,
 	type MouseEvent as ReactMouseEvent
 } from "react";
@@ -17,8 +16,6 @@ import {
 } from "@tanstack/virtual-core";
 import {
 	getMessageStreamActions,
-	getMessageStreamSnapshot,
-	subscribeToMessageStream,
 	type MessageStreamTarget
 } from "./message-stream-bridge";
 import {
@@ -130,12 +127,14 @@ function SectionEntry({
 	entry,
 	virtualItem,
 	rowRef,
-	contextMenuState
+	contextMenuState,
+	mutationsDisabled
 }: {
 	entry: Extract<MessageStreamEntry, { type: "section" }>;
 	virtualItem: VirtualItem;
 	rowRef: (element: HTMLTableRowElement | null) => void;
 	contextMenuState: MenuState | null;
+	mutationsDisabled: boolean;
 }) {
 	const { section, sectionNumber } = entry;
 	const actions = getMessageStreamActions();
@@ -179,6 +178,7 @@ function SectionEntry({
 							<select
 								data-section-framing-mode={section.id}
 								value={section.framingMode}
+								disabled={mutationsDisabled}
 								onChange={event => actions.setSectionFramingMode(section.id, event.currentTarget.value)}
 							>
 								<option value="length">LENGTH</option>
@@ -195,6 +195,7 @@ function SectionEntry({
 									min="1"
 									max="1024"
 									value={section.frameSize}
+									disabled={mutationsDisabled}
 									onChange={event => actions.setSectionFrameSize(section.id, event.currentTarget.value)}
 								/>
 								{" "}bytes
@@ -209,6 +210,7 @@ function SectionEntry({
 										placeholder="AA 55"
 										spellCheck={false}
 										value={markerDraft}
+										disabled={mutationsDisabled}
 										onChange={event => setMarkerDraft(event.currentTarget.value)}
 										onBlur={event => actions.setSectionFrameMarker(section.id, event.currentTarget.value)}
 										onKeyDown={event => {
@@ -223,6 +225,7 @@ function SectionEntry({
 									<select
 										data-section-marker-position={section.id}
 										value={section.markerPosition}
+										disabled={mutationsDisabled}
 										onChange={event => actions.setSectionMarkerPosition(section.id, event.currentTarget.value)}
 									>
 										<option value="start">STARTS MESSAGE</option>
@@ -240,6 +243,7 @@ function SectionEntry({
 									min="0.01"
 									step="0.1"
 									value={section.frameTimeGap}
+									disabled={mutationsDisabled}
 									onChange={event => actions.setSectionFrameTimeGap(section.id, event.currentTarget.value)}
 									onKeyDown={event => {
 											if (event.key !== "Enter") return;
@@ -314,13 +318,15 @@ function MessageEntry({
 	virtualItem,
 	snapshot,
 	rowRef,
-	contextMenuState
+	contextMenuState,
+	mutationsDisabled
 }: {
 	entry: Extract<MessageStreamEntry, { type: "message" }>;
 	virtualItem: VirtualItem;
 	snapshot: MessageStreamSnapshot;
 	rowRef: (element: HTMLTableRowElement | null) => void;
 	contextMenuState: MenuState | null;
+	mutationsDisabled: boolean;
 }) {
 	const { row: message, rowIndex } = entry;
 	const patternMember = snapshot.patterns.membership.get(message._originalStart);
@@ -336,9 +342,7 @@ function MessageEntry({
 	const visiblePatternRowCount =
 		snapshot.visiblePatternRowCounts.get(message._patternOccurrence || "") || pattern?.length;
 	const originalRow = message._originalStart + 1;
-	const sequenceNote = snapshot.sequenceNotes.find(
-		note => originalRow >= note.start && originalRow <= note.end
-	);
+	const sequenceNote = message._sequenceNote;
 	const messageNote = snapshot.annotations[message.id];
 	const isUnique = snapshot.signatureCounts.get(signature(message)) === 1;
 	const rowLabel =
@@ -392,6 +396,7 @@ function MessageEntry({
 					isPatternEnd ? "sequence-group-end" : ""
 				}`.trim()}
 				data-pattern-id={pattern.id}
+				disabled={mutationsDisabled}
 				title={`Sequence ${String(snapshot.patternNumbers.get(pattern.id)).padStart(2, "0")} · occurrence ${
 					patternMember?.occurrenceIndex! + 1
 				} of ${pattern.starts.length} · ${pattern.length} messages${
@@ -508,6 +513,7 @@ function MessageEntry({
 								}`.trim()}
 								style={byteStyle}
 								data-byte-note={`${message.id}:${rawPosition}`}
+								disabled={mutationsDisabled}
 								title={`Byte ${position + 1} · ${directionLabel} ${receivedAt} · ${count} occurrence(s)${transitionTitle} · click to annotate · right-click for actions`}
 								type="button"
 							>
@@ -529,7 +535,7 @@ function MessageEntry({
 			<td>
 				<div className="row-actions">
 					{messageNote || sequenceNote ? (
-						<button className="note-link" data-message-note={message.id} type="button">
+						<button className="note-link" data-message-note={message.id} type="button" disabled={mutationsDisabled}>
 							{messageNote?.text || (
 								<>
 									<CornerDownRight aria-hidden="true" />
@@ -538,7 +544,7 @@ function MessageEntry({
 							)}
 						</button>
 					) : (
-						<button className="row-action add-note" data-message-note={message.id} type="button">
+						<button className="row-action add-note" data-message-note={message.id} type="button" disabled={mutationsDisabled}>
 							<Plus aria-hidden="true" /> Add note
 						</button>
 					)}
@@ -547,6 +553,7 @@ function MessageEntry({
 						data-message-replay={message.id}
 						title="Replay this message on the connected serial port"
 						type="button"
+						disabled={mutationsDisabled}
 					>
 						<RotateCcw aria-hidden="true" /> Replay
 					</button>
@@ -586,7 +593,11 @@ function SectionMoveIcon({ action }: { action: SectionMoveAction }) {
 	);
 }
 
-function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClose: (restoreFocus?: boolean) => void }) {
+function MessageContextMenu({ state, onClose, mutationsDisabled }: {
+	state: MenuState | null;
+	onClose: (restoreFocus?: boolean) => void;
+	mutationsDisabled: boolean;
+}) {
 	const menuRef = useRef<HTMLDivElement>(null);
 	const positionRef = useRef({ left: 10, top: 10 });
 	const [position, setPosition] = useState({ left: 10, top: 10 });
@@ -608,7 +619,7 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 	const deleteLabel = target?.position === null ? "Delete message" : "Delete byte";
 
 	const handleAction = (action: string) => {
-		if (!state) return;
+		if (!state || mutationsDisabled) return;
 		if (state.kind === "section") {
 			if (action === "delete-section") {
 				onClose();
@@ -656,7 +667,7 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 							className="section-context-action"
 							data-context-action={action}
 							data-section-action={action}
-							disabled={!state.availability[action]}
+							disabled={mutationsDisabled || !state.availability[action]}
 							onClick={() => handleAction(action)}
 						>
 							<SectionMoveIcon action={action} />
@@ -668,7 +679,7 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 						role="menuitem"
 						className="context-delete section-context-action"
 						data-context-action="delete-section"
-						disabled={!state.canDelete}
+						disabled={mutationsDisabled || !state.canDelete}
 						onClick={() => handleAction("delete-section")}
 					>
 						<Trash2 aria-hidden="true" />
@@ -677,11 +688,11 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 				</>
 			) : (
 				<>
-					<button type="button" role="menuitem" data-context-action="note" onClick={() => handleAction("note")}>
+					<button type="button" role="menuitem" data-context-action="note" disabled={mutationsDisabled} onClick={() => handleAction("note")}>
 						<FileText aria-hidden="true" />
 						<span>Add note</span>
 					</button>
-					<button type="button" role="menuitem" data-context-action="replay" onClick={() => handleAction("replay")}>
+					<button type="button" role="menuitem" data-context-action="replay" disabled={mutationsDisabled} onClick={() => handleAction("replay")}>
 						<RotateCcw aria-hidden="true" />
 						<span>Replay</span>
 					</button>
@@ -690,6 +701,7 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 						role="menuitem"
 						className="context-delete"
 						data-context-action="delete"
+						disabled={mutationsDisabled}
 						aria-label={`${deleteLabel} (keep data hidden)`}
 						onClick={() => handleAction("delete")}
 					>
@@ -701,6 +713,7 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 						role="menuitem"
 						className={`byte-context-action ${target?.position === null ? "hidden" : ""}`.trim()}
 						data-context-action="section"
+						disabled={mutationsDisabled}
 						onClick={() => handleAction("section")}
 					>
 						<Rows3 aria-hidden="true" />
@@ -712,12 +725,15 @@ function MessageContextMenu({ state, onClose }: { state: MenuState | null; onClo
 	);
 }
 
-export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
-	const snapshot = useSyncExternalStore(
-		subscribeToMessageStream,
-		getMessageStreamSnapshot,
-		getMessageStreamSnapshot
-	);
+export function MessageStream({
+	frameSizeLabel,
+	snapshot,
+	mutationsDisabled = false
+}: {
+	frameSizeLabel: string;
+	snapshot: MessageStreamSnapshot;
+	mutationsDisabled?: boolean;
+}) {
 	const actions = getMessageStreamActions();
 	const hasEntries = snapshot.entries.length > 0;
 	const scrollRef = useRef<HTMLDivElement>(null);
@@ -770,6 +786,7 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 	}, [closeMenu, menuState]);
 
 	const openContextMenu = (event: ReactMouseEvent<HTMLTableSectionElement>) => {
+		if (mutationsDisabled) return;
 		const targetElement = event.target instanceof Element ? event.target : null;
 		const sectionRow = targetElement?.closest<HTMLTableRowElement>("tr[data-section-id]");
 		if (sectionRow) {
@@ -807,6 +824,7 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 	};
 
 	const handleClick = (event: ReactMouseEvent<HTMLTableSectionElement>) => {
+		if (mutationsDisabled) return;
 		const targetElement = event.target instanceof Element ? event.target : null;
 		const noteButton = targetElement?.closest<HTMLElement>("[data-message-note]");
 		if (noteButton?.dataset.messageNote) return actions.openMessageNote(noteButton.dataset.messageNote);
@@ -858,6 +876,7 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 								virtualItem={virtualItem}
 								rowRef={ref}
 								contextMenuState={menuState}
+								mutationsDisabled={mutationsDisabled}
 							/>
 						) : entry.type === "marker-prompt" ? (
 							<MarkerPromptEntry key={entry.key} entry={entry} virtualItem={virtualItem} rowRef={ref} />
@@ -869,6 +888,7 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 								snapshot={snapshot}
 								rowRef={ref}
 								contextMenuState={menuState}
+								mutationsDisabled={mutationsDisabled}
 							/>
 						);
 					})}
@@ -881,7 +901,7 @@ export function MessageStream({ frameSizeLabel }: { frameSizeLabel: string }) {
 				<h2>{snapshot.emptyState.title}</h2>
 				<p>{snapshot.emptyState.description}</p>
 			</div>
-			<MessageContextMenu state={menuState} onClose={closeMenu} />
+			<MessageContextMenu state={menuState} onClose={closeMenu} mutationsDisabled={mutationsDisabled} />
 		</div>
 	);
 }

@@ -5,38 +5,29 @@ import {
 	useLayoutEffect,
 	useRef,
 	useState,
-	useSyncExternalStore,
 	type CSSProperties,
 	type PointerEvent as ReactPointerEvent,
 	type RefObject
 } from "react";
 import { ArchiveSidebar } from "../features/archive/archive-sidebar";
-import { getAnalysisSnapshot, subscribeToAnalysis } from "../features/analysis/analysis-bridge";
-import {
-	getCaptureHeaderActions,
-	getCaptureHeaderSnapshot,
-	subscribeToCaptureHeader
-} from "../features/capture/capture-header-bridge";
+import { getCaptureHeaderActions } from "../features/capture/capture-header-bridge";
 import {
 	getCaptureStorageActions,
-	getCaptureStorageSnapshot,
-	subscribeToCaptureStorage
+	captureStorageSnapshot
 } from "../features/capture/capture-storage-bridge";
-import { normalizeCaptureDescription, normalizeCaptureTitle } from "../features/capture/capture-header";
 import {
-	getFramingToolbarSnapshot,
-	subscribeToFramingToolbar
-} from "../features/capture/framing-toolbar-bridge";
-import { getSendActions, getSendSnapshot, subscribeToSend } from "../features/send/send-bridge";
-import { deriveSendViewModel, formatSendTime, parseTransmitHex } from "../features/send/send";
-import { getTransportActions, getTransportSnapshot, subscribeToTransport } from "../features/transport/transport-bridge";
-import { getNotesActions, getNotesSnapshot, subscribeToNotes } from "../features/notes/notes-bridge";
-import { getToastSnapshot, subscribeToToast } from "../shared/toast-bridge";
-import {
-	getPersistenceErrorActions,
-	getPersistenceErrorSnapshot,
-	subscribeToPersistenceError
-} from "../shared/persistence-error-bridge";
+	deriveCaptureHeaderSnapshot,
+	mergeCaptureHeaderRuntimeStats,
+	normalizeCaptureDescription,
+	normalizeCaptureTitle
+} from "../features/capture/capture-header";
+import { getSendActions } from "../features/send/send-bridge";
+import { deriveSendViewModel, formatSendTime, parseTransmitHex, type SendHistoryItem, type SendQueueItem, type SendSnapshot } from "../features/send/send";
+import { deriveNotesSnapshot } from "../features/notes/notes.ts";
+import { deriveAnalysisSnapshot } from "../features/analysis/analysis.ts";
+import { getTransportActions } from "../features/transport/transport-bridge";
+import { getNotesActions } from "../features/notes/notes-bridge";
+import { getPersistenceErrorActions } from "../shared/persistence-error-bridge";
 import {
 	AnnotationDialog,
 	CanonicalizationDialog,
@@ -44,10 +35,20 @@ import {
 	ExportDialog,
 	PatternRemarkDialog
 } from "../features/dialogs/dialogs";
-import { getMessageStreamSnapshot, subscribeToMessageStream } from "../features/message-stream/message-stream-bridge";
 import { MessageStream } from "../features/message-stream/message-stream-view";
 import { useApplicationSelector, useApplicationSend } from "./application-store-provider";
-import { selectViewState, viewStateActionToApplicationEvent } from "../shared/application-store";
+import {
+	selectCaptureHeaderRuntime,
+	selectFramingToolbar,
+	selectMessageStream,
+	selectPersistenceError,
+	selectRecordingWorkflow,
+	selectSendRuntime,
+	selectToast,
+	selectTransport,
+	selectViewState,
+	viewStateActionToApplicationEvent
+} from "../shared/application-store";
 import {
 	ArrowUp,
 	Copy,
@@ -67,8 +68,10 @@ import {
 	type ViewStateAction,
 	type ViewStateSnapshot
 } from "../shared/view-state";
+import type { SendSettings } from "../shared/app-state.ts";
 import { MCP_SETTINGS_PATH, McpSettingsPage, type AgentAccessStatus } from "./mcp-settings-page";
 import { StatusSplitControl } from "./status-split-control";
+import { useArchiveDataLayer, useArchiveNotes, useArchiveSelectionSync, useSelectedArchiveCapture, useSendQueryState } from "../data/archive-react";
 import "./styles.css";
 
 function ConnectionIcon({ connected }: { connected: boolean }) {
@@ -81,11 +84,7 @@ function ConnectionIcon({ connected }: { connected: boolean }) {
 }
 
 function TopBar() {
-	const snapshot = useSyncExternalStore(
-		subscribeToTransport,
-		getTransportSnapshot,
-		getTransportSnapshot
-	);
+	const snapshot = useApplicationSelector(selectTransport);
 	const actions = getTransportActions();
 	const [mcpStatus, setMcpStatus] = useState<AgentAccessStatus["status"] | "checking" | "unavailable">("checking");
 
@@ -154,7 +153,7 @@ function TopBar() {
 					id="recordBtn"
 					className={`btn btn-record ${snapshot.recording ? "recording" : ""}`.trim()}
 					disabled={snapshot.recordDisabled}
-					onClick={actions.toggleRecording}
+					onClick={() => actions.toggleRecording()}
 				>
 					<span /> {snapshot.recordLabel}
 				</button>
@@ -164,17 +163,25 @@ function TopBar() {
 }
 
 function CaptureHeader() {
-	const snapshot = useSyncExternalStore(
-		subscribeToCaptureHeader,
-		getCaptureHeaderSnapshot,
-		getCaptureHeaderSnapshot
+	const activeCapture = useSelectedArchiveCapture();
+	const transport = useApplicationSelector(selectTransport);
+	const recordingWorkflow = useApplicationSelector(selectRecordingWorkflow);
+	const liveHeader = useApplicationSelector(selectCaptureHeaderRuntime);
+	const recordingOwnsCapture = transport.recordingCaptureId === activeCapture.captureId;
+	const captureWorkflow = recordingOwnsCapture && recordingWorkflow.status !== "idle" ? recordingWorkflow.status : undefined;
+	const mutationLocked = recordingOwnsCapture && (captureWorkflow === "starting" || captureWorkflow === "finalizing" || captureWorkflow === "failed");
+	const querySnapshot = deriveCaptureHeaderSnapshot(
+		activeCapture.data,
+		recordingOwnsCapture && captureWorkflow === "recording",
+		captureWorkflow
 	);
+	const snapshot = mergeCaptureHeaderRuntimeStats(querySnapshot, liveHeader);
 	const actions = getCaptureHeaderActions();
-	const storage = useSyncExternalStore(
-		subscribeToCaptureStorage,
-		getCaptureStorageSnapshot,
-		getCaptureStorageSnapshot
+	const storage = captureStorageSnapshot(
+		activeCapture.captureId,
+		activeCapture.data?.storageStatus
 	);
+	const locked = storage.locked || mutationLocked;
 	const storageActions = getCaptureStorageActions();
 	const [titleDraft, setTitleDraft] = useState(snapshot.title);
 	const [descriptionDraft, setDescriptionDraft] = useState(snapshot.description);
@@ -228,7 +235,7 @@ function CaptureHeader() {
 							className="title-input"
 							ref={titleRef}
 							value={titleDraft}
-							disabled={!snapshot.hasCapture || storage.locked}
+							disabled={!snapshot.hasCapture || locked}
 							aria-label="Capture title"
 							onChange={event => {
 								setTitleDraft(event.currentTarget.value);
@@ -245,7 +252,7 @@ function CaptureHeader() {
 							className="capture-description"
 							ref={descriptionRef}
 							value={descriptionDraft}
-							disabled={!snapshot.hasCapture || storage.locked}
+							disabled={!snapshot.hasCapture || locked}
 							rows={1}
 							placeholder="Add a description…"
 							aria-label="Capture description"
@@ -281,14 +288,14 @@ function CaptureHeader() {
 					<span title="Received raw bytes only; transmitted bytes are excluded" aria-label="Captured: received raw bytes only; transmitted bytes are excluded">Captured <strong id="statCapturedBytes">{snapshot.summary.capturedBytes}</strong></span>
 				</div>
 				<div ref={actionsRef} className="header-actions">
-					<button id="editContextBtn" className="btn btn-secondary" type="button" disabled={!snapshot.hasCapture || storage.locked} onClick={() => actions.openContext()}>
+					<button id="editContextBtn" className="btn btn-secondary" type="button" disabled={!snapshot.hasCapture || locked} onClick={() => actions.openContext()}>
 						Edit context
 					</button>
 					<button
 						id="moreBtn"
 						className="icon-btn"
 						type="button"
-						disabled={!snapshot.hasCapture || storage.locked}
+						disabled={!snapshot.hasCapture || locked}
 						aria-label="Capture menu"
 						onClick={() => setMenuOpen(open => !open)}
 					>
@@ -299,6 +306,7 @@ function CaptureHeader() {
 							<button
 								id="upgradeCaptureStorageBtn"
 								type="button"
+								disabled={locked}
 								onClick={() => {
 									storageActions.upgrade();
 									setMenuOpen(false);
@@ -315,7 +323,7 @@ function CaptureHeader() {
 								actions.duplicate();
 								setMenuOpen(false);
 							}}
-							disabled={storage.locked}
+							disabled={locked}
 						>
 							<Copy aria-hidden="true" />
 							<span>Duplicate capture</span>
@@ -327,7 +335,7 @@ function CaptureHeader() {
 								actions.clearMessages();
 								setMenuOpen(false);
 							}}
-							disabled={storage.locked}
+							disabled={locked}
 						>
 							<Trash2 aria-hidden="true" />
 							<span>Clear messages</span>
@@ -340,7 +348,7 @@ function CaptureHeader() {
 								actions.deleteCapture();
 								setMenuOpen(false);
 							}}
-							disabled={storage.locked}
+							disabled={locked}
 						>
 							<Trash2 aria-hidden="true" />
 							<span>Delete capture</span>
@@ -362,12 +370,13 @@ type ToolbarProps = ViewStateProps & {
 };
 
 function Toolbar({ viewState, dispatchViewState, messageFilterRef, messageFilterToggleRef }: ToolbarProps) {
-	const snapshot = useSyncExternalStore(
-		subscribeToFramingToolbar,
-		getFramingToolbarSnapshot,
-		getFramingToolbarSnapshot
+	const snapshot = useApplicationSelector(selectFramingToolbar);
+	const activeCapture = useSelectedArchiveCapture();
+	const notesQuery = useArchiveNotes(activeCapture.captureId);
+	const notes = deriveNotesSnapshot(
+		activeCapture.data,
+		activeCapture.data?.storageStatus === "canonical" ? notesQuery.data : undefined
 	);
-	const notes = useSyncExternalStore(subscribeToNotes, getNotesSnapshot, getNotesSnapshot);
 
 	return (
 		<div className="toolbar">
@@ -442,16 +451,8 @@ function Toolbar({ viewState, dispatchViewState, messageFilterRef, messageFilter
 }
 
 function StreamPanel({ viewState, dispatchViewState, messageFilterRef, messageFilterToggleRef }: ToolbarProps) {
-	const framing = useSyncExternalStore(
-		subscribeToFramingToolbar,
-		getFramingToolbarSnapshot,
-		getFramingToolbarSnapshot
-	);
-	const messageStream = useSyncExternalStore(
-		subscribeToMessageStream,
-		getMessageStreamSnapshot,
-		getMessageStreamSnapshot
-	);
+	const framing = useApplicationSelector(selectFramingToolbar);
+	const messageStream = useApplicationSelector(selectMessageStream);
 
 	return (
 		<div
@@ -493,7 +494,7 @@ function StreamPanel({ viewState, dispatchViewState, messageFilterRef, messageFi
 					<span id="visibleCount">{messageStream.visibleCount}</span>
 				</div>
 			</div>
-			<MessageStream frameSizeLabel={framing.frameSizeLabel} />
+			<MessageStream frameSizeLabel={framing.frameSizeLabel} mutationsDisabled={framing.disabled} snapshot={messageStream} />
 		</div>
 	);
 }
@@ -504,10 +505,39 @@ type SendPanelProps = {
 };
 
 function SendPanel({ open, onOpenChange }: SendPanelProps) {
-	const snapshot = useSyncExternalStore(subscribeToSend, getSendSnapshot, getSendSnapshot);
+	const sendStatus = useApplicationSelector(selectSendRuntime);
+	const transport = useApplicationSelector(selectTransport);
+	const sendQuery = useSendQueryState();
 	const actions = getSendActions();
 	const inputRef = useRef<HTMLInputElement>(null);
 	const delayRef = useRef<HTMLInputElement>(null);
+	const queue: SendQueueItem[] = sendQuery.queue.map(item => ({
+		id: String(item.id || ""),
+		bytes: Array.isArray(item.bytes) ? item.bytes.map(Number) : [],
+		createdAt: Number(item.createdAt || 0)
+	}));
+	const history: SendHistoryItem[] = sendQuery.history.flatMap(item => {
+		if (!Array.isArray(item.bytes)) return [];
+		return [{
+			id: String(item.id || ""),
+			timestamp: Number(item.timestamp || item.createdAt || 0),
+			bytes: item.bytes.map(Number),
+			origin: String(item.origin || "manual"),
+			ok: item.ok !== false,
+			error: String(item.error || ""),
+			captureId: item.captureId ? String(item.captureId) : null
+		}];
+	});
+	const settings = (sendQuery.settings || {}) as Partial<SendSettings>;
+	const snapshot: SendSnapshot = {
+		...sendStatus,
+		connected: transport.connected,
+		recording: transport.recording,
+		draft: String(settings.draft || ""),
+		delayMs: Number(settings.delayMs || 0),
+		queue,
+		history
+	};
 	const [draft, setDraft] = useState(snapshot.draft);
 	const [delayDraft, setDelayDraft] = useState(String(snapshot.delayMs));
 	const [focusComposer, setFocusComposer] = useState(false);
@@ -713,7 +743,7 @@ function SendPanel({ open, onOpenChange }: SendPanelProps) {
 							className="text-btn"
 							type="button"
 							disabled={view.clearQueueDisabled}
-							onClick={actions.clearQueue}
+							onClick={() => actions.clearQueue()}
 						>
 							Clear queue
 						</button>
@@ -723,7 +753,7 @@ function SendPanel({ open, onOpenChange }: SendPanelProps) {
 							className={`btn btn-danger ${view.stopQueueHidden ? "hidden" : ""}`.trim()}
 							type="button"
 							disabled={view.stopQueueDisabled}
-							onClick={actions.stopQueue}
+							onClick={() => actions.stopQueue()}
 						>
 							{view.stopQueueText}
 						</button>
@@ -750,7 +780,7 @@ function SendPanel({ open, onOpenChange }: SendPanelProps) {
 							className="text-btn"
 							type="button"
 							disabled={view.clearHistoryDisabled}
-							onClick={actions.clearHistory}
+							onClick={() => actions.clearHistory()}
 						>
 							Clear
 						</button>
@@ -772,9 +802,11 @@ function SendPanel({ open, onOpenChange }: SendPanelProps) {
 										data-history-load={item.id}
 										type="button"
 										onClick={() => {
-											const loaded = actions.loadHistory(item.id);
-											if (loaded === null) return;
+											const loaded = item.bytes
+												.map(byte => byte.toString(16).padStart(2, "0").toUpperCase())
+												.join(" ");
 											setDraft(loaded);
+											actions.setDraft(loaded);
 											requestAnimationFrame(() => inputRef.current?.focus());
 										}}
 									>
@@ -809,13 +841,14 @@ function AnalysisPanel({ active }: { active: boolean }) {
 const AnalysisPanelShell = memo(function AnalysisPanelShell({ active }: { active: boolean }) {
 	return (
 		<div id="patternsPanel" className={`tab-panel ${active ? "active" : ""}`.trim()}>
-			<AnalysisPanelContent />
+			{active ? <AnalysisPanelContent /> : null}
 		</div>
 	);
 });
 
 function AnalysisPanelContent() {
-	const snapshot = useSyncExternalStore(subscribeToAnalysis, getAnalysisSnapshot, getAnalysisSnapshot);
+	const activeCapture = useSelectedArchiveCapture();
+	const snapshot = deriveAnalysisSnapshot(activeCapture.data);
 	return (
 		<div className="analysis-grid">
 				<article className="analysis-card wide">
@@ -936,20 +969,61 @@ function NotesPanel({ active }: { active: boolean }) {
 }
 
 const NotesPanelShell = memo(function NotesPanelShell({ active }: { active: boolean }) {
-	return (
-		<div id="notesPanel" className={`tab-panel ${active ? "active" : ""}`.trim()}>
-			<NotesPanelContent />
-		</div>
-	);
-});
-
-function NotesPanelContent() {
-	const snapshot = useSyncExternalStore(subscribeToNotes, getNotesSnapshot, getNotesSnapshot);
-	const actions = getNotesActions();
 	const [sequenceStart, setSequenceStart] = useState("1");
 	const [sequenceEnd, setSequenceEnd] = useState("2");
 	const [noteText, setNoteText] = useState("");
 	const [originFilter, setOriginFilter] = useState<"all" | "human" | "agent">("all");
+	return (
+		<div id="notesPanel" className={`tab-panel ${active ? "active" : ""}`.trim()}>
+			{active ? (
+				<NotesPanelContent
+					sequenceStart={sequenceStart}
+					sequenceEnd={sequenceEnd}
+					noteText={noteText}
+					originFilter={originFilter}
+					onSequenceStartChange={setSequenceStart}
+					onSequenceEndChange={setSequenceEnd}
+					onNoteTextChange={setNoteText}
+					onOriginFilterChange={setOriginFilter}
+				/>
+			) : null}
+		</div>
+	);
+});
+
+type NotesPanelContentProps = {
+	sequenceStart: string;
+	sequenceEnd: string;
+	noteText: string;
+	originFilter: "all" | "human" | "agent";
+	onSequenceStartChange: (value: string) => void;
+	onSequenceEndChange: (value: string) => void;
+	onNoteTextChange: (value: string) => void;
+	onOriginFilterChange: (value: "all" | "human" | "agent") => void;
+};
+
+function NotesPanelContent({
+	sequenceStart,
+	sequenceEnd,
+	noteText,
+	originFilter,
+	onSequenceStartChange,
+	onSequenceEndChange,
+	onNoteTextChange,
+	onOriginFilterChange
+}: NotesPanelContentProps) {
+	const activeCapture = useSelectedArchiveCapture();
+	const notesQuery = useArchiveNotes(activeCapture.captureId);
+	const snapshot = deriveNotesSnapshot(
+		activeCapture.data,
+		activeCapture.data?.storageStatus === "canonical" ? notesQuery.data : undefined
+	);
+	const transport = useApplicationSelector(selectTransport);
+	const recordingWorkflow = useApplicationSelector(selectRecordingWorkflow);
+	const mutationLocked = transport.recordingCaptureId === activeCapture.captureId &&
+		(recordingWorkflow.status === "starting" || recordingWorkflow.status === "finalizing" || recordingWorkflow.status === "failed");
+	const composerDisabled = mutationLocked || !snapshot.captureId;
+	const actions = getNotesActions();
 	const visibleNotes = snapshot.notes.filter(note => originFilter === "all" || (note.authorType ?? "human") === originFilter);
 
 	return (
@@ -965,7 +1039,7 @@ function NotesPanelContent() {
 							value={originFilter}
 							onChange={event => {
 								const value = event.currentTarget.value as "all" | "human" | "agent";
-								setOriginFilter(value);
+								onOriginFilterChange(value);
 							}}
 						>
 							<option value="all">All notes</option>
@@ -1007,7 +1081,7 @@ function NotesPanelContent() {
 								text: noteText
 							})
 						)
-							setNoteText("");
+							onNoteTextChange("");
 					}}
 				>
 					<span className="eyebrow">Sequence observation</span>
@@ -1019,8 +1093,12 @@ function NotesPanelContent() {
 								id="sequenceStart"
 								type="number"
 								min="1"
+								disabled={composerDisabled}
 								value={sequenceStart}
-								onChange={event => setSequenceStart(event.currentTarget.value)}
+								onChange={event => {
+									const value = event.currentTarget.value;
+									onSequenceStartChange(value);
+								}}
 							/>
 						</label>
 						<label className="field">
@@ -1029,19 +1107,27 @@ function NotesPanelContent() {
 								id="sequenceEnd"
 								type="number"
 								min="1"
+								disabled={composerDisabled}
 								value={sequenceEnd}
-								onChange={event => setSequenceEnd(event.currentTarget.value)}
+								onChange={event => {
+									const value = event.currentTarget.value;
+									onSequenceEndChange(value);
+								}}
 							/>
 						</label>
 					</div>
 					<textarea
 						id="captureNoteText"
 						required
+						disabled={composerDisabled}
 						placeholder="What does this message sequence appear to represent?"
 						value={noteText}
-						onChange={event => setNoteText(event.currentTarget.value)}
+						onChange={event => {
+							const value = event.currentTarget.value;
+							onNoteTextChange(value);
+						}}
 					/>
-					<button className="btn btn-primary" type="submit">
+					<button className="btn btn-primary" type="submit" disabled={composerDisabled}>
 						Add sequence note
 					</button>
 				</form>
@@ -1050,7 +1136,7 @@ function NotesPanelContent() {
 }
 
 function Toast({ sendPopupOpen }: { sendPopupOpen: boolean }) {
-	const snapshot = useSyncExternalStore(subscribeToToast, getToastSnapshot, getToastSnapshot);
+	const snapshot = useApplicationSelector(selectToast);
 	return (
 		<div
 			id="toast"
@@ -1063,16 +1149,12 @@ function Toast({ sendPopupOpen }: { sendPopupOpen: boolean }) {
 }
 
 function PersistenceErrorBanner() {
-	const snapshot = useSyncExternalStore(
-		subscribeToPersistenceError,
-		getPersistenceErrorSnapshot,
-		getPersistenceErrorSnapshot
-	);
+	const snapshot = useApplicationSelector(selectPersistenceError);
 	if (!snapshot.visible) return null;
 	return (
 		<div className="persistence-error" role="alert">
 			<div>
-				<strong>Capture is not fully stored.</strong>
+				<strong>Archive persistence needs attention.</strong>
 				<span>{snapshot.message}</span>
 			</div>
 			<div className="persistence-error-actions">
@@ -1170,6 +1252,8 @@ function SidebarResizeHandle({
 }
 
 function App() {
+	const archive = useArchiveDataLayer();
+	useArchiveSelectionSync();
 	const [sendPopupOpen, setSendPopupOpen] = useState(false);
 	const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
 	const [sidebarResizing, setSidebarResizing] = useState(false);
@@ -1198,7 +1282,7 @@ function App() {
 		void import("./controller")
 			.then(({ initializeController }) => {
 				if (disposed) return;
-				const lifecycle = initializeController();
+					const lifecycle = initializeController({ archive });
 				const handleBeforeUnload = (event: BeforeUnloadEvent) => lifecycle.beforeUnload(event);
 				window.addEventListener("beforeunload", handleBeforeUnload);
 				removeBeforeUnload = () => window.removeEventListener("beforeunload", handleBeforeUnload);
@@ -1209,7 +1293,7 @@ function App() {
 			disposed = true;
 			removeBeforeUnload?.();
 		};
-	}, []);
+	}, [archive]);
 
 	return (
 		<>

@@ -76,7 +76,6 @@ test("parses multi-capture text dumps with injected IDs and clock", () => {
 test("imports a text dump through injected file, persistence, rendering, and toast seams", async () => {
 	const state = stateWithExistingCapture();
 	let activeId = state.activeId;
-	let saves = 0;
 	let renders = 0;
 	const messages: string[] = [];
 	const controller = createDataTransferController({
@@ -86,7 +85,6 @@ test("imports a text dump through injected file, persistence, rendering, and toa
 		setActiveId: captureId => {
 			activeId = captureId;
 		},
-		saveState: () => saves++,
 		render: () => renders++,
 		showToast: message => messages.push(message),
 		download: () => {},
@@ -101,7 +99,6 @@ test("imports a text dump through injected file, persistence, rendering, and toa
 	};
 	await controller.importFile(file);
 
-	assert.equal(saves, 1);
 	assert.equal(renders, 1);
 	assert.deepEqual(messages, ["Imported monitor.txt"]);
 	assert.equal(activeId, "generated-2");
@@ -117,7 +114,6 @@ test("exports JSON through dependency injection without a browser download", () 
 		capture: () => state.captures[0],
 		getActiveId: () => state.activeId,
 		setActiveId: () => {},
-		saveState: () => {},
 		render: () => {},
 		showToast: () => {},
 		download: (content, filename, type) => downloads.push({ content, filename, type }),

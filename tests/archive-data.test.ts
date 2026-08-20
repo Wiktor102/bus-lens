@@ -53,6 +53,10 @@ test("archive query options expose stable typed keys and delegate reads", async 
 	assert.equal(loaded, 1);
 });
 
+test("capture detail keys cannot collide with capture summaries", () => {
+	assert.notDeepEqual(archiveQueryKeys.capture("summaries"), archiveQueryKeys.captureSummaries());
+});
+
 test("archive mutation options delegate typed commands and attach their cache policy", async () => {
 	let savedFolder = "";
 	const client: ArchiveMutationSource = {

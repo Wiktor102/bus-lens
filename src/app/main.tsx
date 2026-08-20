@@ -1,6 +1,9 @@
 import { createRoot } from "react-dom/client";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createAppQueryClient } from "../data/query-client";
+import { createArchiveDataLayer } from "../data/archive-data-layer";
+import { ArchiveDataProvider } from "../data/archive-react";
+import { ArchiveClient } from "../persistence/archive-client";
 import App from "./App";
 import { ApplicationStoreProvider } from "./application-store-provider";
 
@@ -11,11 +14,14 @@ if (!root) {
 }
 
 const queryClient = createAppQueryClient();
+const archive = createArchiveDataLayer(queryClient, new ArchiveClient());
 
 createRoot(root).render(
 	<QueryClientProvider client={queryClient}>
-		<ApplicationStoreProvider>
-			<App />
-		</ApplicationStoreProvider>
+		<ArchiveDataProvider layer={archive}>
+			<ApplicationStoreProvider>
+				<App />
+			</ApplicationStoreProvider>
+		</ArchiveDataProvider>
 	</QueryClientProvider>
 );

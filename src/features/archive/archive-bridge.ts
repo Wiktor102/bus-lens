@@ -1,12 +1,4 @@
-import type { ArchiveCapture, ArchiveFolder } from "./archive-list";
-import { createExternalStore } from "../../shared/external-store.ts";
-
-export type ArchiveSnapshot = {
-	captures: ArchiveCapture[];
-	folders: ArchiveFolder[];
-	activeId: string | null | undefined;
-	unfiledCollapsed: boolean;
-};
+import { applicationStore } from "../../shared/application-store.ts";
 
 export type ArchiveActions = {
 	selectCapture: (captureId: string) => void;
@@ -22,31 +14,22 @@ export type ArchiveActions = {
 	importFile: (file: File) => void | Promise<void>;
 };
 
-const emptyArchiveSnapshot: ArchiveSnapshot = {
-	captures: [],
-	folders: [],
-	activeId: null,
-	unfiledCollapsed: false
+/** Typed command actions; archive data is Query-owned. */
+const actions: ArchiveActions = {
+	selectCapture: captureId => applicationStore.sendCommand({ type: "archive/select", captureId }),
+	toggleFolder: folderId => applicationStore.sendCommand({ type: "archive/toggle-folder", folderId }),
+	moveCapture: (captureId, folderId) => applicationStore.sendCommand({ type: "archive/move-capture", captureId, folderId }),
+	upgradeCapture: captureId => applicationStore.sendCommand({ type: "capture/upgrade", captureId }),
+	duplicateCapture: captureId => applicationStore.sendCommand({ type: "capture/duplicate-archive", captureId }),
+	deleteCapture: captureId => applicationStore.sendCommand({ type: "capture/delete", captureId }),
+	openNewCapture: () => applicationStore.sendCommand({ type: "archive/open-new-capture" }),
+	openExport: () => applicationStore.sendCommand({ type: "archive/open-export" }),
+	saveFolder: (name, editingId) => {
+		applicationStore.sendCommand({ type: "archive/save-folder", name, editingId });
+		return Boolean(name.trim());
+	},
+	deleteFolder: folderId => applicationStore.sendCommand({ type: "archive/delete-folder", folderId }),
+	importFile: file => { applicationStore.sendCommand({ type: "archive/import-file", file }); }
 };
 
-const noopActions: ArchiveActions = {
-	selectCapture: () => {},
-	toggleFolder: () => {},
-	moveCapture: () => {},
-	upgradeCapture: () => {},
-	duplicateCapture: () => {},
-	deleteCapture: () => {},
-	openNewCapture: () => {},
-	openExport: () => {},
-	saveFolder: () => false,
-	deleteFolder: () => {},
-	importFile: () => {}
-};
-
-const archiveStore = createExternalStore<ArchiveSnapshot, ArchiveActions>(emptyArchiveSnapshot, noopActions);
-
-export const getArchiveSnapshot = archiveStore.getSnapshot;
-export const subscribeToArchive = archiveStore.subscribe;
-export const publishArchiveSnapshot = archiveStore.publish;
-export const registerArchiveActions = archiveStore.registerActions;
-export const getArchiveActions = archiveStore.getActions;
+export const getArchiveActions = (): ArchiveActions => actions;

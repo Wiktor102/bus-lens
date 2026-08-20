@@ -13,12 +13,13 @@ export const EMPTY_FRAMING_TOOLBAR_SNAPSHOT: FramingToolbarSnapshot = {
 };
 
 export function selectFramingToolbarSnapshot(
-	capture: Capture | null | undefined
+	capture: Capture | null | undefined,
+	disabled = false
 ): FramingToolbarSnapshot {
 	if (!capture) return EMPTY_FRAMING_TOOLBAR_SNAPSHOT;
 	return {
 		captureId: capture.id || null,
-		disabled: false,
+		disabled,
 		frameSizeLabel: selectFrameSizeLabel(capture)
 	};
 }

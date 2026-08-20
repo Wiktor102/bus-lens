@@ -1,5 +1,4 @@
-import { createExternalStore } from "../../shared/external-store.ts";
-import { EMPTY_NOTES_SNAPSHOT, type NotesSnapshot } from "./notes.ts";
+import { applicationStore } from "../../shared/application-store.ts";
 
 export type SequenceNoteInput = {
 	start: string | number;
@@ -11,14 +10,14 @@ export type NotesActions = {
 	addSequenceNote: (input: SequenceNoteInput) => boolean;
 };
 
-const noopActions: NotesActions = {
-	addSequenceNote: () => false
+/** Typed command action; notes are derived from the selected capture query. */
+const actions: NotesActions = {
+	addSequenceNote: input => {
+		const text = String(input.text ?? "").trim();
+		if (!text) return false;
+		applicationStore.sendCommand({ type: "notes/add-sequence", ...input, text });
+		return true;
+	}
 };
 
-const notesStore = createExternalStore<NotesSnapshot, NotesActions>(EMPTY_NOTES_SNAPSHOT, noopActions);
-
-export const getNotesSnapshot = notesStore.getSnapshot;
-export const subscribeToNotes = notesStore.subscribe;
-export const publishNotesSnapshot = notesStore.publish;
-export const registerNotesActions = notesStore.registerActions;
-export const getNotesActions = notesStore.getActions;
+export const getNotesActions = (): NotesActions => actions;

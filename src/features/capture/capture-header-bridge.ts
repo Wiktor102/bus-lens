@@ -1,5 +1,4 @@
-import { createExternalStore } from "../../shared/external-store.ts";
-import { EMPTY_CAPTURE_HEADER_SNAPSHOT, type CaptureHeaderSnapshot } from "./capture-header.ts";
+import { applicationStore } from "../../shared/application-store.ts";
 
 export type CaptureHeaderActions = {
 	setTitle: (value: string) => void;
@@ -13,25 +12,17 @@ export type CaptureHeaderActions = {
 	upgradeStorage: () => void;
 };
 
-const noopActions: CaptureHeaderActions = {
-	setTitle: () => {},
-	commitTitle: () => {},
-	setDescription: () => {},
-	commitDescription: () => {},
-	openContext: () => {},
-	duplicate: () => {},
-	clearMessages: () => {},
-	deleteCapture: () => {},
-	upgradeStorage: () => {}
+/** Typed command actions; header data is derived from query state. */
+const actions: CaptureHeaderActions = {
+	setTitle: value => applicationStore.sendCommand({ type: "capture/set-title", value }),
+	commitTitle: value => applicationStore.sendCommand({ type: "capture/commit-title", value }),
+	setDescription: value => applicationStore.sendCommand({ type: "capture/set-description", value }),
+	commitDescription: value => applicationStore.sendCommand({ type: "capture/commit-description", value }),
+	openContext: () => applicationStore.sendCommand({ type: "capture/open-context" }),
+	duplicate: () => applicationStore.sendCommand({ type: "capture/duplicate" }),
+	clearMessages: () => applicationStore.sendCommand({ type: "capture/clear-messages" }),
+	deleteCapture: () => applicationStore.sendCommand({ type: "capture/delete-active" }),
+	upgradeStorage: () => applicationStore.sendCommand({ type: "capture/upgrade-active" })
 };
 
-const captureHeaderStore = createExternalStore<CaptureHeaderSnapshot, CaptureHeaderActions>(
-	EMPTY_CAPTURE_HEADER_SNAPSHOT,
-	noopActions
-);
-
-export const getCaptureHeaderSnapshot = captureHeaderStore.getSnapshot;
-export const subscribeToCaptureHeader = captureHeaderStore.subscribe;
-export const publishCaptureHeaderSnapshot = captureHeaderStore.publish;
-export const registerCaptureHeaderActions = captureHeaderStore.registerActions;
-export const getCaptureHeaderActions = captureHeaderStore.getActions;
+export const getCaptureHeaderActions = (): CaptureHeaderActions => actions;

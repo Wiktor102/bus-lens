@@ -10,6 +10,8 @@ import {
 
 export type JsonDocument = Record<string, unknown>;
 
+export const MAX_SEND_HISTORY = 250;
+
 export type CaptureStorageStatus =
 	| "legacy-not-canonicalized"
 	| "converting"
@@ -66,6 +68,21 @@ export type DocumentRecord = {
 	id: string;
 	version: number;
 	document: JsonDocument;
+	createdAt: string;
+	updatedAt: string;
+};
+
+export type CaptureListDocument = {
+	id: string;
+	name: string;
+	description: string;
+	view: string;
+	folderId: string | null;
+	params: Array<{ key: string; value: string }>;
+	messageCount: number;
+	storageStatus: CaptureStorageStatus;
+	lifecycle?: string;
+	byteCount?: number;
 	createdAt: string;
 	updatedAt: string;
 };
@@ -220,6 +237,47 @@ function optionalString(value: unknown): string | null {
 
 function documentFolderId(document: JsonDocument): string | null {
 	return optionalString(document.folderId);
+}
+
+function captureListParameters(document: JsonDocument): Array<{ key: string; value: string }> {
+	const parameters = Array.isArray(document.params)
+		? document.params
+		: Array.isArray(document.parameters)
+			? document.parameters
+			: [];
+	return parameters.flatMap(parameter => {
+		if (!parameter || typeof parameter !== "object") return [];
+		const value = parameter as { key?: unknown; value?: unknown };
+		const key = String(value.key ?? "").trim();
+		return key ? [{ key, value: String(value.value ?? "") }] : [];
+	});
+}
+
+function legacyCaptureListDocument(
+	id: string,
+	document: JsonDocument,
+	status: CaptureStorageStatus,
+	createdAt: string,
+	updatedAt: string
+): CaptureListDocument {
+	const messages = Array.isArray(document.messages) ? document.messages : [];
+	const byteCount = typeof document.byteCount === "number"
+		? document.byteCount
+		: Array.isArray(document.byteStream) ? document.byteStream.length : undefined;
+	return {
+		id,
+		name: String(document.name ?? "Untitled capture"),
+		description: String(document.description ?? ""),
+		view: String(document.view ?? document.controllerView ?? ""),
+		folderId: documentFolderId(document),
+		params: captureListParameters(document),
+		messageCount: messages.filter(message => !message || typeof message !== "object" || !(message as { hidden?: unknown }).hidden).length,
+		storageStatus: status,
+		...(document.lifecycle === undefined ? {} : { lifecycle: String(document.lifecycle) }),
+		...(byteCount === undefined ? {} : { byteCount }),
+		createdAt,
+		updatedAt
+	};
 }
 
 function timestampAsIso(value: unknown, fallback: string): string {
@@ -464,6 +522,95 @@ export class ArchiveRepository {
 			return all;
 		}
 		return [...synthesized, ...unconverted];
+	}
+
+	private getCanonicalCaptureList(id: string): DocumentRecord | undefined {
+		const row = this.database.prepare(
+			`SELECT captures.id, captures.name, captures.description, captures.controller_view,
+			        captures.lifecycle, captures.byte_count, captures.created_at, captures.updated_at,
+			        captures.folder_id, captures.metadata_revision, captures.content_revision,
+			        captures.active_framing_profile_id
+			 FROM capture_storage
+			 JOIN captures ON captures.id = capture_storage.capture_id
+			 WHERE captures.id = @id AND capture_storage.status = 'canonical'`
+		).get({ id }) as {
+			id: string;
+			name: string;
+			description: string;
+			controller_view: string;
+			lifecycle: string;
+			byte_count: number;
+			created_at: string;
+			updated_at: string;
+			folder_id: string | null;
+			metadata_revision: number;
+			content_revision: number;
+			active_framing_profile_id: string | null;
+		} | undefined;
+		if (!row) return undefined;
+		const parameters = this.database.prepare(
+			"SELECT key_text, value_text FROM capture_parameters WHERE capture_id = @captureId ORDER BY position"
+		).all({ captureId: id }) as Array<{ key_text: string; value_text: string }>;
+		const messageCount = row.active_framing_profile_id
+			? (this.database.prepare(
+				"SELECT COUNT(*) AS count FROM materialized_frames WHERE profile_id = @profileId AND hidden = 0"
+			).get({ profileId: row.active_framing_profile_id }) as { count: number }).count
+			: 0;
+		const document: CaptureListDocument = {
+			id: row.id,
+			name: row.name,
+			description: row.description,
+			view: row.controller_view,
+			folderId: row.folder_id,
+			params: parameters.map(parameter => ({ key: parameter.key_text, value: parameter.value_text })),
+			messageCount,
+			storageStatus: "canonical",
+			lifecycle: row.lifecycle,
+			byteCount: row.byte_count,
+			createdAt: row.created_at,
+			updatedAt: row.updated_at
+		};
+		return {
+			id: row.id,
+			version: Math.max(1, row.metadata_revision + row.content_revision),
+			document: document as unknown as JsonDocument,
+			createdAt: row.created_at,
+			updatedAt: row.updated_at
+		};
+	}
+
+	private getLegacyCaptureList(id: string, status: CaptureStorageStatus): DocumentRecord | undefined {
+		const record = this.getDocument("capture_documents", id);
+		if (!record) return undefined;
+		return {
+			...record,
+			document: legacyCaptureListDocument(id, record.document, status, record.createdAt, record.updatedAt) as unknown as JsonDocument
+		};
+	}
+
+	/**
+	 * Lists only capture metadata needed by the archive sidebar.  In particular,
+	 * this path never calls getCanonicalCapture(), which materializes raw bytes.
+	 */
+	listCaptureProjections(): DocumentRecord[] {
+		const storageRows = this.database
+			.prepare("SELECT capture_id, status FROM capture_storage ORDER BY updated_at DESC, capture_id ASC")
+			.all() as Array<{ capture_id: string; status: CaptureStorageStatus }>;
+		const records = storageRows.flatMap(row => {
+			const record = row.status === "canonical"
+				? this.getCanonicalCaptureList(row.capture_id)
+				: this.getLegacyCaptureList(row.capture_id, row.status);
+			return record ? [record] : [];
+		});
+		const order = this.database
+			.prepare("SELECT entity_id, position FROM archive_order WHERE entity_type='capture' ORDER BY position, entity_id")
+			.all() as Array<{ entity_id: string; position: number }>;
+		if (!order.length) return records;
+		const positions = new Map(order.map(row => [row.entity_id, row.position]));
+		return records.sort((left, right) =>
+			(positions.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (positions.get(right.id) ?? Number.MAX_SAFE_INTEGER) ||
+			 right.updatedAt.localeCompare(left.updatedAt)
+		);
 	}
 
 	/** Returns synthesized DocumentRecord from canonical tables if converted, otherwise undefined */
@@ -870,7 +1017,19 @@ export class ArchiveRepository {
 	}
 
 	listHistory(): DocumentRecord[] {
+		this.trimHistory();
 		return this.listDocuments("send_history", "occurred_at DESC, created_at DESC, id ASC");
+	}
+
+	private trimHistory(): void {
+		this.database.prepare(
+			`DELETE FROM send_history
+			 WHERE id IN (
+				SELECT id FROM send_history
+				ORDER BY occurred_at DESC, created_at DESC, id ASC
+				LIMIT -1 OFFSET @limit
+			)`
+		).run({ limit: MAX_SEND_HISTORY });
 	}
 
 	putHistoryItem(id: string | undefined, document: JsonDocument, expectedVersion?: number): DocumentRecord {
@@ -888,6 +1047,7 @@ export class ArchiveRepository {
 					return { id: normalizedId, version: 1, document, createdAt, updatedAt: createdAt };
 				})();
 			if (existing) this.database.prepare("UPDATE send_history SET occurred_at = @occurredAt WHERE id = @id").run({ id: record.id, occurredAt });
+			this.trimHistory();
 			return record;
 		});
 		return transaction();

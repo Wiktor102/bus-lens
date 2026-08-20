@@ -92,7 +92,7 @@ function entityRecord(repository: ArchiveRepository, entity: Entity, id: string)
 }
 
 function entityList(repository: ArchiveRepository, entity: Entity) {
-	if (entity === "captures") return repository.listCaptures();
+	if (entity === "captures") return repository.listCaptureProjections();
 	if (entity === "folders") return repository.listFolders();
 	if (entity === "queue") return repository.listQueue();
 	return repository.listHistory();
@@ -255,6 +255,16 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 						expectedRevision: body.expectedRevision === undefined ? undefined : Number(body.expectedRevision)
 					}));
 				}
+				if (segments[3] === "framing-sections" && segments[4] && segments[5] === "view" && request.method === "PATCH") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					return send(response, 200, commandService.updateFramingSectionView({
+						captureId,
+						sectionId: segments[4],
+						profileId: String(body.profileId ?? ""),
+						collapseRuns: body.collapseRuns === undefined ? undefined : Boolean(body.collapseRuns),
+						collapsed: body.collapsed === undefined ? undefined : Boolean(body.collapsed)
+					}));
+				}
 				if (segments[3] === "framing-revisions" && request.method === "POST") {
 					const body = documentFrom(await jsonBody(request, maxBodyBytes));
 					return send(response, 200, commandService.reframe({
@@ -290,8 +300,7 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 						}));
 					}
 					if (noteId && request.method === "DELETE") {
-						commandService.deleteNote({ captureId, noteId });
-						return send(response, 204, {});
+						return send(response, 200, commandService.deleteNote({ captureId, noteId }));
 					}
 				}
 				if (segments[3] === "bytes" && segments[4] && segments[5] === "visibility") {

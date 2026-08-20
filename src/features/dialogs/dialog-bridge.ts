@@ -1,4 +1,3 @@
-import { createExternalStore } from "../../shared/external-store.ts";
 import type {
 	AnnotationDeleteInput,
 	AnnotationSaveInput,
@@ -9,6 +8,7 @@ import type {
 	ExportFormat,
 	PatternRemarkSaveInput
 } from "./dialog-model.ts";
+import { applicationStore, selectDialog } from "../../shared/application-store.ts";
 
 export type DialogActions = {
 	saveContext: (input: ContextSaveInput) => boolean;
@@ -19,25 +19,40 @@ export type DialogActions = {
 	notify: (message: string) => void;
 };
 
-const EMPTY_DIALOG_SNAPSHOT: DialogSnapshot = { command: null };
+let lastCommand: DialogCommand | null | undefined;
+let lastSnapshot: DialogSnapshot | undefined;
 
-const noopActions: DialogActions = {
-	saveContext: () => false,
-	saveAnnotation: () => false,
-	deleteAnnotation: () => {},
-	savePatternRemark: () => false,
-	exportData: () => {},
-	notify: () => {}
+/** Typed command actions; dialog state is owned by applicationStore. */
+export function getDialogSnapshot(): DialogSnapshot {
+	const command = applicationStore.select(selectDialog);
+	if (command !== lastCommand) {
+		lastCommand = command;
+		lastSnapshot = { command };
+	}
+	return lastSnapshot || { command };
+}
+
+export const subscribeToDialogs = applicationStore.subscribe;
+const actions: DialogActions = {
+	saveContext: input => {
+		applicationStore.sendCommand({ type: "dialog/save-context", input });
+		return true;
+	},
+	saveAnnotation: input => {
+		applicationStore.sendCommand({ type: "dialog/save-annotation", input });
+		return true;
+	},
+	deleteAnnotation: input => applicationStore.sendCommand({ type: "dialog/delete-annotation", input }),
+	savePatternRemark: input => {
+		applicationStore.sendCommand({ type: "dialog/save-pattern-remark", input });
+		return true;
+	},
+	exportData: format => applicationStore.sendCommand({ type: "dialog/export", format }),
+	notify: message => applicationStore.sendCommand({ type: "dialog/notify", message })
 };
 
-const dialogStore = createExternalStore<DialogSnapshot, DialogActions>(EMPTY_DIALOG_SNAPSHOT, noopActions);
-let requestId = 0;
-
-export const getDialogSnapshot = dialogStore.getSnapshot;
-export const subscribeToDialogs = dialogStore.subscribe;
-export const registerDialogActions = dialogStore.registerActions;
-export const getDialogActions = dialogStore.getActions;
+export const getDialogActions = (): DialogActions => actions;
 
 export function publishDialogCommand(command: DialogCommandInput): void {
-	dialogStore.publish({ command: { ...command, requestId: ++requestId } as DialogCommand });
+	applicationStore.send({ type: "dialog/command-changed", command });
 }

@@ -113,6 +113,52 @@ export type Capture = Omit<CaptureSummaryData, "notes"> & {
 	framingDraftRevision?: number;
 };
 
+/**
+ * The server-owned versions that identify the active byte/frame projection.
+ * Metadata and framing drafts are intentionally excluded: neither changes the
+ * materialized stream. This is deliberately scalar so refresh reconciliation
+ * never serializes a capture document.
+ */
+export function captureProjectionToken(capture: Capture | undefined): string {
+	if (!capture) return "";
+	return [
+		capture.activeFramingProfileId ?? "",
+		Number.isSafeInteger(capture.dataRevision) ? capture.dataRevision : "",
+		Number.isSafeInteger(capture.contentRevision) ? capture.contentRevision : "",
+		Number.isSafeInteger(capture.retainedStartOffset) ? capture.retainedStartOffset : ""
+	].join("|");
+}
+
+export type CaptureProjectionMutation = "replace" | "append";
+
+type CaptureProjectionState = {
+	generation: number;
+	mutation: CaptureProjectionMutation;
+};
+
+// Projection generations are runtime metadata. Keeping them outside Capture
+// prevents the cache's invalidation bookkeeping from leaking into persisted
+// capture documents while still giving every mutable capture a monotonic epoch.
+const captureProjectionState = new WeakMap<object, CaptureProjectionState>();
+
+export function captureProjectionGeneration(capture: Capture): number {
+	return captureProjectionState.get(capture)?.generation || 0;
+}
+
+export function captureProjectionMutation(capture: Capture): CaptureProjectionMutation {
+	return captureProjectionState.get(capture)?.mutation || "replace";
+}
+
+/** Call once for every mutation that can affect message-stream analysis. */
+export function bumpCaptureProjectionGeneration(
+	capture: Capture,
+	mutation: CaptureProjectionMutation = "replace"
+): number {
+	const generation = captureProjectionGeneration(capture) + 1;
+	captureProjectionState.set(capture, { generation, mutation });
+	return generation;
+}
+
 export type PreviewByteRecord = RawByteRecord & { rawPosition: number };
 type ExistingMessage = { id?: string; hidden: boolean };
 
@@ -268,15 +314,23 @@ export function normalizeCapture(capture: Capture, generateId = createId): Captu
 	});
 	normalizeRawOffsets(capture);
 	// Older exports stored byte visibility on framed messages rather than raw
-	// byte records. Copy it across before the preview is rebuilt.
+	// byte records. Collect those offsets once before walking the raw stream;
+	// searching the full stream once per framed byte makes every subsequent
+	// preview rebuild quadratic on large captures.
+	const legacyHiddenRawOffsets = new Set<number>();
 	capture.messages.forEach(message => {
 		if (!Number.isInteger(message._byteStart) && !Array.isArray(message.rawOffsets) && !Array.isArray(message._rawPositions)) return;
 		message.hiddenBytes?.forEach((hidden, index) => {
+			if (!hidden) return;
 			const rawPosition = message.rawOffsets?.[index] ?? message._rawPositions?.[index] ?? (message._byteStart as number) + index;
-			const rawByte = capture.byteStream?.find(record => record.rawOffset === rawPosition);
-				if (hidden && rawByte) rawByte.hidden = true;
+			legacyHiddenRawOffsets.add(rawPosition);
 		});
 	});
+	if (legacyHiddenRawOffsets.size) {
+		capture.byteStream.forEach(record => {
+			if (legacyHiddenRawOffsets.has(record.rawOffset!)) record.hidden = true;
+		});
+	}
 	if (!hasPersistedSections) {
 		capture.frameSections = migrateLegacySections(capture, legacyPreviewMode, generateId);
 	}
@@ -511,6 +565,10 @@ function appendMarkerEndFramedPreview(
  * context, such as a marker-start section or a newly introduced section.
  */
 export function appendLivePreview(capture: Capture, previousByteStreamLength: number, generateId = createId): boolean {
+	const markAppended = (result: boolean): boolean => {
+		if (result) bumpCaptureProjectionGeneration(capture, "append");
+		return result;
+	};
 	const stream = capture.byteStream || [];
 	if (previousByteStreamLength < 0 || previousByteStreamLength > stream.length) return false;
 	const sections = capture.frameSections || [];
@@ -541,14 +599,14 @@ export function appendLivePreview(capture: Capture, previousByteStreamLength: nu
 			const rawPosition = record.rawOffset ?? 0;
 			return rawPosition >= sectionStart;
 		})) return false;
-		return appendLengthFramedPreview(capture, section, appended, sectionMessages, generateId);
+		return markAppended(appendLengthFramedPreview(capture, section, appended, sectionMessages, generateId));
 	}
 	if (settings.framingMode === "time") {
 		if (!sectionMessages.length && stream.slice(0, previousByteStreamLength).some(record => {
 			const rawPosition = record.rawOffset ?? 0;
 			return rawPosition >= sectionStart;
 		})) return false;
-		return appendTimeFramedPreview(capture, section, appended, sectionMessages, generateId);
+		return markAppended(appendTimeFramedPreview(capture, section, appended, sectionMessages, generateId));
 	}
 	if (!sectionMessages.length) {
 		// A marker-end section has no visible messages until its first marker.
@@ -566,12 +624,13 @@ export function appendLivePreview(capture: Capture, previousByteStreamLength: nu
 			const candidate = markerCandidate[index + markerIndex]?.value;
 			return candidate === value;
 		}))) return false;
-		return true;
+		return markAppended(true);
 	}
-	return appendMarkerEndFramedPreview(capture, section, appended, sectionMessages, generateId);
+	return markAppended(appendMarkerEndFramedPreview(capture, section, appended, sectionMessages, generateId));
 }
 
 export function rebuildPreview(capture: Capture, generateId = createId): void {
+	bumpCaptureProjectionGeneration(capture);
 	normalizeCapture(capture, generateId);
 	// A hidden byte is omitted before framing, rather than merely omitted while
 	// rendering. This makes every framing mode behave exactly as though the byte
@@ -582,14 +641,19 @@ export function rebuildPreview(capture: Capture, generateId = createId): void {
 	const ranges: Array<[number, number, string?]> = [];
 	normalizeSections(capture, generateId);
 	const sections = capture.frameSections || [];
+	let streamIndex = 0;
 	sections.forEach((section, sectionIndex) => {
 		// Section starts are persisted as raw positions. Translate them to the
-		// compact stream so deleting bytes before a section shifts it naturally.
-		const start = stream.findIndex(record => record.rawPosition >= (section.start ?? 0));
+		// compact stream with one forward cursor so hundreds of sections do not
+		// each rescan the full capture.
+		while (streamIndex < stream.length && stream[streamIndex].rawPosition < (section.start ?? 0)) streamIndex += 1;
+		const start = streamIndex;
 		const nextRawStart = sections[sectionIndex + 1]?.start;
-		const nextStart = nextRawStart === undefined ? -1 : stream.findIndex(record => record.rawPosition >= nextRawStart);
-		const sectionEnd = nextStart < 0 ? stream.length : nextStart;
-		if (start < 0 || start >= sectionEnd) return;
+		if (nextRawStart !== undefined) {
+			while (streamIndex < stream.length && stream[streamIndex].rawPosition < nextRawStart) streamIndex += 1;
+		}
+		const sectionEnd = nextRawStart === undefined ? stream.length : streamIndex;
+		if (start >= sectionEnd) return;
 		frameSectionRanges(stream, start, sectionEnd, section).forEach(([rangeStart, rangeEnd]) => {
 			ranges.push([rangeStart, rangeEnd, section.id]);
 		});

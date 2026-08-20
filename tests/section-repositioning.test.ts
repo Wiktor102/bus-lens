@@ -6,7 +6,10 @@ import type { AppState } from "../src/shared/app-state.ts";
 import {
 	getSectionMoveAvailability,
 	getSectionMoveTarget,
-	moveSection
+	getSectionMoveAvailabilityFromMetadata,
+	getSectionMoveTargetFromMetadata,
+	moveSection,
+	precomputeSectionMoveMetadata
 } from "../src/features/capture/section-repositioning.ts";
 
 function capture(): Capture {
@@ -122,6 +125,34 @@ test("disables movement at capture and neighboring section boundaries", () => {
 	});
 });
 
+test("precomputes section movement targets and availability from one metadata set", () => {
+	const current = capture();
+	const metadata = precomputeSectionMoveMetadata(current);
+
+	assert.equal(metadata.size, 3);
+	assert.equal(getSectionMoveTargetFromMetadata(metadata, "payload", "message-before"), 6);
+	assert.equal(getSectionMoveTargetFromMetadata(metadata, "payload", "message-after"), 10);
+	assert.deepEqual(getSectionMoveAvailabilityFromMetadata(metadata, "payload"), {
+		"byte-before": true,
+		"byte-after": true,
+		"message-before": true,
+		"message-after": true
+	});
+});
+
+test("uses absolute raw offsets for retained capture movement", () => {
+	const current = capture();
+	current.byteStream = current.byteStream!.map((record, index) => ({ ...record, rawOffset: index + 100 }));
+	current.frameSections = current.frameSections!.map(section => ({ ...section, start: section.start! + 100 }));
+	rebuildPreview(current);
+	const metadata = precomputeSectionMoveMetadata(current);
+
+	assert.equal(getSectionMoveTargetFromMetadata(metadata, "payload", "byte-before"), 107);
+	assert.equal(getSectionMoveTargetFromMetadata(metadata, "payload", "message-before"), 106);
+	assert.equal(getSectionMoveTargetFromMetadata(metadata, "payload", "message-after"), 110);
+	assert.equal(getSectionMoveTargetFromMetadata(metadata, "tail", "byte-after"), 117);
+});
+
 test("new sections default to length framing while retaining useful preceding settings", () => {
 	const current = {
 		id: "capture-inherit",
@@ -198,7 +229,6 @@ test("new sections default to length framing while retaining useful preceding se
 
 test("deletes a non-initial section without deleting its captured bytes", () => {
 	const current = capture();
-	const saved: unknown[] = [];
 	let renders = 0;
 	const toasts: string[] = [];
 	const controller = createCaptureController({
@@ -206,7 +236,6 @@ test("deletes a non-initial section without deleting its captured bytes", () => 
 		capture: () => current,
 		getActiveId: () => current.id,
 		setActiveId: () => {},
-		saveState: options => saved.push(options),
 		render: () => { renders += 1; },
 		renderMessages: () => {},
 		showToast: message => toasts.push(message),
@@ -224,7 +253,6 @@ test("deletes a non-initial section without deleting its captured bytes", () => 
 	controller.deleteSection("payload");
 	assert.deepEqual(current.frameSections?.map(section => section.id), ["header", "tail"]);
 	assert.equal(current.messages.flatMap(message => message.bytes).length, 20);
-	assert.deepEqual(saved, [{ immediate: true }]);
 	assert.equal(renders, 1);
 	assert.deepEqual(toasts, []);
 });

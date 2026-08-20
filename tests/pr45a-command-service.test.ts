@@ -4,6 +4,10 @@ import { CanonicalCaptureCommandService, CanonicalCaptureIdempotencyConflictErro
 import { openDatabase } from "../server/database.ts";
 
 const framing = [{ start: 0, framingMode: "length", frameSize: 2, collapseRuns: false, collapsed: false }] as const;
+const twoSectionFraming = [
+	{ start: 0, framingMode: "length", frameSize: 2, collapseRuns: false, collapsed: false },
+	{ start: 2, framingMode: "length", frameSize: 2, collapseRuns: false, collapsed: false }
+] as const;
 
 function columns(database: ReturnType<typeof openDatabase>, table: string): Set<string> {
 	return new Set((database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(column => column.name));
@@ -506,6 +510,78 @@ test("finalization snapshots the latest framing draft", () => {
 		assert.deepEqual(
 			database.prepare("SELECT bytes_json FROM materialized_frames WHERE capture_id = 'latest-draft' ORDER BY ordinal").all(),
 			[{ bytes_json: "[1]" }, { bytes_json: "[2]" }, { bytes_json: "[3]" }]
+		);
+	} finally {
+		database.close();
+	}
+});
+
+test("section view draft sync falls back to raw start when draft positions diverge", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		const service = new CanonicalCaptureCommandService(database);
+		service.createCapture({ captureId: "section-view-draft-order", framing: twoSectionFraming, inputFormat: "binary" });
+		service.startSession({ captureId: "section-view-draft-order", sessionId: "section-view-draft-order-session" });
+		const append = service.appendChunk({
+			captureId: "section-view-draft-order",
+			sessionId: "section-view-draft-order-session",
+			requestId: "section-view-draft-order-request",
+			sequence: 0,
+			expectedStartOffset: 0,
+			bytes: [1, 2, 3, 4]
+		});
+		const finalized = service.finalizeSession({
+			captureId: "section-view-draft-order",
+			sessionId: "section-view-draft-order-session",
+			expectedDataRevision: append.dataRevision
+		});
+		const activeSections = database
+			.prepare(
+				`SELECT id, position, start_offset AS start
+				 FROM framing_sections
+				 WHERE capture_id = @captureId AND profile_id = @profileId
+				 ORDER BY position`
+			)
+			.all({ captureId: "section-view-draft-order", profileId: finalized.profileId }) as Array<{ id: string; position: number; start: number }>;
+		assert.deepEqual(activeSections.map(section => ({ position: section.position, start: section.start })), [
+			{ position: 0, start: 0 },
+			{ position: 1, start: 2 }
+		]);
+
+		const draftSections = [
+			{ start: 2, framingMode: "length", frameSize: 2, collapseRuns: false, collapsed: false },
+			{ start: 0, framingMode: "length", frameSize: 2, collapseRuns: false, collapsed: false }
+		];
+		database
+			.prepare(
+				`UPDATE framing_drafts
+				 SET sections_json = @sectionsJson
+				 WHERE capture_id = @captureId AND revision = (SELECT MAX(revision) FROM framing_drafts WHERE capture_id = @captureId)`
+			)
+			.run({ captureId: "section-view-draft-order", sectionsJson: JSON.stringify(draftSections) });
+
+		service.updateFramingSectionView({
+			captureId: "section-view-draft-order",
+			profileId: finalized.profileId,
+			sectionId: activeSections[1]!.id,
+			collapsed: true
+		});
+
+		const storedDraft = database
+			.prepare(
+				"SELECT sections_json FROM framing_drafts WHERE capture_id = @captureId ORDER BY revision DESC LIMIT 1"
+			)
+			.get({ captureId: "section-view-draft-order" }) as { sections_json: string };
+		assert.deepEqual(
+			(JSON.parse(storedDraft.sections_json) as Array<{ start: number; collapsed: boolean }>).map(section => ({
+				start: section.start,
+				collapsed: section.collapsed
+			})),
+			[
+				{ start: 2, collapsed: true },
+				{ start: 0, collapsed: false }
+			]
 		);
 	} finally {
 		database.close();

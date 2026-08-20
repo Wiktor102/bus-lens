@@ -3,6 +3,7 @@ import test from "node:test";
 import {
 	EMPTY_CAPTURE_HEADER_SNAPSHOT,
 	deriveCaptureHeaderSnapshot,
+	mergeCaptureHeaderRuntimeStats,
 	normalizeCaptureDescription,
 	normalizeCaptureTitle
 } from "../src/features/capture/capture-header.ts";
@@ -58,6 +59,31 @@ test("derives a compact header snapshot without publishing capture bytes", () =>
 
 test("uses the empty header snapshot when no capture is selected", () => {
 	assert.deepEqual(deriveCaptureHeaderSnapshot(undefined), EMPTY_CAPTURE_HEADER_SNAPSHOT);
+});
+
+test("does not present a finalizing or failed capture as saved", () => {
+	const capture = { id: "saving", byteStream: [], messages: [] } as Capture;
+
+	const finalizing = deriveCaptureHeaderSnapshot(capture, false, "finalizing");
+	assert.equal(finalizing.stateText, "FINALIZING");
+	assert.equal(finalizing.live, false);
+
+	const failed = deriveCaptureHeaderSnapshot(capture, false, "failed");
+	assert.equal(failed.stateText, "SAVE FAILED");
+	assert.equal(failed.live, false);
+});
+
+test("merges live stats only when the runtime publication targets the selected capture", () => {
+	const selected = deriveCaptureHeaderSnapshot({ id: "selected", byteStream: [], messages: [] } as Capture);
+	const live = deriveCaptureHeaderSnapshot({
+		id: "selected",
+		byteStream: [{ value: 0xaa, timestamp: 1, direction: "rx" }],
+		messages: [{ id: "message", bytes: [0xaa], timestamp: 1 }]
+	} as Capture, true);
+	const other = deriveCaptureHeaderSnapshot({ id: "other", byteStream: [], messages: [] } as Capture, true);
+
+	assert.equal(mergeCaptureHeaderRuntimeStats(selected, live).summary.capturedBytes, "1 B");
+	assert.equal(mergeCaptureHeaderRuntimeStats(selected, other), selected);
 });
 
 test("normalizes title and description drafts at blur time", () => {

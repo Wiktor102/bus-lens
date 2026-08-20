@@ -1,9 +1,9 @@
-import { createExternalStore } from "../../shared/external-store.ts";
 import {
 	captureStorageLabel,
 	captureStorageLocked,
 	type CaptureStorageUiStatus
 } from "./capture-storage.ts";
+import { applicationStore } from "../../shared/application-store.ts";
 
 export type CaptureStorageSnapshot = {
 	captureId: string | null;
@@ -25,15 +25,12 @@ const emptySnapshot: CaptureStorageSnapshot = {
 	canUpgrade: false
 };
 
-const storageStore = createExternalStore<CaptureStorageSnapshot, CaptureStorageActions>(emptySnapshot, {
-	upgrade: () => {}
-});
+/** Typed command action; storage status is derived from query data. */
+const actions: CaptureStorageActions = {
+	upgrade: () => applicationStore.sendCommand({ type: "storage/upgrade" })
+};
 
-export const getCaptureStorageSnapshot = storageStore.getSnapshot;
-export const subscribeToCaptureStorage = storageStore.subscribe;
-export const publishCaptureStorageSnapshot = storageStore.publish;
-export const registerCaptureStorageActions = storageStore.registerActions;
-export const getCaptureStorageActions = storageStore.getActions;
+export const getCaptureStorageActions = (): CaptureStorageActions => actions;
 
 export function captureStorageSnapshot(captureId: string | null, status: unknown): CaptureStorageSnapshot {
 	if (!captureId) return emptySnapshot;

@@ -1,4 +1,10 @@
-import type { AppState, SendSettings, StoredFolder } from "../shared/app-state.ts";
+import type {
+	AppState,
+	SendHistoryEntry,
+	SendQueueEntry,
+	SendSettings,
+	StoredFolder
+} from "../shared/app-state.ts";
 import type { Capture } from "../features/capture/capture-framing.ts";
 
 export type CanonicalStorageStatus = "canonical" | "converting" | "canonicalization-failed" | (string & {});
@@ -76,6 +82,9 @@ export type FramingSectionRequest = Readonly<{
 	collapseRuns?: boolean;
 	collapsed?: boolean;
 }>;
+
+/** Framing input for an immutable profile; section presentation is store-owned. */
+export type ReframeSectionRequest = Omit<FramingSectionRequest, "collapseRuns" | "collapsed">;
 
 export type CreateCaptureRequest = Readonly<{
 	captureId?: string;
@@ -232,7 +241,7 @@ export type FinalizeSessionResponse = Readonly<{
 
 export type ReframeRequest = Readonly<{
 	captureId: string;
-	sections: readonly FramingSectionRequest[];
+	sections: readonly ReframeSectionRequest[];
 	expectedActiveProfileId?: string | null;
 	expectedProfileId?: string | null;
 	expectedDataRevision: number;
@@ -246,6 +255,23 @@ export type ReframeResponse = Readonly<{
 	sourceDataRevision: number;
 	retainedStartOffset: number;
 	verified: boolean;
+}>;
+
+export type FramingSectionViewRequest = Readonly<{
+	captureId: string;
+	profileId: string;
+	sectionId: string;
+	collapseRuns?: boolean;
+	collapsed?: boolean;
+}>;
+
+export type FramingSectionViewResponse = Readonly<{
+	captureId: string;
+	profileId: string;
+	sectionId: string;
+	collapseRuns: boolean;
+	collapsed: boolean;
+	contentRevision: number;
 }>;
 
 export type ByteVisibilityRequest = Readonly<{
@@ -415,6 +441,25 @@ export type CaptureState = Readonly<{
 	notes: readonly CanonicalNote[];
 }>;
 
+/**
+ * The archive/sidebar projection.  This intentionally has no messages,
+ * byteStream, or other streaming payloads; it is safe to retain in Query.
+ */
+export type CaptureListItem = Readonly<{
+	id: string;
+	name: string;
+	description: string;
+	view: string;
+	folderId: string | null;
+	params: readonly OrderedCaptureParameter[];
+	messageCount: number;
+	storageStatus?: "legacy-not-canonicalized" | "converting" | "canonical" | "canonicalization-failed";
+	lifecycle?: string;
+	byteCount?: number;
+	createdAt?: string;
+	updatedAt?: string;
+}>;
+
 export type CanonicalCaptureSummary = Readonly<{
 	id: string;
 	status: "canonical" | "legacy-not-canonicalized" | "converting" | "canonicalization-failed";
@@ -424,6 +469,25 @@ export type CanonicalCaptureSummary = Readonly<{
 	createdAt: string;
 	updatedAt: string;
 	folderId: string | null;
+}>;
+
+export type ArchiveCaptureOrder = Readonly<{
+	id: string;
+	folderId: string | null;
+	position: number;
+}>;
+
+export type ArchiveFolderOrder = Readonly<{
+	id: string;
+	position: number;
+}>;
+
+/** The server-owned index that determines archive order, folders, and selection. */
+export type ArchiveIndex = Readonly<{
+	activeId: string | null;
+	unfiledCollapsed: boolean;
+	captures: readonly ArchiveCaptureOrder[];
+	folders: readonly ArchiveFolderOrder[];
 }>;
 
 /**
@@ -438,6 +502,7 @@ export interface CaptureWriter {
 	finalizeSession(request: FinalizeSessionRequest): Promise<FinalizeSessionResponse>;
 	updateFramingDraft(request: UpdateFramingDraftRequest): Promise<UpdateFramingDraftResponse>;
 	reframe(request: ReframeRequest): Promise<ReframeResponse>;
+	updateFramingSectionView(request: FramingSectionViewRequest): Promise<FramingSectionViewResponse>;
 	setByteVisibility(request: ByteVisibilityRequest): Promise<VisibilityResponse>;
 	deleteByteVisibility(captureId: string, rawOffset: number): Promise<void>;
 	setFrameVisibility(request: FrameVisibilityRequest): Promise<VisibilityResponse>;
@@ -445,7 +510,7 @@ export interface CaptureWriter {
 	listNotes(captureId: string): Promise<readonly CanonicalNote[]>;
 	createNote(request: CreateNoteRequest): Promise<NoteResponse>;
 	updateNote(request: UpdateNoteRequest): Promise<NoteResponse>;
-	deleteNote(request: DeleteNoteRequest): Promise<void>;
+	deleteNote(request: DeleteNoteRequest): Promise<ContentRevisionResponse>;
 	clearData(request: ClearCaptureDataRequest): Promise<ClearCaptureDataResponse>;
 	duplicate(request: DuplicateCaptureRequest): Promise<DuplicateCaptureResponse>;
 	delete(captureId: string): Promise<void>;
@@ -542,6 +607,29 @@ export class ArchiveClient implements CaptureWriter {
 			sendSettings: archive.settings.send as AppState["sendSettings"]
 		};
 	}
+	async loadArchiveIndex(): Promise<ArchiveIndex> {
+		return request<ArchiveIndex>("/archive-index");
+	}
+	async listCaptures(): Promise<CaptureListItem[]> {
+		const records = await request<Array<{ id?: string; document: CaptureListItem }>>("/captures");
+		return records.map(documentWithId);
+	}
+	async listFolders(): Promise<StoredFolder[]> {
+		const records = await request<Array<{ id?: string; document: StoredFolder }>>("/folders");
+		return records.map(documentWithId);
+	}
+	async listQueue(): Promise<SendQueueEntry[]> {
+		const records = await request<Array<{ id?: string; document: Record<string, unknown> }>>("/queue");
+		return records.map(documentWithId) as SendQueueEntry[];
+	}
+	async listHistory(): Promise<SendHistoryEntry[]> {
+		const records = await request<Array<{ id?: string; document: Record<string, unknown> }>>("/history");
+		return records.map(documentWithId) as SendHistoryEntry[];
+	}
+	async loadSettings(): Promise<Partial<SendSettings>> {
+		const settings = await request<{ send?: Record<string, unknown> }>("/settings");
+		return (settings.send ?? {}) as Partial<SendSettings>;
+	}
 	async migrate(archive: AppState): Promise<MigrationReport> {
 		const fingerprint = await archiveFingerprint(archive);
 		const report = archiveReport(archive, fingerprint);
@@ -595,10 +683,19 @@ export class ArchiveClient implements CaptureWriter {
 	async saveFolder(folder: StoredFolder): Promise<void> { await request(`/folders/${encodeURIComponent(folder.id)}`, { method: "PUT", ...requestBody(folder) }); }
 	async deleteCapture(captureId: string): Promise<void> { await this.delete(captureId); }
 	async deleteFolder(folderId: string): Promise<void> { await request(`/folders/${encodeURIComponent(folderId)}`, { method: "DELETE" }); }
+	async saveQueueItem(item: SendQueueEntry, position?: number): Promise<void> {
+		if (!item.id) throw new Error("queue item id is required");
+		await request(`/queue/${encodeURIComponent(item.id)}`, { method: "PUT", ...requestBody({ ...item, ...(position === undefined ? {} : { position }) }) });
+	}
 	async deleteQueueItem(queueItemId: string): Promise<void> { await request(`/queue/${encodeURIComponent(queueItemId)}`, { method: "DELETE" }); }
+	async saveHistoryItem(item: SendHistoryEntry): Promise<void> {
+		const id = typeof item.id === "string" ? item.id : "";
+		if (!id) throw new Error("history item id is required");
+		await request(`/history/${encodeURIComponent(id)}`, { method: "PUT", ...requestBody(item) });
+	}
 	async deleteHistoryItem(historyItemId: string): Promise<void> { await request(`/history/${encodeURIComponent(historyItemId)}`, { method: "DELETE" }); }
-	async saveArchiveIndex(state: AppState, activeId: string | null | undefined): Promise<void> {
-		await request("/archive-index", { method: "PUT", ...requestBody({ activeId: activeId ?? null, unfiledCollapsed: Boolean(state.unfiledCollapsed), captures: state.captures.map((capture, position) => ({ id: capture.id, folderId: capture.folderId ?? null, position })), folders: state.folders.map((folder, position) => ({ id: folder.id, position })) }) });
+	async saveArchiveIndex(index: ArchiveIndex): Promise<void> {
+		await request("/archive-index", { method: "PUT", ...requestBody(index) });
 	}
 	async saveSendState(state: AppState): Promise<void> {
 		await Promise.all((state.sendQueue ?? []).map((item, index) => request(`/queue/${encodeURIComponent(String(item.id ?? `queue-${index}`))}`, { method: "PUT", ...requestBody(item) })));
@@ -649,6 +746,15 @@ export class ArchiveClient implements CaptureWriter {
 		return requestJson<ReframeResponse>(`${capturePath(command.captureId)}/framing-revisions`, "POST", body);
 	}
 
+	async updateFramingSectionView(command: FramingSectionViewRequest): Promise<FramingSectionViewResponse> {
+		const { captureId: _captureId, sectionId: _sectionId, profileId: _profileId, ...body } = command;
+		return requestJson<FramingSectionViewResponse>(
+			`${capturePath(command.captureId)}/framing-sections/${encodeURIComponent(command.sectionId)}/view`,
+			"PATCH",
+			{ profileId: command.profileId, ...body }
+		);
+	}
+
 	async setByteVisibility(command: ByteVisibilityRequest): Promise<VisibilityResponse> {
 		return requestJson<VisibilityResponse>(`${capturePath(command.captureId)}/bytes/${encodeURIComponent(String(command.rawOffset))}/visibility`, "PUT", { hidden: command.hidden });
 	}
@@ -680,8 +786,8 @@ export class ArchiveClient implements CaptureWriter {
 		return requestJson<NoteResponse>(notePath(command.captureId, command.noteId), "PATCH", body);
 	}
 
-	async deleteNote(command: DeleteNoteRequest): Promise<void> {
-		await request<void>(notePath(command.captureId, command.noteId), { method: "DELETE" });
+	async deleteNote(command: DeleteNoteRequest): Promise<ContentRevisionResponse> {
+		return requestJson<ContentRevisionResponse>(notePath(command.captureId, command.noteId), "DELETE");
 	}
 
 	async clearData(command: ClearCaptureDataRequest): Promise<ClearCaptureDataResponse> {
