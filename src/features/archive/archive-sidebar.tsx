@@ -187,7 +187,6 @@ export function ArchiveSidebar() {
 			<aside className="sidebar">
 				<div className="sidebar-heading">
 					<div>
-						<span className="eyebrow">Archive</span>
 						<h1>Capture sets</h1>
 					</div>
 					<div className="sidebar-create-actions">
