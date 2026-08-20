@@ -13,7 +13,7 @@ import {
 	type ContextSaveInput,
 	type PatternRemarkSaveInput
 } from "../dialogs/dialog-model.ts";
-import { CAPTURE_INPUT_FORMATS, isSnifferInputFormat, SNIFFER_BAUD_RATE } from "./capture-format.ts";
+import { CAPTURE_INPUT_FORMATS, isSnifferInputFormat } from "./capture-format.ts";
 import type { RawByteRecord } from "./capture-summary.ts";
 import type { MessageStreamDeriveOptions } from "../message-stream/message-stream.ts";
 import {
@@ -360,7 +360,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			name: String(item.name ?? ""),
 			description: String(item.description ?? ""),
 			controllerView: String(item.view ?? ""),
-			baudRate: inputFormat === CAPTURE_INPUT_FORMATS.SNIFFER ? SNIFFER_BAUD_RATE : Number(item.baudRate ?? 115200),
+			baudRate: Number(item.baudRate ?? 115200),
 			inputFormat,
 			folderId: item.folderId ?? null,
 			parameters: item.params.flatMap(parameter => {
@@ -1168,7 +1168,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			name: String(c.name ?? "Untitled capture"),
 			view: String(c.view ?? ""),
 			folderId: c.folderId ? String(c.folderId) : null,
-			baudRate: isSnifferInputFormat(c.inputFormat) ? SNIFFER_BAUD_RATE : Number(c.baudRate || 115200),
+			baudRate: Number(c.baudRate || 115200),
 			inputFormat: isSnifferInputFormat(c.inputFormat) ? CAPTURE_INPUT_FORMATS.SNIFFER : CAPTURE_INPUT_FORMATS.BINARY,
 			params: (Array.isArray(c.params) ? c.params : []).map(parameter => {
 				const item = parameter as { key?: unknown; value?: unknown };
@@ -1353,7 +1353,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				name: String(c.name ?? "Untitled capture"),
 				description: String(c.description ?? ""),
 				controllerView: String(c.view ?? ""),
-				baudRate: isSnifferInputFormat(c.inputFormat) ? SNIFFER_BAUD_RATE : Number(c.baudRate ?? 115200),
+				baudRate: Number(c.baudRate ?? 115200),
 				inputFormat: isSnifferInputFormat(c.inputFormat) ? CAPTURE_INPUT_FORMATS.SNIFFER : CAPTURE_INPUT_FORMATS.BINARY,
 				folderId: c.folderId ?? null,
 				parameters: c.params.flatMap(parameter => {

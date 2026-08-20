@@ -1017,9 +1017,7 @@ export class CanonicalCaptureCommandService {
 		const name = String(request.name ?? "Untitled capture");
 		const description = String(request.description ?? "");
 		const controllerView = String(request.controllerView ?? request.view ?? "");
-		const baudRate = inputFormat === "sniffer"
-			? 28_800
-			: request.baudRate === undefined ? 115200 : optionalPositiveNumber(request.baudRate, "baudRate");
+		const baudRate = request.baudRate === undefined ? 115200 : optionalPositiveNumber(request.baudRate, "baudRate");
 		const folderId = request.folderId === undefined ? null : optionalString(request.folderId);
 		const parameters = normalizedParameters(request.parameters);
 		const now = this.nowIso();
@@ -1552,7 +1550,6 @@ export class CanonicalCaptureCommandService {
 		if (Object.prototype.hasOwnProperty.call(patch, "baudRate")) values.baudRate = optionalPositiveNumber(patch.baudRate, "baudRate");
 		if (Object.prototype.hasOwnProperty.call(patch, "inputFormat")) values.inputFormat = normalizedInputFormat(patch.inputFormat);
 		if (Object.prototype.hasOwnProperty.call(patch, "folderId")) values.folderId = optionalString(patch.folderId);
-		if (values.inputFormat === "sniffer") values.baudRate = 28_800;
 
 		this.database
 			.prepare(

@@ -1,5 +1,3 @@
-import { SNIFFER_BAUD_RATE } from "../capture/capture-format.ts";
-
 export const SNIFFER_RECORD_MARKER = 0xa5;
 
 export type SnifferDirection = "rx" | "tx";
@@ -63,5 +61,3 @@ export class SnifferParser {
 		return this.pending.length;
 	}
 }
-
-export { SNIFFER_BAUD_RATE };

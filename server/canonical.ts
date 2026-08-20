@@ -1077,7 +1077,6 @@ function legacyParameters(document: CaptureDocument): LegacyParameter[] {
 }
 
 function positiveLegacyBaudRate(document: CaptureDocument): number | null {
-	if (String((document as Record<string, unknown>).inputFormat ?? "") === "sniffer") return 28_800;
 	const value = Number((document as Record<string, unknown>).baudRate);
 	return Number.isFinite(value) && value > 0 ? value : null;
 }

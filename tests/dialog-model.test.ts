@@ -43,7 +43,7 @@ test("builds context drafts without mutating the open command", () => {
 	assert.deepEqual(command.params, []);
 });
 
-test("fixes the sniffer connection baud rate at 28,800", () => {
+test("preserves the selected sniffer connection baud rate", () => {
 	const draft = createContextDraft({
 		type: "context",
 		requestId: 2,
@@ -59,8 +59,8 @@ test("fixes the sniffer connection baud rate at 28,800", () => {
 	});
 
 	assert.equal(draft.inputFormat, "sniffer");
-	assert.equal(draft.baudRate, "28800");
-	assert.equal(contextDraftToValues({ ...draft, baudRate: "9600" }).baudRate, 28_800);
+	assert.equal(draft.baudRate, "9600");
+	assert.equal(contextDraftToValues({ ...draft, baudRate: "19200" }).baudRate, 19200);
 });
 
 test("normalizes annotation drafts and labels a raw byte by its visible position", () => {

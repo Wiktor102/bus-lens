@@ -13,7 +13,6 @@ import {
 	type FramedMessage,
 	type RawByteRecord
 } from "./capture-summary.ts";
-import { isSnifferInputFormat, SNIFFER_BAUD_RATE } from "./capture-format.ts";
 
 export type { MarkerPosition, SectionFramingMode, SectionFramingSettings } from "../../domain/framing.ts";
 
@@ -291,7 +290,6 @@ export function normalizeCapture(capture: Capture, generateId = createId): Captu
 	capture.annotations ||= {};
 	capture.patternRemarks ||= {};
 	capture.messages ||= [];
-	if (isSnifferInputFormat(capture.inputFormat)) capture.baudRate = SNIFFER_BAUD_RATE;
 	capture.messages.forEach(message => {
 		message.hidden = Boolean(message.hidden);
 		message.hiddenBytes = Array.isArray(message.hiddenBytes)

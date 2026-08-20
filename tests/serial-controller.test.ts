@@ -151,7 +151,7 @@ test("counts captured TX bytes in live statistics and session bounds", async () 
 	await controller.stopRecording();
 });
 
-test("opens a directional sniffer capture at 28,800 baud and parses split records", async () => {
+test("opens a directional sniffer capture at its selected baud and parses split records", async () => {
 	const capture: Capture = {
 		id: "sniffer-transport",
 		baudRate: 9600,
@@ -188,7 +188,7 @@ test("opens a directional sniffer capture at 28,800 baud and parses split record
 	});
 
 	await controller.connect();
-	assert.equal(openedBaudRate, 28_800);
+	assert.equal(openedBaudRate, 9600);
 	await controller.toggleRecording();
 	enqueue(Uint8Array.from([0xa5, 0x00]));
 	await new Promise<void>(resolve => setTimeout(resolve, 0));

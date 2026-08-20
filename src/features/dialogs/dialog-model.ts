@@ -3,7 +3,7 @@ import {
 	visiblePositionForRawByte,
 	type Capture
 } from "../capture/capture-framing.ts";
-import { CAPTURE_INPUT_FORMATS, SNIFFER_BAUD_RATE, type CaptureInputFormat } from "../capture/capture-format.ts";
+import { CAPTURE_INPUT_FORMATS, type CaptureInputFormat } from "../capture/capture-format.ts";
 
 export type DialogFolderOption = {
 	id: string;
@@ -159,7 +159,7 @@ export function createContextDraft(command: ContextDialogCommand): ContextDialog
 		name: command.name,
 		view: command.view,
 		folderId: command.folderId || "",
-		baudRate: String(command.inputFormat === CAPTURE_INPUT_FORMATS.SNIFFER ? SNIFFER_BAUD_RATE : command.baudRate),
+		baudRate: String(command.baudRate),
 		inputFormat: command.inputFormat || CAPTURE_INPUT_FORMATS.BINARY,
 		parameters
 	};
@@ -195,7 +195,7 @@ export function contextDraftToValues(draft: ContextDialogDraft): ContextValues {
 		params: draft.parameters
 			.map(parameter => ({ key: parameter.key.trim(), value: parameter.value.trim() }))
 			.filter(parameter => parameter.key),
-		baudRate: draft.inputFormat === CAPTURE_INPUT_FORMATS.SNIFFER ? SNIFFER_BAUD_RATE : Number(draft.baudRate),
+		baudRate: Number(draft.baudRate),
 		inputFormat: draft.inputFormat || CAPTURE_INPUT_FORMATS.BINARY
 	};
 }

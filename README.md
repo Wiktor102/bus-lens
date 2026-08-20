@@ -72,10 +72,8 @@ observations from hypotheses and retain their evidence anchors.
 
 The serial input is a raw binary stream, compatible with ESP32 `Serial.write()`, or
 a directional sniffer stream of `A5 direction value` records. In sniffer mode,
-`A5 00 XX` is RX and `A5 01 XX` is TX relative to the monitored device; the
-Bus Lens connection uses 28,800 baud to carry the three-byte records emitted by
-a 9,600-baud sniffer. Every captured byte is stored with its own timestamp
-before any framing is applied.
+`A5 00 XX` is RX and `A5 01 XX` is TX relative to the monitored device. Every
+captured byte is stored with its own timestamp before any framing is applied.
 
 Every capture is sectioned. The first section starts at raw byte 1, and each
 section header has its own **Frame by** mode and settings, so one capture can

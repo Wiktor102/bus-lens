@@ -186,7 +186,7 @@ test("metadata patches increment only metadata revision and replace parameters i
 	}
 });
 
-test("directional sniffer metadata is accepted and fixes the connection baud rate", () => {
+test("directional sniffer metadata preserves the connection baud rate", () => {
 	const database = openDatabase(":memory:");
 	installCommandSchema(database);
 	try {
@@ -198,7 +198,7 @@ test("directional sniffer metadata is accepted and fixes the connection baud rat
 			inputFormat: "sniffer"
 		});
 		assert.equal(created.inputFormat, "sniffer");
-		assert.equal(created.baudRate, 28_800);
+		assert.equal(created.baudRate, 9600);
 
 		const patched = service.patchMetadata({
 			captureId: created.captureId,
@@ -209,10 +209,10 @@ test("directional sniffer metadata is accepted and fixes the connection baud rat
 
 		const repatched = service.patchMetadata({
 			captureId: created.captureId,
-			patch: { inputFormat: "sniffer", baudRate: 9600 }
+			patch: { inputFormat: "sniffer", baudRate: 19200 }
 		});
 		assert.equal(repatched.inputFormat, "sniffer");
-		assert.equal(repatched.baudRate, 28_800);
+		assert.equal(repatched.baudRate, 19200);
 	} finally {
 		database.close();
 	}

@@ -2,7 +2,7 @@ import type { SendSettings, StoredFolder } from "../../shared/app-state.ts";
 import type { ArchiveIndex } from "../../persistence/archive-client.ts";
 import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
 import type { ApplicationEvent, RecordingWorkflowState, TransportViewState } from "../../shared/application-store.ts";
-import { isSnifferInputFormat, SNIFFER_BAUD_RATE } from "../capture/capture-format.ts";
+import { isSnifferInputFormat } from "../capture/capture-format.ts";
 import { recordCapturedByte } from "../capture/capture-summary.ts";
 import {
 	appendLivePreview,
@@ -419,9 +419,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		try {
 			port = await serial.requestPort();
 			const selectedCapture = dependencies.capture();
-			const baudRate = isSnifferInputFormat(selectedCapture?.inputFormat)
-				? SNIFFER_BAUD_RATE
-				: selectedCapture?.baudRate || dependencies.getSettings?.()?.baudRate || dependencies.state?.sendSettings?.baudRate || 115200;
+			const baudRate = selectedCapture?.baudRate || dependencies.getSettings?.()?.baudRate || dependencies.state?.sendSettings?.baudRate || 115200;
 			await port.open({ baudRate });
 			const settings = dependencies.getSettings?.() || dependencies.state?.sendSettings || {};
 			persistSettings({ ...settings, baudRate });
