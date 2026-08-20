@@ -482,12 +482,10 @@ function normalizeSessionData(
 		const sessionId = sessionIdForRecord(record);
 		if (!sessionId) return record;
 		const session = ensureSession(sessionId);
-		if (record.direction !== "tx") {
-			const timestamp = finiteTimestamp(record.timestamp);
-			if (timestamp !== undefined) {
-				if (session.firstReceivedAt === undefined || timestamp < session.firstReceivedAt) session.firstReceivedAt = timestamp;
-				if (session.lastReceivedAt === undefined || timestamp > session.lastReceivedAt) session.lastReceivedAt = timestamp;
-			}
+		const timestamp = finiteTimestamp(record.timestamp);
+		if (timestamp !== undefined) {
+			if (session.firstReceivedAt === undefined || timestamp < session.firstReceivedAt) session.firstReceivedAt = timestamp;
+			if (session.lastReceivedAt === undefined || timestamp > session.lastReceivedAt) session.lastReceivedAt = timestamp;
 		}
 		return record.sessionId === sessionId ? record : { ...record, sessionId };
 	});
@@ -1079,6 +1077,7 @@ function legacyParameters(document: CaptureDocument): LegacyParameter[] {
 }
 
 function positiveLegacyBaudRate(document: CaptureDocument): number | null {
+	if (String((document as Record<string, unknown>).inputFormat ?? "") === "sniffer") return 28_800;
 	const value = Number((document as Record<string, unknown>).baudRate);
 	return Number.isFinite(value) && value > 0 ? value : null;
 }

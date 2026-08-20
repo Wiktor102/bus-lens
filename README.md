@@ -70,8 +70,12 @@ observations from hypotheses and retain their evidence anchors.
 
 ## Capture framing
 
-The serial input is a raw binary stream, compatible with ESP32 `Serial.write()`.
-Every byte is stored with its own receive timestamp before any framing is applied.
+The serial input is a raw binary stream, compatible with ESP32 `Serial.write()`, or
+a directional sniffer stream of `A5 direction value` records. In sniffer mode,
+`A5 00 XX` is RX and `A5 01 XX` is TX relative to the monitored device; the
+Bus Lens connection uses 28,800 baud to carry the three-byte records emitted by
+a 9,600-baud sniffer. Every captured byte is stored with its own timestamp
+before any framing is applied.
 
 Every capture is sectioned. The first section starts at raw byte 1, and each
 section header has its own **Frame by** mode and settings, so one capture can
@@ -93,8 +97,8 @@ bytes delivered in the same browser read may have effectively identical times.
 Capture context, messages, parameters, descriptions, and annotations are stored locally in the browser.
 The lightweight description beneath a capture title records capture-level context; the Notes tab retains
 sequence observations alongside message and byte annotations. The compact header's **Capture length**
-is the sum of every recording session from its first received byte through its last received byte, while
-**Captured** counts received raw bytes only and excludes transmitted (TX) bytes. Use JSON export for a
+is the sum of every recording session from its first captured byte through its last captured byte, while
+**Captured** counts all captured raw bytes, including RX and TX. Use JSON export for a
 complete, re-importable backup. CSV and monitor-text exports are available for the active capture.
 
 ## Sending messages

@@ -469,7 +469,7 @@ function MessageEntry({
 						const sent = message.directions?.[rawPosition] === "tx";
 						const binary = byte.toString(2).padStart(8, "0");
 						const receivedAt = new Date(message.byteTimestamps?.[rawPosition] ?? message.timestamp).toISOString();
-						const directionLabel = sent ? "sent to RS-485" : "received from serial";
+						const directionLabel = sent ? "TX from monitored device" : "RX to monitored device";
 						const transitions = [incoming?.label, outgoing?.label].filter(Boolean);
 						const transitionTitle = transitions.length
 							? ` · framed transition${transitions.length > 1 ? "s" : ""}: ${transitions.join(" / ")}`

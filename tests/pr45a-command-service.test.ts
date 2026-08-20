@@ -186,6 +186,66 @@ test("metadata patches increment only metadata revision and replace parameters i
 	}
 });
 
+test("directional sniffer metadata is accepted and fixes the connection baud rate", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		const service = new CanonicalCaptureCommandService(database);
+		const created = service.createCapture({
+			captureId: "sniffer-format",
+			framing,
+			baudRate: 9600,
+			inputFormat: "sniffer"
+		});
+		assert.equal(created.inputFormat, "sniffer");
+		assert.equal(created.baudRate, 28_800);
+
+		const patched = service.patchMetadata({
+			captureId: created.captureId,
+			patch: { inputFormat: "binary", baudRate: 9600 }
+		});
+		assert.equal(patched.inputFormat, "binary");
+		assert.equal(patched.baudRate, 9600);
+
+		const repatched = service.patchMetadata({
+			captureId: created.captureId,
+			patch: { inputFormat: "sniffer", baudRate: 9600 }
+		});
+		assert.equal(repatched.inputFormat, "sniffer");
+		assert.equal(repatched.baudRate, 28_800);
+	} finally {
+		database.close();
+	}
+});
+
+test("canonical session bounds include TX timestamps", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		const service = new CanonicalCaptureCommandService(database);
+		service.createCapture({ captureId: "tx-session-bounds", framing, inputFormat: "sniffer" });
+		service.startSession({ captureId: "tx-session-bounds", sessionId: "tx-session" });
+		service.appendChunk({
+			captureId: "tx-session-bounds",
+			sessionId: "tx-session",
+			requestId: "tx-session-request",
+			sequence: 0,
+			expectedStartOffset: 0,
+			segments: [
+				{ timestamp: 100, direction: "tx", bytes: [0x10] },
+				{ timestamp: 140, direction: "rx", bytes: [0x20] }
+			]
+		});
+
+		assert.deepEqual(
+			database.prepare("SELECT first_received_at, last_received_at FROM capture_sessions WHERE capture_id = 'tx-session-bounds'").get(),
+			{ first_received_at: 100, last_received_at: 140 }
+		);
+	} finally {
+		database.close();
+	}
+});
+
 test("sessions are durable, retryable by id, and support repeat recording", () => {
 	const database = openDatabase(":memory:");
 	installCommandSchema(database);

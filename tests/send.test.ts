@@ -37,7 +37,7 @@ test("derives send status, validation, controls, and replay state from one snaps
 		connected: true,
 		statusText: "READY",
 		statusClassName: "send-status connected",
-		connectionHint: "Sent bytes are recorded as TX in the active capture and in local send history.",
+		connectionHint: "Manual sends are retained in the active capture and in local send history.",
 		parsedDraft: {
 			bytes: Uint8Array.from([0xaa, 0xbb]),
 			message: "2 bytes ready to send."

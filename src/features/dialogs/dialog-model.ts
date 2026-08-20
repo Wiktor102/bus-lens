@@ -3,6 +3,7 @@ import {
 	visiblePositionForRawByte,
 	type Capture
 } from "../capture/capture-framing.ts";
+import { CAPTURE_INPUT_FORMATS, SNIFFER_BAUD_RATE, type CaptureInputFormat } from "../capture/capture-format.ts";
 
 export type DialogFolderOption = {
 	id: string;
@@ -27,6 +28,7 @@ export type ContextDialogCommand = {
 	view: string;
 	folderId: string | null;
 	baudRate: number;
+	inputFormat?: CaptureInputFormat;
 	params: ContextParameter[];
 	folders: DialogFolderOption[];
 };
@@ -36,6 +38,7 @@ export type ContextDialogDraft = {
 	view: string;
 	folderId: string;
 	baudRate: string;
+	inputFormat: CaptureInputFormat;
 	parameters: ContextParameterDraft[];
 };
 
@@ -51,7 +54,7 @@ export type ContextValues = {
 	folderId: string | null;
 	params: ContextParameter[];
 	baudRate: number;
-	inputFormat: "raw";
+	inputFormat: CaptureInputFormat;
 };
 
 export type AnnotationType = "message" | "byte";
@@ -156,7 +159,8 @@ export function createContextDraft(command: ContextDialogCommand): ContextDialog
 		name: command.name,
 		view: command.view,
 		folderId: command.folderId || "",
-		baudRate: String(command.baudRate),
+		baudRate: String(command.inputFormat === CAPTURE_INPUT_FORMATS.SNIFFER ? SNIFFER_BAUD_RATE : command.baudRate),
+		inputFormat: command.inputFormat || CAPTURE_INPUT_FORMATS.BINARY,
 		parameters
 	};
 }
@@ -191,8 +195,8 @@ export function contextDraftToValues(draft: ContextDialogDraft): ContextValues {
 		params: draft.parameters
 			.map(parameter => ({ key: parameter.key.trim(), value: parameter.value.trim() }))
 			.filter(parameter => parameter.key),
-		baudRate: Number(draft.baudRate),
-		inputFormat: "raw"
+		baudRate: draft.inputFormat === CAPTURE_INPUT_FORMATS.SNIFFER ? SNIFFER_BAUD_RATE : Number(draft.baudRate),
+		inputFormat: draft.inputFormat || CAPTURE_INPUT_FORMATS.BINARY
 	};
 }
 

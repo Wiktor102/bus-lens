@@ -13,6 +13,7 @@ import {
 	type ContextDialogDraft,
 	type ExportFormat
 } from "./dialog-model";
+import { CAPTURE_INPUT_FORMATS, SNIFFER_BAUD_RATE, type CaptureInputFormat } from "../capture/capture-format.ts";
 import { AlertTriangle, Check, Plus, Trash2, X } from "lucide-react";
 
 function isCancelSubmit(event: FormEvent<HTMLFormElement>): boolean {
@@ -156,6 +157,7 @@ export function ContextDialog() {
 
 	const updateDraft = (update: Partial<ContextDialogDraft>) =>
 		setDraft(current => (current ? { ...current, ...update } : current));
+	const snifferFormat = draft?.inputFormat === CAPTURE_INPUT_FORMATS.SNIFFER;
 
 	return (
 		<dialog
@@ -287,19 +289,37 @@ export function ContextDialog() {
 						Baud rate
 						<select
 							id="baudRate"
-							value={draft?.baudRate || "115200"}
-							onChange={event => updateDraft({ baudRate: event.currentTarget.value })}
+							value={snifferFormat ? String(SNIFFER_BAUD_RATE) : draft?.baudRate || "115200"}
+							disabled={snifferFormat}
+							onChange={event => {
+								const baudRate = event.currentTarget.value;
+								updateDraft({ baudRate });
+							}}
 						>
 							<option>9600</option>
 							<option>19200</option>
+							<option>28800</option>
 							<option>115200</option>
 							<option>250000</option>
 						</select>
 					</label>
 					<div className="field serial-format">
-						<span>Input format</span>
-						<strong>Raw binary bytes</strong>
-						<small>Designed for ESP32 Serial.write()</small>
+						<label htmlFor="inputFormat">Input format</label>
+						<select
+							id="inputFormat"
+							value={draft?.inputFormat || CAPTURE_INPUT_FORMATS.BINARY}
+							onChange={event => {
+								const inputFormat = event.currentTarget.value as CaptureInputFormat;
+								updateDraft({
+									inputFormat,
+									...(inputFormat === CAPTURE_INPUT_FORMATS.SNIFFER ? { baudRate: String(SNIFFER_BAUD_RATE) } : {})
+								});
+							}}
+						>
+							<option value={CAPTURE_INPUT_FORMATS.BINARY}>Raw binary bytes</option>
+							<option value={CAPTURE_INPUT_FORMATS.SNIFFER}>Directional sniffer records</option>
+						</select>
+						<small>{snifferFormat ? "A5 direction/value records; the connection is fixed at 28,800 baud." : "Designed for ESP32 Serial.write()"}</small>
 					</div>
 				</div>
 				<div className="modal-actions">
