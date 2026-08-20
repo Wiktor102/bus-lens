@@ -100,7 +100,7 @@ test("get_transitions publishes and enforces aggregate/refined query constraints
 
 		const listResponse = await modernCall(baseUrl, "tools/list", {});
 		assert.equal(listResponse.status, 200);
-		const listBody = await listResponse.json() as { result: { tools: Array<{ name: string; description?: string; inputSchema: { type?: string; properties?: Record<string, { enum?: unknown[] }> }; outputSchema?: { type?: string; properties?: Record<string, { type?: string; properties?: Record<string, { type?: string }> }> } }> } };
+		const listBody = await listResponse.json() as { result: { tools: Array<{ name: string; description?: string; inputSchema: { type?: string; properties?: Record<string, { enum?: unknown[]; maximum?: number }> }; outputSchema?: { type?: string; properties?: Record<string, { type?: string; properties?: Record<string, { type?: string }> }> } }> } };
 		const transitionsTool = listBody.result.tools.find(tool => tool.name === "get_transitions");
 		assert.ok(transitionsTool);
 		assert.equal(transitionsTool.inputSchema.type, "object");
@@ -108,8 +108,13 @@ test("get_transitions publishes and enforces aggregate/refined query constraints
 		assert.deepEqual(transitionsTool.inputSchema.properties?.changedPositionMatch?.enum, ["all", "any"]);
 		const differenceTool = listBody.result.tools.find(tool => tool.name === "analyze_capture_difference");
 		assert.ok(differenceTool);
+		assert.match(differenceTool.description ?? "", /at most 1000 filtered frames.*at most 250 filtered frames per side/i);
 		assert.equal(differenceTool.outputSchema?.properties?.data?.type, "object");
 		assert.equal(differenceTool.outputSchema?.properties?.data?.properties?.candidateFields?.type, "array");
+		const rawTool = listBody.result.tools.find(tool => tool.name === "read_raw_bytes");
+		assert.ok(rawTool);
+		assert.match(rawTool.description ?? "", /4096-byte maximum.*full 96 KiB MCP response budget/i);
+		assert.equal(rawTool.inputSchema.properties?.length?.maximum, 4096);
 
 		const callTool = async (argumentsValue: Record<string, unknown>, id: number): Promise<ToolCallBody> => {
 			const response = await modernCall(baseUrl, "tools/call", { name: "get_transitions", arguments: argumentsValue }, id);

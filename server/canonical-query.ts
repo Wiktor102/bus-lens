@@ -98,6 +98,8 @@ export type {
 
 export const DEFAULT_FRAME_WINDOW_LIMIT = 50;
 export const MAX_FRAME_WINDOW_LIMIT = 200;
+export const DEFAULT_RAW_READ_BYTES = 1_024;
+export const MAX_RAW_READ_BYTES = 4_096;
 export const DEFAULT_CAPTURE_DISCOVERY_LIMIT = 20;
 export const MAX_CAPTURE_DISCOVERY_LIMIT = 100;
 export const DEFAULT_FRAMING_PROFILE_LIMIT = 20;
@@ -4168,8 +4170,8 @@ export class CanonicalQueryService {
 		const startOffset = optionalNonNegativeInteger(input.rawOffset ?? input.offset, "rawOffset");
 		if (startOffset === undefined) throw new AgentQueryError("invalid-input", "rawOffset is required", { label: "rawOffset" });
 		const requestedLength = input.length ?? input.byteCount;
-		if (requestedLength !== undefined && requestedLength > 4096) throw new AgentQueryError("invalid-input", "length must not exceed 4096 bytes", { maximum: 4096 });
-		const length = boundedLimit(requestedLength, 1024, 4096, "length");
+		if (requestedLength !== undefined && requestedLength > MAX_RAW_READ_BYTES) throw new AgentQueryError("invalid-input", `length must not exceed ${MAX_RAW_READ_BYTES} bytes`, { maximum: MAX_RAW_READ_BYTES });
+		const length = boundedLimit(requestedLength, DEFAULT_RAW_READ_BYTES, MAX_RAW_READ_BYTES, "length");
 		const hiddenPolicy = input.hiddenPolicy ?? "mask";
 		const requestedEndOffset = startOffset + length - 1;
 		const available = this.database.prepare(
@@ -4245,7 +4247,11 @@ export class CanonicalQueryService {
 			truncated: startOffset < available.start_offset || requestedEndOffset > available.end_offset || values.length < length,
 			suggestedOperations: [{ tool: "query_messages", reason: "Find interpreted frames overlapping this range with reverse raw-range lookup", arguments: messageQueryArguments }]
 		});
-		assertEncodedResponseSize(response);
+		// A full raw read includes one timestamp delta per returned byte. That
+		// metadata can exceed the normal 32 KiB response target even when the
+		// request is within the advertised 4 KiB input bound, so use the MCP
+		// transport's hard response budget for this already bounded operation.
+		assertEncodedResponseSize(response, true);
 		return response;
 	}
 

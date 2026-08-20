@@ -1,26 +1,29 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { AgentQueryError, type AgentResponse } from "./agent-contracts.ts";
-import { agentResponseSchema, captureIdSchema } from "./mcp-server.ts";
-import type {
-	AgentByteStatisticsInput,
-	AgentByteStatisticsResult,
-	AgentCaptureDifferenceInput,
-	AgentCaptureDifferenceResult,
-	AgentMessageContext,
-	AgentMessageContextInput,
-	AgentMessageQueryInput,
-	AgentMessageQueryResult,
-	AgentRawRead,
-	AgentRawReadInput,
-	AgentProtocolReportInput,
-	AgentProtocolReportResult,
-	AgentSequenceGroupsInput,
-	AgentSequenceGroupsResult,
-	AgentSequenceOccurrencesInput,
-	AgentSequenceOccurrencesResult,
-	AgentTransitionsInput,
-	AgentTransitionsResult
+import { MAX_DIFFERENTIAL_FRAMES, MAX_SIGNATURE_ALIGNMENT_FRAMES } from "./differential-analysis.ts";
+import { agentResponseSchema, captureIdSchema, MCP_RESPONSE_LIMIT_BYTES } from "./mcp-server.ts";
+import {
+	DEFAULT_RAW_READ_BYTES,
+	MAX_RAW_READ_BYTES,
+	type AgentByteStatisticsInput,
+	type AgentByteStatisticsResult,
+	type AgentCaptureDifferenceInput,
+	type AgentCaptureDifferenceResult,
+	type AgentMessageContext,
+	type AgentMessageContextInput,
+	type AgentMessageQueryInput,
+	type AgentMessageQueryResult,
+	type AgentRawRead,
+	type AgentRawReadInput,
+	type AgentProtocolReportInput,
+	type AgentProtocolReportResult,
+	type AgentSequenceGroupsInput,
+	type AgentSequenceGroupsResult,
+	type AgentSequenceOccurrencesInput,
+	type AgentSequenceOccurrencesResult,
+	type AgentTransitionsInput,
+	type AgentTransitionsResult
 } from "./canonical-query.ts";
 import type { McpQueryExecutor } from "./mcp-query-executor.ts";
 
@@ -439,7 +442,7 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 	registerAnalysisTool(
 		server,
 		"analyze_capture_difference",
-		"Compare two explicitly pinned, labelled experiments with bounded ordinal, raw-relative, timestamp-nearest, or structural-fingerprint-aware signature-sequence alignment. Returns ranked candidateFields with byte/bit evidence and score components only; it never names or persists inferred protocol fields. Both snapshots are subject to a total bounded byte/timestamp/raw-position/direction array budget before materialization. Signature substitutions pair only equal ordinals with equal comparison-local section fingerprints, while exact-signature LCS anchors retain priority; candidate results retain baselineSectionId, changedSectionId, and sectionFingerprint. The fingerprint may be shared by structurally equivalent sections and is not a database identity or lookup key without its snapshot. Raw-relative pairs only equal relative retained-raw starts; shifted boundaries remain explicit unpaired evidence. A shared scope.sectionId must exist in both snapshots; use side-specific filters for profile-local section IDs.",
+		`Compare two explicitly pinned, labelled experiments with bounded ordinal, raw-relative, timestamp-nearest, or structural-fingerprint-aware signature-sequence alignment. Each side accepts at most ${MAX_DIFFERENTIAL_FRAMES} filtered frames; signature-sequence alignment accepts at most ${MAX_SIGNATURE_ALIGNMENT_FRAMES} filtered frames per side. Both snapshots also share a total bounded byte/timestamp/raw-position/direction array budget before materialization. Returns ranked candidateFields with byte/bit evidence and score components only; it never names or persists inferred protocol fields. Signature substitutions pair only equal ordinals with equal comparison-local section fingerprints, while exact-signature LCS anchors retain priority; candidate results retain baselineSectionId, changedSectionId, and sectionFingerprint. The fingerprint may be shared by structurally equivalent sections and is not a database identity or lookup key without its snapshot. Use baseline.filters and changed.filters to narrow larger captures before alignment. Raw-relative pairs only equal relative retained-raw starts; shifted boundaries remain explicit unpaired evidence. A shared scope.sectionId must exist in both snapshots; use side-specific filters for profile-local section IDs.`,
 		differentialInputSchema,
 		input => queries.analyzeCaptureDifference(input as AgentCaptureDifferenceInput),
 		response => {
@@ -466,13 +469,13 @@ export function registerAnalysisTools(server: McpServer, queries: McpQueryExecut
 	registerAnalysisTool(
 		server,
 		"read_raw_bytes",
-		"Read an explicit absolute raw-byte range with a 1,024-byte default and a hard 4,096-byte maximum; use the suggested query_messages operation for reverse raw-range lookup of interpreted frames, and never request a complete capture.",
+		`Read an explicit absolute raw-byte range with a ${DEFAULT_RAW_READ_BYTES}-byte default and a hard ${MAX_RAW_READ_BYTES}-byte maximum. The bounded read may use the full ${MCP_RESPONSE_LIMIT_BYTES / 1024} KiB MCP response budget because per-byte timestamp metadata can exceed the normal response target; use the suggested query_messages operation for reverse raw-range lookup of interpreted frames, and never request a complete capture.`,
 		z.object({
 			captureId: captureIdSchema,
 			rawOffset: z.number().int().nonnegative().optional(),
 			offset: z.number().int().nonnegative().optional(),
-			length: z.number().int().positive().max(4096).optional(),
-			byteCount: z.number().int().positive().max(4096).optional(),
+			length: z.number().int().positive().max(MAX_RAW_READ_BYTES).optional(),
+			byteCount: z.number().int().positive().max(MAX_RAW_READ_BYTES).optional(),
 			hiddenPolicy: z.enum(["mask", "include", "omit"]).optional()
 		}),
 		input => queries.readRawBytes(input as AgentRawReadInput),
