@@ -12,6 +12,7 @@
 	--amber: #f2b84b;
 	--red: #f1695f;
 	--blue: #6fc5d6;
+	--violet: #b99af7;
 	--mono: "Cascadia Code", "Cascadia Mono", Consolas, monospace;
 	--sans: Bahnschrift, "Aptos Narrow", "Segoe UI", sans-serif;
 }
@@ -1740,6 +1741,12 @@ tr:hover .row-action,
 }
 .message-table tr.sent-message td:first-child {
 	border-left: 2px solid var(--blue);
+}
+.message-table tr.monitored-tx-message td {
+	background: linear-gradient(90deg, color-mix(in srgb, var(--violet) 5%, transparent), transparent 75%);
+}
+.message-table tr.monitored-tx-message td:first-child {
+	border-left: 2px solid color-mix(in srgb, var(--violet) 48%, transparent);
 }
 .direction-tag {
 	display: inline-block;

@@ -83,6 +83,14 @@ test("derives section headers and message visibility without changing stream cal
 	]);
 });
 
+test("derives TX presentation origin from the capture input format", () => {
+	const current = sectionedCapture();
+	assert.equal(deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT).txOrigin, "buslens");
+
+	current.inputFormat = "sniffer";
+	assert.equal(deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT).txOrigin, "monitored-device");
+});
+
 test("reuses the analysis projection when only a section is collapsed", () => {
 	const current = sectionedCapture();
 	const initial = deriveMessageStreamSnapshot(current, EMPTY_VIEW_STATE_SNAPSHOT);
