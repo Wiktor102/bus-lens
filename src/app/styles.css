@@ -397,6 +397,29 @@ p {
 	padding: 8px 10px;
 	color: var(--muted);
 }
+.sidebar-search-row {
+	display: flex;
+	align-items: stretch;
+	gap: 6px;
+}
+.sidebar-search-row .search-box {
+	min-width: 0;
+	flex: 1;
+}
+.folder-collapse-btn {
+	display: inline-flex;
+	flex: 0 0 34px;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+}
+.folder-collapse-btn:hover,
+.folder-collapse-btn:focus-visible {
+	border-color: var(--acid-dim);
+	background: color-mix(in srgb, var(--acid) 8%, transparent);
+	color: var(--acid);
+	outline: 0;
+}
 .search-box input,
 .stream-filter input {
 	border: 0;

@@ -9,7 +9,7 @@ import {
 import { getArchiveActions } from "./archive-bridge";
 import { type ArchiveCapture, type ArchiveGroup } from "./archive-list";
 import { captureStorageLabel, captureStorageUiStatus } from "../capture/capture-storage";
-import { ArrowUp, Check, ChevronRight, Copy, Download, Folder, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
+import { ArrowUp, Check, ChevronRight, ChevronsDownUp, ChevronsUpDown, Copy, Download, Folder, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import { useArchiveGroups, useArchiveList, useSelectedCaptureId } from "../../data/archive-react.tsx";
 
 const FOLDER_ICON = (
@@ -179,6 +179,8 @@ export function ArchiveSidebar() {
 		});
 	}, []);
 	const archive = archiveData;
+	const allFoldersCollapsed = archive.folders.every(folder => folder.collapsed) && Boolean(archive.index?.unfiledCollapsed);
+	const folderToggleLabel = allFoldersCollapsed ? "Expand all folders" : "Collapse all folders";
 
 	return (
 		<>
@@ -209,16 +211,29 @@ export function ArchiveSidebar() {
 						</button>
 					</div>
 				</div>
-			<label className="search-box">
-				<Search aria-hidden="true" />
-				<input
-					id="captureSearch"
-					type="search"
-					placeholder="Filter captures…"
-					value={query}
-					onChange={event => setQuery(event.currentTarget.value)}
-				/>
-			</label>
+			<div className="sidebar-search-row">
+				<button
+					id="toggleFoldersBtn"
+					className="icon-btn folder-collapse-btn"
+					type="button"
+					title={folderToggleLabel}
+					aria-label={folderToggleLabel}
+					aria-pressed={allFoldersCollapsed}
+					onClick={() => actions.setAllFoldersCollapsed(!allFoldersCollapsed)}
+				>
+					{allFoldersCollapsed ? <ChevronsUpDown aria-hidden="true" /> : <ChevronsDownUp aria-hidden="true" />}
+				</button>
+				<label className="search-box">
+					<Search aria-hidden="true" />
+					<input
+						id="captureSearch"
+						type="search"
+						placeholder="Filter captures…"
+						value={query}
+						onChange={event => setQuery(event.currentTarget.value)}
+					/>
+				</label>
+			</div>
 			<div id="captureList" className="capture-list">
 				{archive.error ? (
 					<div className="sidebar-empty" role="alert">
