@@ -7,7 +7,7 @@ import {
 	type MouseEvent as ReactMouseEvent
 } from "react";
 import { getArchiveActions } from "./archive-bridge";
-import { type ArchiveCapture, type ArchiveGroup, type ArchiveStorageFilter } from "./archive-list";
+import { type ArchiveCapture, type ArchiveGroup } from "./archive-list";
 import { captureStorageLabel, captureStorageUiStatus } from "../capture/capture-storage";
 import { ArrowUp, Check, ChevronRight, Copy, Download, Folder, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import { useArchiveGroups, useArchiveList, useSelectedCaptureId } from "../../data/archive-react.tsx";
@@ -152,9 +152,8 @@ export function ArchiveSidebar() {
 	const actions = getArchiveActions();
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const [query, setQuery] = useState("");
-	const [storageFilter, setStorageFilter] = useState<ArchiveStorageFilter>("all");
 	const selectedCaptureId = useSelectedCaptureId();
-	const archiveData = useArchiveGroups(query, storageFilter);
+	const archiveData = useArchiveGroups(query, "all");
 	const [folderDialogId, setFolderDialogId] = useState<string | null | undefined>(undefined);
 	const [folderMoveCaptureId, setFolderMoveCaptureId] = useState<string | null>(null);
 	const [captureMenuState, setCaptureMenuState] = useState<CaptureContextMenuState | null>(null);
@@ -219,22 +218,6 @@ export function ArchiveSidebar() {
 					value={query}
 					onChange={event => setQuery(event.currentTarget.value)}
 				/>
-			</label>
-			<label className="archive-storage-filter">
-				<span>Storage</span>
-				<select
-					id="captureStorageFilter"
-					value={storageFilter}
-					onChange={event => {
-						const nextFilter = event.currentTarget.value as ArchiveStorageFilter;
-						setStorageFilter(nextFilter);
-					}}
-				>
-					<option value="all">All captures</option>
-					<option value="legacy">Legacy</option>
-					<option value="canonical">Canonical</option>
-					<option value="failed">Failed conversion</option>
-				</select>
 			</label>
 			<div id="captureList" className="capture-list">
 				{archive.error ? (

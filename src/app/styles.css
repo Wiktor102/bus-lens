@@ -413,24 +413,6 @@ p {
 	height: 15px;
 	stroke-width: 1.6;
 }
-.archive-storage-filter {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 8px;
-	margin-top: 8px;
-	color: var(--muted);
-	font: 600 11px var(--sans);
-}
-.archive-storage-filter select {
-	min-width: 0;
-	flex: 1;
-	padding: 7px 8px;
-	border: 1px solid var(--line);
-	background: var(--panel);
-	color: var(--ink);
-	font: 11px var(--sans);
-}
 .capture-list {
 	margin-top: 12px;
 	flex: 1;
