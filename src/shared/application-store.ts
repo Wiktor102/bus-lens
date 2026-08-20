@@ -249,6 +249,7 @@ export type ApplicationCommand =
 	| { type: "capture/delete"; captureId: string }
 	| { type: "archive/select"; captureId: string }
 	| { type: "archive/toggle-folder"; folderId: string | null }
+	| { type: "archive/set-all-folders-collapsed"; collapsed: boolean }
 	| { type: "archive/move-capture"; captureId: string; folderId: string | null }
 	| { type: "archive/open-new-capture" }
 	| { type: "archive/open-export" }

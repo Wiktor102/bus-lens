@@ -3,6 +3,7 @@ import { applicationStore } from "../../shared/application-store.ts";
 export type ArchiveActions = {
 	selectCapture: (captureId: string) => void;
 	toggleFolder: (folderId: string | null) => void;
+	setAllFoldersCollapsed: (collapsed: boolean) => void;
 	moveCapture: (captureId: string, folderId: string | null) => void;
 	upgradeCapture: (captureId: string) => void;
 	duplicateCapture: (captureId: string) => void;
@@ -18,6 +19,7 @@ export type ArchiveActions = {
 const actions: ArchiveActions = {
 	selectCapture: captureId => applicationStore.sendCommand({ type: "archive/select", captureId }),
 	toggleFolder: folderId => applicationStore.sendCommand({ type: "archive/toggle-folder", folderId }),
+	setAllFoldersCollapsed: collapsed => applicationStore.sendCommand({ type: "archive/set-all-folders-collapsed", collapsed }),
 	moveCapture: (captureId, folderId) => applicationStore.sendCommand({ type: "archive/move-capture", captureId, folderId }),
 	upgradeCapture: captureId => applicationStore.sendCommand({ type: "capture/upgrade", captureId }),
 	duplicateCapture: captureId => applicationStore.sendCommand({ type: "capture/duplicate-archive", captureId }),

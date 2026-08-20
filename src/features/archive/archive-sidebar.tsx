@@ -7,9 +7,9 @@ import {
 	type MouseEvent as ReactMouseEvent
 } from "react";
 import { getArchiveActions } from "./archive-bridge";
-import { type ArchiveCapture, type ArchiveGroup, type ArchiveStorageFilter } from "./archive-list";
+import { type ArchiveCapture, type ArchiveGroup } from "./archive-list";
 import { captureStorageLabel, captureStorageUiStatus } from "../capture/capture-storage";
-import { ArrowUp, Check, ChevronRight, Copy, Download, Folder, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
+import { ArrowUp, Check, ChevronRight, ChevronsDownUp, ChevronsUpDown, Copy, Download, Folder, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import { useArchiveGroups, useArchiveList, useSelectedCaptureId } from "../../data/archive-react.tsx";
 
 const FOLDER_ICON = (
@@ -152,9 +152,8 @@ export function ArchiveSidebar() {
 	const actions = getArchiveActions();
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const [query, setQuery] = useState("");
-	const [storageFilter, setStorageFilter] = useState<ArchiveStorageFilter>("all");
 	const selectedCaptureId = useSelectedCaptureId();
-	const archiveData = useArchiveGroups(query, storageFilter);
+	const archiveData = useArchiveGroups(query, "all");
 	const [folderDialogId, setFolderDialogId] = useState<string | null | undefined>(undefined);
 	const [folderMoveCaptureId, setFolderMoveCaptureId] = useState<string | null>(null);
 	const [captureMenuState, setCaptureMenuState] = useState<CaptureContextMenuState | null>(null);
@@ -180,13 +179,14 @@ export function ArchiveSidebar() {
 		});
 	}, []);
 	const archive = archiveData;
+	const allFoldersCollapsed = archive.folders.every(folder => folder.collapsed) && Boolean(archive.index?.unfiledCollapsed);
+	const folderToggleLabel = allFoldersCollapsed ? "Expand all folders" : "Collapse all folders";
 
 	return (
 		<>
 			<aside className="sidebar">
 				<div className="sidebar-heading">
 					<div>
-						<span className="eyebrow">Archive</span>
 						<h1>Capture sets</h1>
 					</div>
 					<div className="sidebar-create-actions">
@@ -210,32 +210,29 @@ export function ArchiveSidebar() {
 						</button>
 					</div>
 				</div>
-			<label className="search-box">
-				<Search aria-hidden="true" />
-				<input
-					id="captureSearch"
-					type="search"
-					placeholder="Filter captures…"
-					value={query}
-					onChange={event => setQuery(event.currentTarget.value)}
-				/>
-			</label>
-			<label className="archive-storage-filter">
-				<span>Storage</span>
-				<select
-					id="captureStorageFilter"
-					value={storageFilter}
-					onChange={event => {
-						const nextFilter = event.currentTarget.value as ArchiveStorageFilter;
-						setStorageFilter(nextFilter);
-					}}
+			<div className="sidebar-search-row">
+				<button
+					id="toggleFoldersBtn"
+					className="icon-btn folder-collapse-btn"
+					type="button"
+					title={folderToggleLabel}
+					aria-label={folderToggleLabel}
+					aria-pressed={allFoldersCollapsed}
+					onClick={() => actions.setAllFoldersCollapsed(!allFoldersCollapsed)}
 				>
-					<option value="all">All captures</option>
-					<option value="legacy">Legacy</option>
-					<option value="canonical">Canonical</option>
-					<option value="failed">Failed conversion</option>
-				</select>
-			</label>
+					{allFoldersCollapsed ? <ChevronsUpDown aria-hidden="true" /> : <ChevronsDownUp aria-hidden="true" />}
+				</button>
+				<label className="search-box">
+					<Search aria-hidden="true" />
+					<input
+						id="captureSearch"
+						type="search"
+						placeholder="Filter captures…"
+						value={query}
+						onChange={event => setQuery(event.currentTarget.value)}
+					/>
+				</label>
+			</div>
 			<div id="captureList" className="capture-list">
 				{archive.error ? (
 					<div className="sidebar-empty" role="alert">

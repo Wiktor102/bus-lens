@@ -84,6 +84,9 @@ export function subscribeToApplicationCommands(dependencies: ApplicationCommandR
 			case "archive/toggle-folder":
 				dependencies.captureController.toggleArchiveFolder(command.folderId);
 				break;
+			case "archive/set-all-folders-collapsed":
+				dependencies.captureController.setAllArchiveFoldersCollapsed(command.collapsed);
+				break;
 			case "archive/move-capture":
 				dependencies.captureController.moveArchiveCapture(command.captureId, command.folderId);
 				break;

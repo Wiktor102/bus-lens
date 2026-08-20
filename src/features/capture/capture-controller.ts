@@ -778,6 +778,23 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		}
 	}
 
+	function setAllArchiveFoldersCollapsed(collapsed: boolean) {
+		const nextFolders = folders().map(folder => ({ ...folder, collapsed }));
+		const current = archiveIndex();
+		if (compatibilityState) {
+			compatibilityState.folders = compatibilityState.folders.map(folder => ({ ...folder, collapsed }));
+			compatibilityState.unfiledCollapsed = collapsed;
+		}
+		if (dependencies.archiveCommands) {
+			void Promise.all([
+				...nextFolders.map(folder => dependencies.archiveCommands!.saveFolder(folder)),
+				dependencies.archiveCommands.persistArchiveIndex({ ...current, unfiledCollapsed: collapsed })
+			]).catch(error => reportFailure("archive", error));
+			return;
+		}
+		persistArchiveIndex({ ...current, unfiledCollapsed: collapsed });
+	}
+
 	function moveArchiveCapture(captureId: string, folderId: string | null) {
 		const item = captures().find(capture => String(capture.id) === String(captureId));
 		if (!item) return;
@@ -1491,6 +1508,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		upgradeCapture,
 		selectArchiveCapture,
 		toggleArchiveFolder,
+		setAllArchiveFoldersCollapsed,
 		moveArchiveCapture,
 		deleteArchiveCapture,
 		saveFolder,

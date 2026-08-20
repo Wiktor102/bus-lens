@@ -90,6 +90,51 @@ test("canonical optimistic mutations route through dedicated commands", async ()
 	assert.deepEqual(capture.byteStream, []);
 });
 
+test("collapsing all archive folders persists folder and unfiled state together", async () => {
+	const state = {
+		captures: [],
+		folders: [
+			{ id: "folder-a", name: "A", collapsed: false, createdAt: "now" },
+			{ id: "folder-b", name: "B", collapsed: true, createdAt: "now" }
+		],
+		unfiledCollapsed: false
+	} as unknown as AppState;
+	const savedFolders: Array<{ id: string; collapsed: boolean }> = [];
+	let savedIndex: { unfiledCollapsed: boolean } | undefined;
+	const archiveCommands = {
+		saveFolder: async (folder: { id: string; collapsed: boolean }) => {
+			savedFolders.push({ id: folder.id, collapsed: folder.collapsed });
+		},
+		persistArchiveIndex: async (index: { unfiledCollapsed: boolean }) => {
+			savedIndex = index;
+		}
+	} as unknown as ArchiveCommands;
+	const controller = createCaptureController({
+		state,
+		capture: () => undefined,
+		getActiveId: () => null,
+		setActiveId: () => {},
+		archiveCommands,
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		confirm: () => true,
+		transport: { isRecording: () => false, stopRecording: async () => {} },
+		publishDialogCommand: () => {}
+	});
+
+	controller.setAllArchiveFoldersCollapsed(true);
+	await new Promise(resolve => setTimeout(resolve, 0));
+
+	assert.deepEqual(savedFolders, [
+		{ id: "folder-a", collapsed: true },
+		{ id: "folder-b", collapsed: true }
+	]);
+	assert.equal(state.folders.every(folder => folder.collapsed), true);
+	assert.equal(state.unfiledCollapsed, true);
+	assert.equal(savedIndex?.unfiledCollapsed, true);
+});
+
 test("canonical storage state wins when the status lookup is stale during rename", async () => {
 	const capture: Capture = {
 		id: "canonical-rename",
