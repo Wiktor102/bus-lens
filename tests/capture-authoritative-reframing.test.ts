@@ -94,7 +94,6 @@ function makeFixture(name: string, options: FixtureOptions = {}): Fixture {
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: async () => {} },
 		publishDialogCommand: () => {},
 		captureWriter: writer,

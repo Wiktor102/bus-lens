@@ -35,7 +35,7 @@ test("send controller publishes send and queue workflow transitions alongside ru
 			queueLiveBytes: () => {}
 		},
 		showToast: () => {},
-		confirm: () => true,
+		publishDialogCommand: () => {},
 		publishSendState: () => {
 			const status = controller?.getStatus();
 			if (status) runtimeStates.push({ sendInFlight: status.sendInFlight, queueRunning: status.queueRunning });
@@ -62,6 +62,43 @@ test("send controller publishes send and queue workflow transitions alongside ru
 	assert.equal(runtimeStates.some(status => status.queueRunning), true);
 	assert.equal(runtimeStates.at(-1)?.sendInFlight, false);
 	assert.equal(runtimeStates.at(-1)?.queueRunning, false);
+});
+
+test("send destructive actions request a dialog before executing", () => {
+	const dialogs: Array<{ type: string; title?: string; action?: { type: string } }> = [];
+	const state: AppState = {
+		captures: [],
+		folders: [],
+		sendHistory: [{ id: "history-1", bytes: [0xaa], createdAt: 1, mode: "manual" }],
+		sendQueue: [{ id: "queue-1", bytes: [0xbb], createdAt: 1 }],
+		sendSettings: { delayMs: 0, draft: "", baudRate: 115200 }
+	};
+	const controller = createSendController({
+		state,
+		capture: () => undefined,
+		transport: { getPort: () => null, isRecording: () => false, queueLiveBytes: () => {} },
+		showToast: () => {},
+		publishDialogCommand: command => dialogs.push(command),
+		publishSendState: () => {}
+	});
+
+	controller.requestClearSendQueue();
+	assert.equal(state.sendQueue.length, 1);
+	assert.equal(dialogs.at(-1)?.type, "confirmation");
+	assert.equal(dialogs.at(-1)?.title, "Clear transmit queue?");
+	assert.deepEqual(dialogs.at(-1)?.action, { type: "send/clear-queue" });
+
+	controller.clearSendQueue();
+	assert.equal(state.sendQueue.length, 0);
+
+	controller.requestClearSendHistory();
+	assert.equal(state.sendHistory.length, 1);
+	assert.equal(dialogs.at(-1)?.type, "confirmation");
+	assert.equal(dialogs.at(-1)?.title, "Clear send history?");
+	assert.deepEqual(dialogs.at(-1)?.action, { type: "send/clear-history" });
+
+	controller.clearSendHistory();
+	assert.equal(state.sendHistory.length, 0);
 });
 
 test("stopping a running queue publishes a retryable stopped failure and keeps unsent items", async () => {
@@ -100,7 +137,7 @@ test("stopping a running queue publishes a retryable stopped failure and keeps u
 			queueLiveBytes: () => {}
 		},
 		showToast: () => {},
-		confirm: () => true,
+		publishDialogCommand: () => {},
 		publishSendState: () => {},
 		publishSendWorkflow: event => workflowEvents.push(event),
 		now: () => 1

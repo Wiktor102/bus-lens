@@ -51,6 +51,7 @@ test("canonical optimistic mutations route through dedicated commands", async ()
 		}
 	} as unknown as CaptureWriter;
 	const state = { captures: [capture], folders: [], unfiledCollapsed: false } as unknown as AppState;
+	const dialogs: Array<{ type: string; title?: string; action?: { type: string } }> = [];
 	const controller = createCaptureController({
 		state,
 		capture: () => capture,
@@ -60,12 +61,11 @@ test("canonical optimistic mutations route through dedicated commands", async ()
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: async () => {} },
 		publishArchiveState: () => {},
 		publishCaptureHeaderState: () => {},
 		publishNotesState: () => {},
-		publishDialogCommand: () => {},
+		publishDialogCommand: command => { if (command) dialogs.push(command); },
 		captureWriter: writer,
 		isCanonicalCapture: () => true,
 		refreshCapture: async () => ({
@@ -80,6 +80,11 @@ test("canonical optimistic mutations route through dedicated commands", async ()
 	controller.commitCaptureTitle("After");
 	controller.addSequenceNote({ start: 1, end: 1, text: "observation" });
 	controller.setSectionFrameSize("section-1", 1);
+	controller.requestClearActiveCaptureMessages();
+	assert.equal(dialogs.at(-1)?.type, "confirmation");
+	assert.equal(dialogs.at(-1)?.title, "Clear capture data?");
+	assert.deepEqual(dialogs.at(-1)?.action, { type: "capture/clear-messages" });
+	assert.equal(capture.byteStream?.length, 2);
 	controller.clearActiveCaptureMessages();
 	await new Promise(resolve => setTimeout(resolve, 0));
 
@@ -121,7 +126,6 @@ test("canonical storage state wins when the status lookup is stale during rename
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: async () => {} },
 		publishArchiveState: () => {},
 		publishCaptureHeaderState: () => {},
@@ -194,7 +198,6 @@ test("serializes metadata and framing revisions while coalescing the latest opti
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => true, stopRecording: async () => {} },
 		publishArchiveState: () => {},
 		publishCaptureHeaderState: () => {},
@@ -272,7 +275,6 @@ test("retries a failed metadata revision without losing the latest optimistic pa
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: async () => {} },
 		publishArchiveState: () => {},
 		publishCaptureHeaderState: () => {},
@@ -345,7 +347,6 @@ test("uses reloaded annotation note IDs for canonical update and delete commands
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: async () => {} },
 		publishArchiveState: () => {},
 		publishCaptureHeaderState: () => {},
@@ -421,7 +422,6 @@ test("routes canonical pattern remarks and folder changes through commands", asy
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: async () => {} },
 		publishArchiveState: () => {},
 		publishCaptureHeaderState: () => {},
@@ -490,7 +490,6 @@ test("serializes rapid canonical pattern remark intent without duplicate notes",
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: async () => {} },
 		publishArchiveState: () => {},
 		publishCaptureHeaderState: () => {},
@@ -545,7 +544,6 @@ test("awaits active recording shutdown before deleting a canonical capture", asy
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => true, stopRecording: () => { calls.push("stop"); return stop; } },
 		publishArchiveState: () => {},
 		publishCaptureHeaderState: () => {},
@@ -594,7 +592,6 @@ test("keeps a canonical capture when recording shutdown fails", async () => {
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: async () => { throw new Error("finalize failed"); } },
 		publishArchiveState: () => {},
 		publishCaptureHeaderState: () => {},
@@ -634,7 +631,6 @@ test("new capture creation uses named commands and persists the index once", asy
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: async () => {} },
 		publishArchiveState: () => {},
 		publishCaptureHeaderState: () => {},
@@ -688,7 +684,6 @@ test("holds canonical metadata writes until a new capture command is acknowledge
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: async () => {} },
 		publishArchiveState: () => {},
 		publishCaptureHeaderState: () => {},
@@ -753,7 +748,6 @@ test("does not reconcile a canonical delete twice after sidebar selection", asyn
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: async () => {} },
 		publishDialogCommand: () => {},
 		captureWriter: {
@@ -807,7 +801,6 @@ test("waits for an in-flight duplicate before deleting its copy", async () => {
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: async () => {} },
 		publishArchiveState: () => {},
 		publishCaptureHeaderState: () => {},
