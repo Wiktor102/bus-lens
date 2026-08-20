@@ -385,7 +385,9 @@ p {
 }
 .sidebar h1 {
 	font-size: 17px;
-	margin: 5px 0 0;
+	margin: 0;
+	text-box-trim: trim-both;
+	text-box-edge: cap alphabetic;
 }
 .search-box,
 .stream-filter label {
