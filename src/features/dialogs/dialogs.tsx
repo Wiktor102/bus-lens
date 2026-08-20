@@ -31,7 +31,7 @@ function DialogHeading({
 	leading,
 	onClose
 }: {
-	eyebrow: string;
+	eyebrow?: string;
 	title: string;
 	titleId?: string;
 	className?: string;
@@ -42,7 +42,7 @@ function DialogHeading({
 		<div className={`modal-heading ${className || ""}`.trim()}>
 			{leading}
 			<div className="modal-heading-copy">
-				<span className="eyebrow">{eyebrow}</span>
+				{eyebrow ? <span className="eyebrow">{eyebrow}</span> : null}
 				<h2 id={titleId}>{title}</h2>
 			</div>
 			<button
@@ -104,7 +104,7 @@ export function ConfirmationDialog() {
 			}}
 		>
 			<DialogHeading
-				eyebrow={confirmationCommand?.eyebrow || "Confirm action"}
+				eyebrow={confirmationCommand?.eyebrow}
 				title={confirmationCommand?.title || "Are you sure?"}
 				titleId="confirmationTitle"
 				className="confirmation-heading"
