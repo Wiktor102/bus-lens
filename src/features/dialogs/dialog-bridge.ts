@@ -1,6 +1,7 @@
 import type {
 	AnnotationDeleteInput,
 	AnnotationSaveInput,
+	ConfirmationAction,
 	ContextSaveInput,
 	DialogCommand,
 	DialogCommandInput,
@@ -16,6 +17,8 @@ export type DialogActions = {
 	deleteAnnotation: (input: AnnotationDeleteInput) => void;
 	savePatternRemark: (input: PatternRemarkSaveInput) => boolean;
 	exportData: (format: ExportFormat) => void;
+	confirm: (action: ConfirmationAction) => void;
+	dismiss: () => void;
 	notify: (message: string) => void;
 };
 
@@ -48,11 +51,16 @@ const actions: DialogActions = {
 		return true;
 	},
 	exportData: format => applicationStore.sendCommand({ type: "dialog/export", format }),
+	confirm: action => {
+		publishDialogCommand(null);
+		applicationStore.sendCommand({ type: "dialog/confirm", action });
+	},
+	dismiss: () => publishDialogCommand(null),
 	notify: message => applicationStore.sendCommand({ type: "dialog/notify", message })
 };
 
 export const getDialogActions = (): DialogActions => actions;
 
-export function publishDialogCommand(command: DialogCommandInput): void {
+export function publishDialogCommand(command: DialogCommandInput | null): void {
 	applicationStore.send({ type: "dialog/command-changed", command });
 }

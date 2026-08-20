@@ -8,6 +8,7 @@ import type { Capture } from "../capture/capture-framing.ts";
 import type { SerialController } from "../transport/serial-controller.ts";
 import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
 import type { ApplicationEvent } from "../../shared/application-store.ts";
+import type { DialogCommandInput } from "../dialogs/dialog-model.ts";
 
 export type SendControllerStatus = {
 	sendInFlight: boolean;
@@ -36,7 +37,7 @@ export type SendControllerDependencies = {
 	transport: Pick<SerialController, "getPort" | "isRecording" | "queueLiveBytes">;
 	archiveCommands?: ArchiveCommands;
 	showToast: (message: string) => void;
-	confirm: (message: string) => boolean;
+	publishDialogCommand: (command: DialogCommandInput) => void;
 	publishSendState: () => void;
 	publishSendWorkflow?: (event: SendWorkflowEvent) => void;
 	publishPersistenceError?: (error: { message: string; canRetry: boolean } | null) => void;
@@ -358,18 +359,42 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		dependencies.publishSendState();
 	}
 
+	function requestClearSendQueue(): void {
+		if (!queue().length || queueRunning) return;
+		dependencies.publishDialogCommand({
+			type: "confirmation",
+			eyebrow: "Transmit queue",
+			title: "Clear transmit queue?",
+			message: "Every queued message will be removed before it is sent.",
+			detail: "Captured TX bytes are not affected by this action.",
+			confirmLabel: "Clear queue",
+			action: { type: "send/clear-queue" }
+		});
+	}
+
 	function clearSendQueue(): void {
 		if (!queue().length || queueRunning) return;
-		if (!dependencies.confirm("Clear every message from the transmit queue?")) return;
 		const removed = [...queue()];
 		if (compatibilityState) replaceQueue([]);
 		removed.forEach((item, index) => deleteQueueItem(item, index));
 		dependencies.publishSendState();
 	}
 
+	function requestClearSendHistory(): void {
+		if (!history().length) return;
+		dependencies.publishDialogCommand({
+			eyebrow: "Transmit history",
+			type: "confirmation",
+			title: "Clear send history?",
+			message: "The local record of sent messages will be removed.",
+			detail: "Captured TX bytes will remain in captures.",
+			confirmLabel: "Clear history",
+			action: { type: "send/clear-history" }
+		});
+	}
+
 	function clearSendHistory(): void {
 		if (!history().length) return;
-		if (!dependencies.confirm("Clear the separate local send history? Captured TX bytes will remain in captures.")) return;
 		const removed = [...history()];
 		if (compatibilityState) replaceHistory([]);
 		removed.forEach((item, index) => deleteHistoryItem(item, index));
@@ -448,7 +473,9 @@ export function createSendController(dependencies: SendControllerDependencies) {
 		removeQueueItem,
 		replayHistoryItem,
 		stopSendQueue,
+		requestClearSendQueue,
 		clearSendQueue,
+		requestClearSendHistory,
 		clearSendHistory,
 		runSendQueue,
 		retryPersistence

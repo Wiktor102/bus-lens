@@ -108,7 +108,6 @@ function makeFixture(authoritativeDifference = false): Fixture {
 		},
 		renderMessages: snapshots.renderMessages,
 		showToast: () => {},
-		confirm: () => true,
 		transport,
 		publishDialogCommand: () => {},
 		captureWriter: writer,

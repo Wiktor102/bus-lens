@@ -120,7 +120,7 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		transport,
 		archiveCommands: options.archive?.commands,
 		showToast: runtime.showToast,
-		confirm: message => confirm(message),
+		publishDialogCommand,
 		publishSendState: snapshots.publishSendState,
 		publishSendWorkflow: event => applicationStore.send(event),
 		publishPersistenceError: error => {
@@ -155,7 +155,6 @@ export function initializeController(options: { archive?: ArchiveDataLayer } = {
 		render: snapshots.render,
 		renderMessages: snapshots.renderMessages,
 		showToast: runtime.showToast,
-		confirm: message => confirm(message),
 		transport,
 		publishDialogCommand,
 		captureWriter: runtime.captureWriter,

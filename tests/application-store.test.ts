@@ -188,6 +188,30 @@ test("application store owns canonicalization and dialog lifecycle state", () =>
 	assert.equal(dialogSnapshot.folders[0].name, "Archive");
 });
 
+test("application store isolates typed confirmation actions", () => {
+	const store = createTestApplicationStore();
+	const confirmation: DialogCommandInput = {
+		type: "confirmation",
+		eyebrow: "Archive maintenance",
+		title: "Delete capture?",
+		message: "The capture will be removed.",
+		detail: "This cannot be undone.",
+		confirmLabel: "Delete capture",
+		action: { type: "capture/delete", captureId: "capture-1" }
+	};
+
+	store.send({ type: "dialog/command-changed", command: confirmation });
+	confirmation.action.captureId = "mutated";
+
+	const snapshot = selectDialog(store.getSnapshot());
+	assert.equal(snapshot?.type, "confirmation");
+	if (snapshot?.type !== "confirmation") return;
+	assert.equal(snapshot.action.captureId, "capture-1");
+
+	store.send({ type: "dialog/command-changed", command: null });
+	assert.equal(selectDialog(store.getSnapshot()), null);
+});
+
 test("application store owns message projections without cloning their graph", () => {
 	const store = createTestApplicationStore();
 	const messageStream = {

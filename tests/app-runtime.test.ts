@@ -97,7 +97,6 @@ test("renders an asynchronously selected capture after clearing the previous pro
 		render: () => { renderedCaptureIds.push(runtime.capture()?.id ?? null); },
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: async () => {} },
 		publishDialogCommand: () => {}
 	});
@@ -173,7 +172,6 @@ test("keeps canonical routing when the supplemental status list is incomplete", 
 		render: () => {},
 		renderMessages: () => {},
 		showToast: () => {},
-		confirm: () => true,
 		transport: { isRecording: () => false, stopRecording: async () => {} },
 		publishDialogCommand: () => {},
 		captureWriter: runtime.captureWriter,
