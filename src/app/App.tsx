@@ -31,6 +31,7 @@ import { getPersistenceErrorActions } from "../shared/persistence-error-bridge";
 import {
 	AnnotationDialog,
 	CanonicalizationDialog,
+	ConfirmationDialog,
 	ContextDialog,
 	ExportDialog,
 	PatternRemarkDialog
@@ -1333,6 +1334,7 @@ function App() {
 			</div>
 			<SendPanel open={sendPopupOpen} onOpenChange={handleSendPopupChange} />
 			<ContextDialog />
+			<ConfirmationDialog />
 			<CanonicalizationDialog />
 			<AnnotationDialog />
 			<PatternRemarkDialog />

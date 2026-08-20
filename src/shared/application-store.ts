@@ -3,6 +3,7 @@ import type { CanonicalizationJob, CanonicalizationPreflight } from "../persiste
 import type {
 	AnnotationDeleteInput,
 	AnnotationSaveInput,
+	ConfirmationAction,
 	ContextSaveInput,
 	DialogCommand,
 	DialogCommandInput,
@@ -261,6 +262,7 @@ export type ApplicationCommand =
 	| { type: "dialog/delete-annotation"; input: AnnotationDeleteInput }
 	| { type: "dialog/save-pattern-remark"; input: PatternRemarkSaveInput }
 	| { type: "dialog/export"; format: ExportFormat }
+	| { type: "dialog/confirm"; action: ConfirmationAction }
 	| { type: "dialog/notify"; message: string }
 	| { type: "canonicalization/close" }
 	| { type: "canonicalization/download" }

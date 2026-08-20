@@ -64,7 +64,6 @@ export type CaptureControllerDependencies = {
 	render: (options?: CaptureRenderOptions) => void;
 	renderMessages: (options?: MessageStreamDeriveOptions) => void;
 	showToast: (message: string) => void;
-	confirm: (message: string) => boolean;
 	transport: Pick<SerialController, "isRecording" | "stopRecording"> & {
 		isCaptureMutationLocked?: (captureId: string) => boolean;
 		isCaptureFinalizing?: (captureId: string) => boolean;
@@ -840,15 +839,30 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		return true;
 	}
 
-	function deleteFolder(folderId: string) {
+	function requestDeleteFolder(folderId: string) {
 		const folder = folders().find(item => item.id === folderId);
 		if (!folder) return;
 		const affectedCaptures = captures().filter(item => item.folderId === folderId);
 		const captureCount = affectedCaptures.length;
 		const detail = captureCount
-			? ` Its ${captureCount} capture${captureCount === 1 ? "" : "s"} will be moved to Unfiled.`
+			? `${captureCount} capture${captureCount === 1 ? "" : "s"} will be moved to Unfiled.`
 			: "";
-		if (!dependencies.confirm(`Delete folder “${folder.name}”?${detail}`)) return;
+		dependencies.publishDialogCommand({
+			type: "confirmation",
+			eyebrow: "Archive maintenance",
+			title: "Delete folder?",
+			message: `“${folder.name}” will be removed from the archive.`,
+			detail: detail || "Captures already in other folders will not be affected.",
+			confirmLabel: "Delete folder",
+			action: { type: "archive/delete-folder", folderId }
+		});
+	}
+
+	function deleteFolder(folderId: string) {
+		const folder = folders().find(item => item.id === folderId);
+		if (!folder) return;
+		const affectedCaptures = captures().filter(item => item.folderId === folderId);
+		const captureCount = affectedCaptures.length;
 		if (compatibilityState) {
 			compatibilityState.captures.forEach(item => {
 				if (item.folderId === folderId) {
@@ -1006,9 +1020,23 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		duplicateCapture(capture());
 	}
 
+	function requestDeleteArchiveCapture(captureId: string): void {
+		const item = captureById(String(captureId)) || captures().find(captureItem => String(captureItem.id) === String(captureId)) as ActiveCapture | undefined;
+		if (!item || rejectLockedMutation(item)) return;
+		dependencies.publishDialogCommand({
+			type: "confirmation",
+			eyebrow: "Archive maintenance",
+			title: "Delete capture?",
+			message: `“${item.name}” will be permanently removed.`,
+			detail: "Captured bytes, framing, notes, annotations, and metadata will be deleted.",
+			confirmLabel: "Delete capture",
+			action: { type: "capture/delete", captureId: String(captureId) }
+		});
+	}
+
 	async function deleteArchiveCapture(captureId: string): Promise<void> {
 		let item = captureById(String(captureId)) || captures().find(captureItem => String(captureItem.id) === String(captureId)) as ActiveCapture | undefined;
-		if (!item || rejectLockedMutation(item) || !dependencies.confirm(`Delete “${item.name}”?`)) return;
+		if (!item || rejectLockedMutation(item)) return;
 		const deletingActiveCapture = dependencies.getActiveId() === captureId;
 		if (deletingActiveCapture) {
 			try {
@@ -1058,33 +1086,50 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		dependencies.render();
 	}
 
+	function requestClearActiveCaptureMessages(): void {
+		const c = capture();
+		if (!c || rejectLockedMutation(c)) return;
+		dependencies.publishDialogCommand({
+			type: "confirmation",
+			eyebrow: "Capture data",
+			title: "Clear capture data?",
+			message: "This capture will be emptied of its captured data.",
+			detail: "Raw bytes, messages, annotations, and recognized sequence notes will be removed.",
+			confirmLabel: "Clear capture",
+			action: { type: "capture/clear-messages" }
+		});
+	}
+
 	function clearActiveCaptureMessages() {
 		const c = capture();
 		if (!c || rejectLockedMutation(c)) return;
-		if (dependencies.confirm("Clear all raw bytes, messages, and message annotations from this capture?")) {
-			c.byteStream = [];
-			c.messages = [];
-			c.annotations = {};
-			c.patternRemarks = {};
-			bumpCaptureProjectionGeneration(c);
-			if (isCanonical(c)) {
-				const operation = dependencies.archiveCommands
-					? dependencies.archiveCommands.clearCaptureData(c.id)
-					: dependencies.captureWriter!.clearData({ captureId: c.id });
-				dependencies.trackCaptureWrite?.(c.id, operation);
-				void operation.then(result => {
-					if (!result) return;
-					c.dataRevision = result.dataRevision;
-					c.contentRevision = result.contentRevision;
-				}).catch(error => reconcileFailure(c.id, error));
-			} else persistLegacyCapture(c);
-			dependencies.render();
-		}
+		c.byteStream = [];
+		c.messages = [];
+		c.annotations = {};
+		c.patternRemarks = {};
+		bumpCaptureProjectionGeneration(c);
+		if (isCanonical(c)) {
+			const operation = dependencies.archiveCommands
+				? dependencies.archiveCommands.clearCaptureData(c.id)
+				: dependencies.captureWriter!.clearData({ captureId: c.id });
+			dependencies.trackCaptureWrite?.(c.id, operation);
+			void operation.then(result => {
+				if (!result) return;
+				c.dataRevision = result.dataRevision;
+				c.contentRevision = result.contentRevision;
+			}).catch(error => reconcileFailure(c.id, error));
+		} else persistLegacyCapture(c);
+		dependencies.render();
 	}
 
 	async function deleteActiveCapture(): Promise<void> {
 		const activeId = dependencies.getActiveId();
 		if (activeId) await deleteArchiveCapture(activeId);
+	}
+
+	function requestDeleteActiveCapture(): void {
+		const activeId = dependencies.getActiveId();
+		if (activeId) requestDeleteArchiveCapture(activeId);
 	}
 
 	function publishContextDialog(isNew = false) {
@@ -1493,7 +1538,9 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		toggleArchiveFolder,
 		moveArchiveCapture,
 		deleteArchiveCapture,
+		requestDeleteArchiveCapture,
 		saveFolder,
+		requestDeleteFolder,
 		deleteFolder,
 		addSequenceNote,
 		setCaptureTitle,
@@ -1503,7 +1550,9 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		duplicateArchiveCapture,
 		duplicateActiveCapture,
 		clearActiveCaptureMessages,
+		requestClearActiveCaptureMessages,
 		deleteActiveCapture,
+		requestDeleteActiveCapture,
 		publishContextDialog,
 		seedSectionViewPreferences: () => seedSectionViewPreferences(capture()),
 		startSectionAtByte,

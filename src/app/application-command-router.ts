@@ -64,10 +64,10 @@ export function subscribeToApplicationCommands(dependencies: ApplicationCommandR
 				dependencies.captureController.duplicateArchiveCapture(command.captureId);
 				break;
 			case "capture/clear-messages":
-				dependencies.captureController.clearActiveCaptureMessages();
+				dependencies.captureController.requestClearActiveCaptureMessages();
 				break;
 			case "capture/delete-active":
-				void dependencies.captureController.deleteActiveCapture();
+				dependencies.captureController.requestDeleteActiveCapture();
 				break;
 			case "capture/upgrade-active":
 				dependencies.captureController.upgradeActiveCapture();
@@ -76,7 +76,7 @@ export function subscribeToApplicationCommands(dependencies: ApplicationCommandR
 				dependencies.captureController.upgradeCapture(command.captureId);
 				break;
 			case "capture/delete":
-				void dependencies.captureController.deleteArchiveCapture(command.captureId);
+				dependencies.captureController.requestDeleteArchiveCapture(command.captureId);
 				break;
 			case "archive/select":
 				dependencies.captureController.selectArchiveCapture(command.captureId);
@@ -97,7 +97,7 @@ export function subscribeToApplicationCommands(dependencies: ApplicationCommandR
 				dependencies.captureController.saveFolder(command.name, command.editingId);
 				break;
 			case "archive/delete-folder":
-				dependencies.captureController.deleteFolder(command.folderId);
+				dependencies.captureController.requestDeleteFolder(command.folderId);
 				break;
 			case "archive/import-file":
 				void dependencies.dataTransferController.importFile(command.file);
@@ -119,6 +119,25 @@ export function subscribeToApplicationCommands(dependencies: ApplicationCommandR
 				break;
 			case "dialog/export":
 				void dependencies.dataTransferController.exportData(command.format);
+				break;
+			case "dialog/confirm":
+				switch (command.action.type) {
+					case "capture/clear-messages":
+						dependencies.captureController.clearActiveCaptureMessages();
+						break;
+					case "capture/delete":
+						void dependencies.captureController.deleteArchiveCapture(command.action.captureId);
+						break;
+					case "archive/delete-folder":
+						dependencies.captureController.deleteFolder(command.action.folderId);
+						break;
+					case "send/clear-queue":
+						dependencies.sendController.clearSendQueue();
+						break;
+					case "send/clear-history":
+						dependencies.sendController.clearSendHistory();
+						break;
+				}
 				break;
 			case "dialog/notify":
 				dependencies.showToast(command.message);
@@ -163,10 +182,10 @@ export function subscribeToApplicationCommands(dependencies: ApplicationCommandR
 				dependencies.sendController.stopSendQueue();
 				break;
 			case "send/clear-queue":
-				dependencies.sendController.clearSendQueue();
+				dependencies.sendController.requestClearSendQueue();
 				break;
 			case "send/clear-history":
-				dependencies.sendController.clearSendHistory();
+				dependencies.sendController.requestClearSendHistory();
 				break;
 			case "message/open-note":
 				dependencies.messageActions.openMessageNote(command.messageId);

@@ -13,7 +13,7 @@ import {
 	type ContextDialogDraft,
 	type ExportFormat
 } from "./dialog-model";
-import { Check, Plus, X } from "lucide-react";
+import { AlertTriangle, Check, Plus, Trash2, X } from "lucide-react";
 
 function isCancelSubmit(event: FormEvent<HTMLFormElement>): boolean {
 	return ((event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null)?.value === "cancel";
@@ -23,17 +23,107 @@ function useDialogCommand() {
 	return useApplicationSelector(selectDialog);
 }
 
-function DialogHeading({ eyebrow, title }: { eyebrow: string; title: string }) {
+function DialogHeading({
+	eyebrow,
+	title,
+	titleId,
+	className,
+	onClose
+}: {
+	eyebrow: string;
+	title: string;
+	titleId?: string;
+	className?: string;
+	onClose?: () => void;
+}) {
 	return (
-		<div className="modal-heading">
+		<div className={`modal-heading ${className || ""}`.trim()}>
 			<div>
 				<span className="eyebrow">{eyebrow}</span>
-				<h2>{title}</h2>
+				<h2 id={titleId}>{title}</h2>
 			</div>
-			<button className="icon-btn" value="cancel" formMethod="dialog" formNoValidate aria-label="Close">
+			<button
+				className="icon-btn"
+				type={onClose ? "button" : undefined}
+				value={onClose ? undefined : "cancel"}
+				formMethod={onClose ? undefined : "dialog"}
+				formNoValidate={onClose ? undefined : true}
+				aria-label="Close"
+				onClick={onClose ? () => onClose() : undefined}
+			>
 				<X aria-hidden="true" />
 			</button>
 		</div>
+	);
+}
+
+export function ConfirmationDialog() {
+	const command = useDialogCommand();
+	const confirmationCommand = command?.type === "confirmation" ? command : null;
+	const actions = getDialogActions();
+	const dialogRef = useRef<HTMLDialogElement>(null);
+	const cancelRef = useRef<HTMLButtonElement>(null);
+
+	useEffect(() => {
+		const dialog = dialogRef.current;
+		if (!dialog) return;
+		if (!confirmationCommand) {
+			if (dialog.open) dialog.close();
+			return;
+		}
+		if (!dialog.open) dialog.showModal();
+		const frame = requestAnimationFrame(() => cancelRef.current?.focus());
+		return () => cancelAnimationFrame(frame);
+	}, [confirmationCommand]);
+
+	const dismiss = () => {
+		actions.dismiss();
+		dialogRef.current?.close();
+	};
+
+	const confirm = () => {
+		if (!confirmationCommand) return;
+		actions.confirm(confirmationCommand.action);
+		dialogRef.current?.close();
+	};
+
+	return (
+		<dialog
+			id="confirmationDialog"
+			className="modal confirmation-modal"
+			ref={dialogRef}
+			role="alertdialog"
+			aria-labelledby="confirmationTitle"
+			aria-describedby="confirmationMessage confirmationDetail"
+			onCancel={event => {
+				event.preventDefault();
+				dismiss();
+			}}
+		>
+			<div className="confirmation-signal" aria-hidden="true">
+				<AlertTriangle />
+			</div>
+			<DialogHeading
+				eyebrow={confirmationCommand?.eyebrow || "Confirm action"}
+				title={confirmationCommand?.title || "Are you sure?"}
+				titleId="confirmationTitle"
+				className="confirmation-heading"
+				onClose={dismiss}
+			/>
+			<div className="confirmation-copy">
+				<p id="confirmationMessage">{confirmationCommand?.message || "This action cannot be undone."}</p>
+				<p id="confirmationDetail">{confirmationCommand?.detail || "Review the impact before continuing."}</p>
+			</div>
+			<div className="modal-actions confirmation-actions">
+				<button ref={cancelRef} className="btn btn-secondary" type="button" onClick={dismiss}>
+					Keep it
+				</button>
+				<button className="btn btn-danger confirmation-confirm" type="button" onClick={confirm}>
+					<Trash2 aria-hidden="true" />
+					{confirmationCommand?.confirmLabel || "Continue"}
+				</button>
+			</div>
+		</dialog>
 	);
 }
 

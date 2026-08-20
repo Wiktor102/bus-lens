@@ -106,17 +106,37 @@ export type ExportDialogCommand = {
 	requestId: number;
 };
 
+export type ConfirmationAction =
+	| { type: "capture/clear-messages" }
+	| { type: "capture/delete"; captureId: string }
+	| { type: "archive/delete-folder"; folderId: string }
+	| { type: "send/clear-queue" }
+	| { type: "send/clear-history" };
+
+export type ConfirmationDialogCommand = {
+	type: "confirmation";
+	requestId: number;
+	eyebrow: string;
+	title: string;
+	message: string;
+	detail: string;
+	confirmLabel: string;
+	action: ConfirmationAction;
+};
+
 export type DialogCommand =
 	| ContextDialogCommand
 	| AnnotationDialogCommand
 	| PatternRemarkDialogCommand
-	| ExportDialogCommand;
+	| ExportDialogCommand
+	| ConfirmationDialogCommand;
 
 export type DialogCommandInput =
 	| Omit<ContextDialogCommand, "requestId">
 	| Omit<AnnotationDialogCommand, "requestId">
 	| Omit<PatternRemarkDialogCommand, "requestId">
-	| Omit<ExportDialogCommand, "requestId">;
+	| Omit<ExportDialogCommand, "requestId">
+	| Omit<ConfirmationDialogCommand, "requestId">;
 
 export type DialogSnapshot = {
 	command: DialogCommand | null;
