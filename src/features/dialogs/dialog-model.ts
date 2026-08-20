@@ -116,7 +116,7 @@ export type ConfirmationAction =
 export type ConfirmationDialogCommand = {
 	type: "confirmation";
 	requestId: number;
-	eyebrow: string;
+	eyebrow?: string;
 	title: string;
 	message: string;
 	detail: string;
