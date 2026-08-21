@@ -352,6 +352,7 @@ function MessageEntry({
 	const visibleBytes = visibleByteEntries(message);
 	const txByteCount = visibleBytes.filter(({ rawPosition }) => message.directions?.[rawPosition] === "tx").length;
 	const hasTxBytes = txByteCount > 0;
+	const hasMixedDirection = txByteCount > 0 && txByteCount < visibleBytes.length;
 	const monitoredDeviceTx = snapshot.txOrigin === "monitored-device";
 	const busLensTx = hasTxBytes && !monitoredDeviceTx;
 	const directionTag = hasTxBytes ? (txByteCount === visibleBytes.length ? "TX" : "MIXED") : "";
@@ -483,6 +484,12 @@ function MessageEntry({
 								? "TX from monitored device"
 								: "TX sent by BusLens"
 							: "RX to monitored device";
+						const directionUnderline = hasMixedDirection ? (
+							<span
+								className={`byte-direction-underline ${tx ? "tx" : "rx"}`.trim()}
+								aria-hidden="true"
+							/>
+						) : null;
 						const transitions = [incoming?.label, outgoing?.label].filter(Boolean);
 						const transitionTitle = transitions.length
 							? ` · framed transition${transitions.length > 1 ? "s" : ""}: ${transitions.join(" / ")}`
@@ -539,6 +546,7 @@ function MessageEntry({
 										formatByte(byte)
 									)}
 								</span>
+								{directionUnderline}
 							</button>
 						);
 					})}
