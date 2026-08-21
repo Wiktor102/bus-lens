@@ -1415,9 +1415,10 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (!message) return;
 		const position = positionText === undefined ? null : +positionText;
 		const existing = c.annotations[details.targetKey];
+		const direction = message.directions?.[position as number] === "tx" ? "TX" : "RX";
 		const target =
 			type === "byte"
-				? `${formatTime(message.byteTimestamps?.[position as number] ?? message.timestamp)}  ·  ${signature(message)}  ·  BYTE ${(details.displayPosition as number) + 1} = ${hexByte(message.bytes[position as number])}`
+				? `${formatTime(message.byteTimestamps?.[position as number] ?? message.timestamp)}  ·  ${signature(message)}  ·  BYTE ${(details.displayPosition as number) + 1} = ${hexByte(message.bytes[position as number])}  ·  DIRECTION ${direction}`
 				: `${formatTime(message.timestamp)}  ·  ${signature(message)}`;
 		dependencies.publishDialogCommand({
 			type: "annotation",

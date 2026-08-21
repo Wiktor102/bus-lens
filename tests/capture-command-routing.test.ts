@@ -6,6 +6,46 @@ import type { CaptureWriter } from "../src/persistence/archive-client.ts";
 import type { AppState } from "../src/shared/app-state.ts";
 import type { ArchiveCommands } from "../src/data/archive-data-layer.ts";
 
+test("includes each byte direction in its annotation target", () => {
+	const capture: Capture = {
+		id: "direction-capture",
+		name: "Directional capture",
+		byteStream: [],
+		messages: [
+			{
+				id: "frame-1",
+				timestamp: 100,
+				byteTimestamps: [100, 120],
+				bytes: [0x10, 0x20],
+				directions: ["rx", "tx"]
+			}
+		],
+		annotations: {},
+		frameSections: [],
+		notes: [],
+		patternRemarks: {}
+	};
+	const targets: string[] = [];
+	const controller = createCaptureController({
+		capture: () => capture,
+		getActiveId: () => capture.id,
+		setActiveId: () => {},
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		transport: { isRecording: () => false, stopRecording: async () => {} },
+		publishDialogCommand: command => {
+			if (command?.type === "annotation") targets.push(command.target);
+		}
+	});
+
+	controller.publishAnnotationDialog("byte", "frame-1:0");
+	controller.publishAnnotationDialog("byte", "frame-1:1");
+
+	assert.match(targets[0] || "", /DIRECTION RX/);
+	assert.match(targets[1] || "", /DIRECTION TX/);
+});
+
 test("canonical optimistic mutations route through dedicated commands", async () => {
 	const capture: Capture = {
 		id: "canonical",
