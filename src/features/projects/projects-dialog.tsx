@@ -72,7 +72,8 @@ function ProjectRow({
 				<div className="project-copy">
 					<strong>{project.name}</strong>
 					{isActive ? <span className="project-active-chip">Active</span> : null}
-					{project.id === DEFAULT_PROJECT_ID ? <span className="project-default-chip">Default</span> : null}					<small title={project.dbPath}>{project.dbPath}</small>
+					{project.id === DEFAULT_PROJECT_ID ? <span className="project-default-chip">Default</span> : null}
+					<small title={project.dbPath}>{project.dbPath}</small>
 				</div>
 				<div className="project-row-actions">
 					<button
