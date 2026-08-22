@@ -285,8 +285,8 @@ function CaptureHeader() {
 				<div id="captureSummary" className="capture-summary" aria-label="Capture summary">
 					<span>Messages <strong id="statMessages">{snapshot.summary.messages}</strong></span>
 					<span>Unique <strong id="statUnique">{snapshot.summary.unique}</strong></span>
-					<span title="The sum of each recording session from its first received byte to its last received byte" aria-label="Capture length: sum of each recording session from its first received byte to its last received byte">Capture length <strong id="statCaptureLength">{snapshot.summary.captureLength}</strong></span>
-					<span title="Received raw bytes only; transmitted bytes are excluded" aria-label="Captured: received raw bytes only; transmitted bytes are excluded">Captured <strong id="statCapturedBytes">{snapshot.summary.capturedBytes}</strong></span>
+					<span title="The sum of each recording session from its first captured byte to its last captured byte" aria-label="Capture length: sum of each recording session from its first captured byte to its last captured byte">Capture length <strong id="statCaptureLength">{snapshot.summary.captureLength}</strong></span>
+					<span title="All captured raw bytes, including RX and TX" aria-label="Captured: all captured raw bytes, including RX and TX">Captured <strong id="statCapturedBytes">{snapshot.summary.capturedBytes}</strong></span>
 				</div>
 				<div ref={actionsRef} className="header-actions">
 					<button id="editContextBtn" className="btn btn-secondary" type="button" disabled={!snapshot.hasCapture || locked} onClick={() => actions.openContext()}>

@@ -38,8 +38,8 @@ function timestamp(value: unknown) {
 	return Number.isFinite(result) ? result : undefined;
 }
 
-function receivedRecords(byteStream: RawByteRecord[] = []) {
-	return byteStream.filter(record => record?.direction !== "tx" && timestamp(record.timestamp) !== undefined);
+function capturedRecords(byteStream: RawByteRecord[] = []) {
+	return byteStream.filter(record => timestamp(record.timestamp) !== undefined);
 }
 
 export function signatureForMessage(message: FramedMessage) {
@@ -63,8 +63,13 @@ export function countDistinctMessageSignatures(messages: FramedMessage[] = []) {
 	return new Set(messages.map(signatureForMessage)).size;
 }
 
+export function countCapturedRawBytes(byteStream: RawByteRecord[] = []) {
+	return byteStream.length;
+}
+
+/** @deprecated Use countCapturedRawBytes; TX is captured data too. */
 export function countReceivedRawBytes(byteStream: RawByteRecord[] = []) {
-	return byteStream.filter(record => record?.direction !== "tx").length;
+	return countCapturedRawBytes(byteStream);
 }
 
 export function sumRecordingSessionDurations(sessions: RecordingSession[] = []) {
@@ -95,13 +100,13 @@ export function normalizeCaptureSummaryData<T extends CaptureSummaryData>(captur
 					};
 				})
 		: (() => {
-				const received = receivedRecords(byteStream);
-				if (!received.length) return [];
+				const captured = capturedRecords(byteStream);
+				if (!captured.length) return [];
 				return [
 					{
 						id: generateId(),
-						firstReceivedAt: Number(received[0].timestamp),
-						lastReceivedAt: Number(received[received.length - 1].timestamp)
+						firstReceivedAt: Number(captured[0].timestamp),
+						lastReceivedAt: Number(captured[captured.length - 1].timestamp)
 					}
 				];
 			})();
@@ -119,8 +124,11 @@ export function normalizeCaptureSummaryData<T extends CaptureSummaryData>(captur
 	return capture;
 }
 
-export function recordReceivedByte(session: RecordingSession | undefined, timestampValue: number) {
+export function recordCapturedByte(session: RecordingSession | undefined, timestampValue: number) {
 	if (!session || !Number.isFinite(timestampValue)) return;
 	if (session.firstReceivedAt === undefined) session.firstReceivedAt = timestampValue;
 	session.lastReceivedAt = timestampValue;
 }
+
+/** @deprecated Use recordCapturedByte; TX is captured data too. */
+export const recordReceivedByte = recordCapturedByte;

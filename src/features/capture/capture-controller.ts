@@ -13,6 +13,7 @@ import {
 	type ContextSaveInput,
 	type PatternRemarkSaveInput
 } from "../dialogs/dialog-model.ts";
+import { CAPTURE_INPUT_FORMATS, isSnifferInputFormat } from "./capture-format.ts";
 import type { RawByteRecord } from "./capture-summary.ts";
 import type { MessageStreamDeriveOptions } from "../message-stream/message-stream.ts";
 import {
@@ -352,12 +353,15 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	}
 
 	function metadataPatchValue(item: ActiveCapture): CaptureMetadataPatch {
+		const inputFormat = isSnifferInputFormat(item.inputFormat)
+			? CAPTURE_INPUT_FORMATS.SNIFFER
+			: CAPTURE_INPUT_FORMATS.BINARY;
 		return {
 			name: String(item.name ?? ""),
 			description: String(item.description ?? ""),
 			controllerView: String(item.view ?? ""),
 			baudRate: Number(item.baudRate ?? 115200),
-			inputFormat: "binary",
+			inputFormat,
 			folderId: item.folderId ?? null,
 			parameters: item.params.flatMap(parameter => {
 				const key = String(parameter.key ?? "").trim();
@@ -372,6 +376,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (patch.controllerView !== undefined) item.view = patch.controllerView;
 		else if (patch.view !== undefined) item.view = patch.view;
 		if (patch.baudRate !== undefined) item.baudRate = patch.baudRate;
+		if (patch.inputFormat !== undefined) item.inputFormat = patch.inputFormat;
 		if ("folderId" in patch) item.folderId = patch.folderId ?? null;
 		if (patch.parameters) item.params = patch.parameters.map(parameter => ({ key: parameter.key, value: parameter.value }));
 	}
@@ -1152,7 +1157,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 	function publishContextDialog(isNew = false) {
 		const creatingNewCapture = isNew === true;
 		const c = creatingNewCapture
-			? { name: "Untitled capture", view: "", params: [], baudRate: 115200, folderId: null, id: null }
+			? { name: "Untitled capture", view: "", params: [], baudRate: 115200, inputFormat: CAPTURE_INPUT_FORMATS.BINARY, folderId: null, id: null }
 			: capture();
 		if (!c) return;
 		if (!creatingNewCapture && rejectLockedMutation(c as ActiveCapture)) return;
@@ -1164,6 +1169,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			view: String(c.view ?? ""),
 			folderId: c.folderId ? String(c.folderId) : null,
 			baudRate: Number(c.baudRate || 115200),
+			inputFormat: isSnifferInputFormat(c.inputFormat) ? CAPTURE_INPUT_FORMATS.SNIFFER : CAPTURE_INPUT_FORMATS.BINARY,
 			params: (Array.isArray(c.params) ? c.params : []).map(parameter => {
 				const item = parameter as { key?: unknown; value?: unknown };
 				return {
@@ -1348,7 +1354,7 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 				description: String(c.description ?? ""),
 				controllerView: String(c.view ?? ""),
 				baudRate: Number(c.baudRate ?? 115200),
-				inputFormat: "binary",
+				inputFormat: isSnifferInputFormat(c.inputFormat) ? CAPTURE_INPUT_FORMATS.SNIFFER : CAPTURE_INPUT_FORMATS.BINARY,
 				folderId: c.folderId ?? null,
 				parameters: c.params.flatMap(parameter => {
 					const key = String(parameter.key ?? "").trim();
@@ -1409,9 +1415,10 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (!message) return;
 		const position = positionText === undefined ? null : +positionText;
 		const existing = c.annotations[details.targetKey];
+		const direction = message.directions?.[position as number] === "tx" ? "TX" : "RX";
 		const target =
 			type === "byte"
-				? `${formatTime(message.byteTimestamps?.[position as number] ?? message.timestamp)}  ·  ${signature(message)}  ·  BYTE ${(details.displayPosition as number) + 1} = ${hexByte(message.bytes[position as number])}`
+				? `${formatTime(message.byteTimestamps?.[position as number] ?? message.timestamp)}  ·  ${signature(message)}  ·  BYTE ${(details.displayPosition as number) + 1} = ${hexByte(message.bytes[position as number])}  ·  DIRECTION ${direction}`
 				: `${formatTime(message.timestamp)}  ·  ${signature(message)}`;
 		dependencies.publishDialogCommand({
 			type: "annotation",

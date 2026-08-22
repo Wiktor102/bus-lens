@@ -350,13 +350,17 @@ function MessageEntry({
 			? originalRow
 			: `${originalRow}–${message._originalEnd + 1}`;
 	const visibleBytes = visibleByteEntries(message);
-	const sentByteCount = visibleBytes.filter(({ rawPosition }) => message.directions?.[rawPosition] === "tx").length;
-	const hasSentBytes = sentByteCount > 0;
-	const directionTag = hasSentBytes ? (sentByteCount === visibleBytes.length ? "TX" : "MIXED") : "";
+	const txByteCount = visibleBytes.filter(({ rawPosition }) => message.directions?.[rawPosition] === "tx").length;
+	const hasTxBytes = txByteCount > 0;
+	const hasMixedDirection = txByteCount > 0 && txByteCount < visibleBytes.length;
+	const monitoredDeviceTx = snapshot.txOrigin === "monitored-device";
+	const busLensTx = hasTxBytes && !monitoredDeviceTx;
+	const directionTag = hasTxBytes ? (txByteCount === visibleBytes.length ? "TX" : "MIXED") : "";
 	const rowClasses = [
 		sequenceNote ? "sequence-noted" : "",
 		isUnique ? "unique-message" : "",
-		hasSentBytes ? "sent-message" : "",
+		busLensTx ? "sent-message" : "",
+		monitoredDeviceTx && hasTxBytes ? "monitored-tx-message" : "",
 		pattern ? "pattern-member" : "",
 		isPatternStart ? "pattern-start" : "",
 		isPatternEnd ? "pattern-end" : ""
@@ -365,6 +369,11 @@ function MessageEntry({
 		.join(" ");
 	const rowTitles = [
 		isUnique ? "Unique telegram · this signature occurs once in the capture" : "",
+		hasTxBytes
+			? monitoredDeviceTx
+				? "TX · transmission from monitored device"
+				: "TX · sent by BusLens"
+			: "",
 		sequenceNote ? `Sequence rows ${sequenceNote.start}–${sequenceNote.end}: ${sequenceNote.text}` : "",
 		pattern
 			? `Repeated sequence · occurrence ${patternMember?.occurrenceIndex! + 1} of ${pattern.starts.length}${
@@ -466,10 +475,21 @@ function MessageEntry({
 						const changedFromPrevious = previousIsAdjacent && previousByte !== byte;
 						const changed = Boolean(snapshot.highlight && (changedFromPrevious || incoming || outgoing));
 						const noted = snapshot.annotations[`${message.id}:${rawPosition}`];
-						const sent = message.directions?.[rawPosition] === "tx";
+						const tx = message.directions?.[rawPosition] === "tx";
+						const sent = tx && !monitoredDeviceTx;
 						const binary = byte.toString(2).padStart(8, "0");
 						const receivedAt = new Date(message.byteTimestamps?.[rawPosition] ?? message.timestamp).toISOString();
-						const directionLabel = sent ? "sent to RS-485" : "received from serial";
+						const directionLabel = tx
+							? monitoredDeviceTx
+								? "TX from monitored device"
+								: "TX sent by BusLens"
+							: "RX to monitored device";
+						const directionUnderline = hasMixedDirection ? (
+							<span
+								className={`byte-direction-underline ${tx ? "tx" : "rx"}`.trim()}
+								aria-hidden="true"
+							/>
+						) : null;
 						const transitions = [incoming?.label, outgoing?.label].filter(Boolean);
 						const transitionTitle = transitions.length
 							? ` · framed transition${transitions.length > 1 ? "s" : ""}: ${transitions.join(" / ")}`
@@ -526,6 +546,7 @@ function MessageEntry({
 										formatByte(byte)
 									)}
 								</span>
+								{directionUnderline}
 							</button>
 						);
 					})}

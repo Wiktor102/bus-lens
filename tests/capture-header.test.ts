@@ -51,7 +51,7 @@ test("derives a compact header snapshot without publishing capture bytes", () =>
 			messages: "2",
 			unique: "2",
 			captureLength: "1.0 s",
-			capturedBytes: "2 B"
+			capturedBytes: "3 B"
 		}
 	});
 	assert.equal("byteStream" in snapshot, false);
