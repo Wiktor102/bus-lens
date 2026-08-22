@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { rename } from "node:fs/promises";
+import { rename, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DatabaseManager } from "./database-manager.ts";
@@ -39,8 +39,22 @@ export class ProjectsService {
 		const id = randomUUID();
 		const dbPath = join(this.projectsDirectory, `${id}.sqlite`);
 		const record = this.registry.ensureProject({ id, name, dbPath });
-		// Open (and migrate) immediately so creation validates the database file.
-		this.manager.forProject(record.id);
+		try {
+			// Open (and migrate) immediately so creation validates the database file.
+			this.manager.forProject(record.id);
+		} catch (error) {
+			// A fresh row must not outlive a failed allocation: otherwise the
+			// project lists forever while every request against it fails.
+			if (record.id === id) {
+				try {
+					this.registry.remove(record.id);
+				} catch {
+					// Rollback is best-effort; surface the original failure.
+				}
+				await this.removeDatabaseFiles(dbPath);
+			}
+			throw error;
+		}
 		return record;
 	}
 
@@ -56,10 +70,22 @@ export class ProjectsService {
 			throw new ProjectRegistryError("conflict", "Switch away from a project before deleting it");
 		}
 		const record = this.registry.require(projectId);
-		this.manager.close(projectId);
+		await this.manager.close(projectId);
 		this.registry.remove(projectId);
 		const removedPath = `${record.dbPath}.removed`;
 		if (!existsSync(record.dbPath)) return;
+		// Deferred cleanup: `.removed` files currently accumulate across delete
+		// cycles and are never swept.
 		await rename(record.dbPath, removedPath);
+	}
+
+	private async removeDatabaseFiles(dbPath: string): Promise<void> {
+		for (const candidate of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, `${dbPath}-journal`]) {
+			try {
+				if (existsSync(candidate)) await unlink(candidate);
+			} catch {
+				// Best-effort cleanup; the registry rollback already happened.
+			}
+		}
 	}
 }
