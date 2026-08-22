@@ -1,7 +1,7 @@
 import { createReadStream, existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { extname, join, resolve } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 import { backupDatabase, restoreDatabase } from "./backup.ts";
 import {
 	RepositoryConflictError,
@@ -13,7 +13,8 @@ import {
 } from "./archive-repository.ts";
 import { openDatabase, type SqliteDatabase } from "./database.ts";
 import { DatabaseManager, ProjectNotFoundError, type ProjectDatabaseContext } from "./database-manager.ts";
-import { ensureDefaultProject, ProjectRegistry } from "./project-registry.ts";
+import { ensureDefaultProject, ProjectRegistry, ProjectRegistryError } from "./project-registry.ts";
+import { ProjectsService } from "./projects-service.ts";
 import {
 	CanonicalCaptureCommandError,
 	type CanonicalCaptureCommandService,
@@ -39,11 +40,17 @@ const MIME_TYPES: Record<string, string> = {
 type Entity = "captures" | "folders" | "queue" | "history";
 type ServiceOptions = {
 	databasePath: string;
+	/** Managed project files live here; defaults to <database directory>/projects. */
+	projectsDirectory?: string;
 	staticDirectory?: string;
 	maxBodyBytes?: number;
 	mcpEndpoint?: string;
 	mcpAgentNotes?: AgentAccessStatus["agentNotes"];
 	mcpToolRegistrar?: McpToolRegistrar;
+	/** Collapses bursts of MRU flips before recreating agent access. */
+	mcpRetargetDebounceMs?: number;
+	/** Keeps replaced agent targets alive this long for in-flight tool calls. */
+	mcpHandoffGraceMs?: number;
 };
 
 export type ArchiveHttpService = {
@@ -54,6 +61,7 @@ export type ArchiveHttpService = {
 	database: SqliteDatabase;
 	registry: ProjectRegistry;
 	manager: DatabaseManager;
+	projects: ProjectsService;
 	mcpAccess: McpAccess;
 	close: () => Promise<void>;
 };
@@ -79,6 +87,13 @@ async function jsonBody(request: IncomingMessage, maxBytes: number): Promise<unk
 function documentFrom(value: unknown): JsonDocument {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new RepositoryValidationError("Document must be an object");
 	return value as JsonDocument;
+}
+
+function projectNameFromBody(body: JsonDocument): string {
+	const value = body.name;
+	// String() coercion would accept objects as "[object Object]"; names must be strings.
+	if (typeof value !== "string") throw new RepositoryValidationError("Project name must be a string");
+	return value;
 }
 
 function expectedVersion(request: IncomingMessage): number | undefined {
@@ -154,10 +169,12 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 	const rootDatabasePath = resolve(options.databasePath);
 	const registry = new ProjectRegistry(rootDatabase);
 	ensureDefaultProject(registry, rootDatabasePath);
-	const manager = new DatabaseManager({ rootDatabase, rootDatabasePath: options.databasePath, registry });
+	const manager = new DatabaseManager({ rootDatabase, rootDatabasePath, registry });
 	// Embedders that read service.repository directly keep observing the Default
 	// project; routed requests below resolve their own context per request.
 	const defaultContext = manager.forProject();
+	const projectsDirectory = resolve(options.projectsDirectory ?? join(dirname(rootDatabasePath), "projects"));
+	const projects = new ProjectsService({ registry, manager, projectsDirectory });
 	const staticDirectory = options.staticDirectory ? resolve(options.staticDirectory) : undefined;
 	const maxBodyBytes = options.maxBodyBytes ?? 128 * 1024 * 1024;
 	const phase4ToolRegistrar: McpToolRegistrar = (server, queries, recordClient, commands) => {
@@ -165,14 +182,99 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 		registerComparisonTools(server, queries, recordClient);
 		registerAgentNoteTools(server, queries, recordClient, commands);
 	};
-	const mcpAccess = createMcpAccess({
-		database: defaultContext.database,
-		databasePath: defaultContext.databasePath,
-		endpoint: options.mcpEndpoint ?? "http://127.0.0.1/mcp",
-		serverVersion: "1.0.0",
-		agentNotes: options.mcpAgentNotes,
-		toolRegistrar: options.mcpToolRegistrar ?? phase4ToolRegistrar
-	});
+	const createMcpAccessForContext = (context: ProjectDatabaseContext): McpAccess =>
+		createMcpAccess({
+			database: context.database,
+			databasePath: context.databasePath,
+			endpoint: options.mcpEndpoint ?? "http://127.0.0.1/mcp",
+			serverVersion: "1.0.0",
+			agentNotes: options.mcpAgentNotes,
+			toolRegistrar: options.mcpToolRegistrar ?? phase4ToolRegistrar
+		});
+	// Agents do not send the routing header, so agent access follows the
+	// most-recently-used project and is recreated when that target changes.
+	let mcpTarget = { access: createMcpAccessForContext(defaultContext), databasePath: defaultContext.databasePath };
+	let mcpRetargetChain: Promise<void> = Promise.resolve();
+	let mcpClosing = false;
+	const mcpRetargetDebounceMs = Math.max(0, options.mcpRetargetDebounceMs ?? 250);
+	const mcpHandoffGraceMs = Math.max(0, options.mcpHandoffGraceMs ?? 5_000);
+	type RetiredMcpAccess = { timer: NodeJS.Timeout; run: () => Promise<void> };
+	const retiredMcpAccesses: RetiredMcpAccess[] = [];
+	function retireMcpAccess(access: McpAccess): void {
+		let settled = false;
+		const run = async (): Promise<void> => {
+			if (settled) return;
+			settled = true;
+			try {
+				await access.close();
+			} catch (error) {
+				console.error("Bus Lens MCP close failed", error);
+			}
+		};
+		// Replaced targets stay servicable for in-flight tool calls during the
+		// grace window instead of cutting agent sessions off mid-call.
+		const timer = setTimeout(() => {
+			void run();
+		}, mcpHandoffGraceMs);
+		timer.unref?.();
+		retiredMcpAccesses.push({ timer, run });
+	}
+	async function flushRetiredMcpAccesses(): Promise<void> {
+		const pending = retiredMcpAccesses.splice(0);
+		for (const entry of pending) {
+			clearTimeout(entry.timer);
+			await entry.run();
+		}
+	}
+	let wakeMcpQuietWindow: (() => void) | undefined;
+	async function waitForMcpQuietWindow(): Promise<void> {
+		if (!mcpRetargetDebounceMs) return;
+		await new Promise<void>(resolveQuiet => {
+			const timer = setTimeout(() => {
+				wakeMcpQuietWindow = undefined;
+				resolveQuiet();
+			}, mcpRetargetDebounceMs);
+			timer.unref?.();
+			// Shutdown interrupts the window instead of waiting it out.
+			wakeMcpQuietWindow = () => {
+				clearTimeout(timer);
+				resolveQuiet();
+			};
+		});
+	}
+	async function ensureMcpProject(): Promise<McpAccess> {
+		// Shutdown sets this before draining the chain, so a pending retarget
+		// can never recreate agent access (and re-open project handles) after
+		// close() has already torn the manager and root database down.
+		if (mcpClosing) return mcpTarget.access;
+		const mru = registry.mostRecentlyUsed();
+		const targetPath = mru ? resolve(mru.dbPath) : rootDatabasePath;
+		if (targetPath === mcpTarget.databasePath) return mcpTarget.access;
+		const retarget = mcpRetargetChain.then(async () => {
+			// Interleaved traffic across projects flips the MRU rapidly; waiting
+			// out a quiet window collapses each burst into one retarget instead
+			// of recreating agent access (and dropping agent sessions) per flip.
+			await waitForMcpQuietWindow();
+			const latest = registry.mostRecentlyUsed();
+			const nextPath = latest ? resolve(latest.dbPath) : rootDatabasePath;
+			if (nextPath === mcpTarget.databasePath) return;
+			let context = defaultContext;
+			try {
+				context = manager.forProject(latest?.id);
+			} catch {
+				context = defaultContext;
+			}
+			const nextAccess = createMcpAccessForContext(context);
+			const previous = mcpTarget.access;
+			mcpTarget = { access: nextAccess, databasePath: nextPath };
+			retireMcpAccess(previous);
+		}).catch(error => {
+			console.error("Bus Lens MCP retargeting failed", error);
+		});
+		mcpRetargetChain = retarget;
+		await retarget;
+		return mcpTarget.access;
+	}
 	const server = createServer(async (request, response) => {
 		// Released in finally so every await below keeps its project handle
 		// pinned against eviction and explicit closes.
@@ -180,13 +282,32 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 		try {
 			const url = new URL(request.url ?? "/", "http://127.0.0.1");
 			const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
-			if (url.pathname === "/mcp") return await mcpAccess.handle(request, response);
+			if (url.pathname === "/mcp") return await (await ensureMcpProject()).handle(request, response);
 			if (segments[0] !== "api") {
 				if (staticDirectory && await serveStatic(response, staticDirectory, url.pathname)) return;
 				return send(response, 404, { error: "Not found" });
 			}
 			if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { ok: true });
-			if (request.method === "GET" && url.pathname === "/api/agent-access") return send(response, 200, mcpAccess.getStatus());
+			if (request.method === "GET" && url.pathname === "/api/agent-access") return send(response, 200, mcpTarget.access.getStatus());
+			if (segments[1] === "projects") {
+				const projectId = segments[2];
+				// CRUD only matches the exact collection/item shape; deeper paths
+				// must not silently rename or delete the addressed project.
+				if (!projectId && request.method === "GET") return send(response, 200, { projects: projects.list() });
+				if (!projectId && request.method === "POST") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					return send(response, 201, await projects.create(projectNameFromBody(body)));
+				}
+				if (projectId && segments.length === 3 && request.method === "PATCH") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					return send(response, 200, projects.rename(projectId, projectNameFromBody(body)));
+				}
+				if (projectId && segments.length === 3 && request.method === "DELETE") {
+					await projects.delete(projectId, requestedProjectId(request));
+					return send(response, 204, {});
+				}
+				return send(response, 405, { error: "Method not allowed" });
+			}
 			let projectContext: ProjectDatabaseContext;
 			try {
 				projectContext = manager.forProject(requestedProjectId(request));
@@ -536,6 +657,9 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 				return send(response, status, { error: error.message, code: error.code, details: error.details });
 			}
 			if (error instanceof RepositoryConflictError) return send(response, 409, { error: error.message, code: error.code });
+			if (error instanceof ProjectRegistryError) {
+				return send(response, error.code === "not-found" ? 404 : error.code === "conflict" ? 409 : 400, { error: error.message, code: error.code });
+			}
 			if (error instanceof RepositoryValidationError || error instanceof SyntaxError) return send(response, 400, { error: error.message });
 			console.error("Archive service request failed", error);
 			return send(response, 500, { error: "Internal server error" });
@@ -550,9 +674,20 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 		database: rootDatabase,
 		registry,
 		manager,
-		mcpAccess,
+		projects,
+		// Live view: retargeting swaps the underlying access, so a snapshot
+		// here would go stale for embedders after the first MRU change.
+		get mcpAccess() {
+			return mcpTarget.access;
+		},
 		close: async () => {
-			await mcpAccess.close();
+			mcpClosing = true;
+			// A retarget already chained behind the quiet window must finish (or
+			// be skipped) before the handles it would touch are gone.
+			wakeMcpQuietWindow?.();
+			await mcpRetargetChain;
+			await flushRetiredMcpAccesses();
+			await mcpTarget.access.close();
 			await new Promise<void>(resolveClose => server.close(() => resolveClose()));
 			manager.closeAll();
 			rootDatabase.close();
