@@ -47,6 +47,10 @@ type ServiceOptions = {
 	mcpEndpoint?: string;
 	mcpAgentNotes?: AgentAccessStatus["agentNotes"];
 	mcpToolRegistrar?: McpToolRegistrar;
+	/** Collapses bursts of MRU flips before recreating agent access. */
+	mcpRetargetDebounceMs?: number;
+	/** Keeps replaced agent targets alive this long for in-flight tool calls. */
+	mcpHandoffGraceMs?: number;
 };
 
 export type ArchiveHttpService = {
@@ -184,11 +188,52 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 	// most-recently-used project and is recreated when that target changes.
 	let mcpTarget = { access: createMcpAccessForContext(defaultContext), databasePath: defaultContext.databasePath };
 	let mcpRetargetChain: Promise<void> = Promise.resolve();
+	const mcpRetargetDebounceMs = Math.max(0, options.mcpRetargetDebounceMs ?? 250);
+	const mcpHandoffGraceMs = Math.max(0, options.mcpHandoffGraceMs ?? 5_000);
+	type RetiredMcpAccess = { timer: NodeJS.Timeout; run: () => Promise<void> };
+	const retiredMcpAccesses: RetiredMcpAccess[] = [];
+	function retireMcpAccess(access: McpAccess): void {
+		let settled = false;
+		const run = async (): Promise<void> => {
+			if (settled) return;
+			settled = true;
+			try {
+				await access.close();
+			} catch (error) {
+				console.error("Bus Lens MCP close failed", error);
+			}
+		};
+		// Replaced targets stay servicable for in-flight tool calls during the
+		// grace window instead of cutting agent sessions off mid-call.
+		const timer = setTimeout(() => {
+			void run();
+		}, mcpHandoffGraceMs);
+		timer.unref?.();
+		retiredMcpAccesses.push({ timer, run });
+	}
+	async function flushRetiredMcpAccesses(): Promise<void> {
+		const pending = retiredMcpAccesses.splice(0);
+		for (const entry of pending) {
+			clearTimeout(entry.timer);
+			await entry.run();
+		}
+	}
+	async function waitForMcpQuietWindow(): Promise<void> {
+		if (!mcpRetargetDebounceMs) return;
+		await new Promise<void>(resolveQuiet => {
+			const timer = setTimeout(resolveQuiet, mcpRetargetDebounceMs);
+			timer.unref?.();
+		});
+	}
 	async function ensureMcpProject(): Promise<McpAccess> {
 		const mru = registry.mostRecentlyUsed();
 		const targetPath = mru ? resolve(mru.dbPath) : rootDatabasePath;
 		if (targetPath === mcpTarget.databasePath) return mcpTarget.access;
 		const retarget = mcpRetargetChain.then(async () => {
+			// Interleaved traffic across projects flips the MRU rapidly; waiting
+			// out a quiet window collapses each burst into one retarget instead
+			// of recreating agent access (and dropping agent sessions) per flip.
+			await waitForMcpQuietWindow();
 			const latest = registry.mostRecentlyUsed();
 			const nextPath = latest ? resolve(latest.dbPath) : rootDatabasePath;
 			if (nextPath === mcpTarget.databasePath) return;
@@ -201,7 +246,7 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			const nextAccess = createMcpAccessForContext(context);
 			const previous = mcpTarget.access;
 			mcpTarget = { access: nextAccess, databasePath: nextPath };
-			await previous.close();
+			retireMcpAccess(previous);
 		}).catch(error => {
 			console.error("Bus Lens MCP retargeting failed", error);
 		});
@@ -607,8 +652,13 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 		registry,
 		manager,
 		projects,
-		mcpAccess: mcpTarget.access,
+		// Live view: retargeting swaps the underlying access, so a snapshot
+		// here would go stale for embedders after the first MRU change.
+		get mcpAccess() {
+			return mcpTarget.access;
+		},
 		close: async () => {
+			await flushRetiredMcpAccesses();
 			await mcpTarget.access.close();
 			await new Promise<void>(resolveClose => server.close(() => resolveClose()));
 			manager.closeAll();

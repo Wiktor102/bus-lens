@@ -327,10 +327,14 @@ async function listen(service: ArchiveHttpService): Promise<string> {
 	return `http://127.0.0.1:${address.port}`;
 }
 
-async function withHttpService(run: (fixture: HttpFixture) => Promise<void>, directory?: string): Promise<void> {
+async function withHttpService(
+	run: (fixture: HttpFixture) => Promise<void>,
+	directory?: string,
+	serviceOptions: Partial<Parameters<typeof createArchiveHttpService>[0]> = {}
+): Promise<void> {
 	const owned = !directory;
 	const target = directory ?? await mkdtemp(join(tmpdir(), "bus-lens-projects-http-"));
-	const service = createArchiveHttpService({ databasePath: join(target, "bus-lens.sqlite") });
+	const service = createArchiveHttpService({ databasePath: join(target, "bus-lens.sqlite"), ...serviceOptions });
 	try {
 		const baseUrl = await listen(service);
 		await run({ service, baseUrl });
@@ -513,5 +517,96 @@ test("agent access follows the most-recently-used project", async () => {
 			(payload.result?.structuredContent?.data?.captures ?? []).map(capture => capture.id),
 			["agent-lab-capture"]
 		);
+	});
+});
+
+async function callListCaptures(baseUrl: string): Promise<string[]> {
+	const response = await fetch(`${baseUrl}/mcp`, {
+		method: "POST",
+		headers: {
+			"content-type": "application/json",
+			accept: "application/json, text/event-stream",
+			"MCP-Protocol-Version": "2026-07-28",
+			"Mcp-Method": "tools/call",
+			"Mcp-Name": "list_captures"
+		},
+		body: JSON.stringify({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "tools/call",
+			params: {
+				name: "list_captures",
+				arguments: {},
+				_meta: {
+					"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+					"io.modelcontextprotocol/clientInfo": { name: "projects-test", version: "1.0" },
+					"io.modelcontextprotocol/clientCapabilities": {}
+				}
+			}
+		})
+	});
+	assert.equal(response.status, 200);
+	const payload = await response.json() as { result?: { structuredContent?: { data?: { captures?: Array<{ id: string }> } } } };
+	return (payload.result?.structuredContent?.data?.captures ?? []).map(capture => capture.id);
+}
+
+test("interleaved writes collapse into one retarget and the exposed access stays live", async () => {
+	await withTemporaryDirectory(async directory => {
+		await withHttpService(async ({ service, baseUrl }) => {
+			const projects: Array<{ id: string; name: string }> = [];
+			for (const name of ["Chatter A", "Chatter B"]) {
+				const created = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name } });
+				projects.push(created.body as { id: string; name: string });
+			}
+			const initialAccess = service.mcpAccess;
+
+			// Two tabs writing to different projects in quick succession flip the
+			// MRU back and forth; the retarget must converge on the last write
+			// instead of recreating agent access per flip.
+			for (let round = 0; round < 3; round += 1) {
+				for (const project of projects) {
+					const put = await requestJson(baseUrl, `/api/captures/${project.id}-capture`, {
+						method: "PUT",
+						projectId: project.id,
+						body: { id: `${project.id}-capture`, name: `Capture ${round}`, messages: [], byteStream: [] }
+					});
+					assert.equal(put.status, 200);
+				}
+			}
+
+			const captures = await callListCaptures(baseUrl);
+			const lastProject = projects[projects.length - 1]!;
+			assert.deepEqual(captures, [`${lastProject.id}-capture`]);
+			assert.notEqual(service.mcpAccess, initialAccess);
+		}, directory, { mcpRetargetDebounceMs: 10 });
+	});
+});
+
+test("replaced agent targets close after the handoff grace window", async () => {
+	await withTemporaryDirectory(async directory => {
+		await withHttpService(async ({ service, baseUrl }) => {
+			const created = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name: "Handoff" } });
+			const project = created.body as { id: string };
+			const initialAccess = service.mcpAccess;
+			assert.equal(initialAccess.getStatus().status, "running");
+
+			await requestJson(baseUrl, "/api/captures/handoff-capture", {
+				method: "PUT",
+				projectId: project.id,
+				body: { id: "handoff-capture", name: "Handoff capture", messages: [], byteStream: [] }
+			});
+			// No /mcp traffic yet, so nothing has been retired.
+			assert.equal(initialAccess.getStatus().status, "running");
+
+			// The response resumes exactly when the swap completes, so the
+			// previous target must still be inside its grace window here.
+			assert.deepEqual(await callListCaptures(baseUrl), ["handoff-capture"]);
+			assert.notEqual(service.mcpAccess, initialAccess);
+			assert.equal(initialAccess.getStatus().status, "running");
+
+			await new Promise(resolveGrace => setTimeout(resolveGrace, 800));
+			// ...and is closed once the window elapses.
+			assert.equal(initialAccess.getStatus().status, "stopped");
+		}, directory, { mcpRetargetDebounceMs: 10, mcpHandoffGraceMs: 300 });
 	});
 });
