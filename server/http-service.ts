@@ -174,6 +174,9 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 		toolRegistrar: options.mcpToolRegistrar ?? phase4ToolRegistrar
 	});
 	const server = createServer(async (request, response) => {
+		// Released in finally so every await below keeps its project handle
+		// pinned against eviction and explicit closes.
+		let releaseProject: (() => void) | undefined;
 		try {
 			const url = new URL(request.url ?? "/", "http://127.0.0.1");
 			const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
@@ -191,6 +194,8 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 				if (error instanceof ProjectNotFoundError) return send(response, 404, { error: error.message });
 				throw error;
 			}
+			manager.acquire(projectContext.projectId);
+			releaseProject = () => manager.release(projectContext.projectId);
 			registry.touch(projectContext.projectId);
 			const { repository } = projectContext;
 			const canonicalQueries = projectContext.queryService;
@@ -531,6 +536,8 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			if (error instanceof RepositoryValidationError || error instanceof SyntaxError) return send(response, 400, { error: error.message });
 			console.error("Archive service request failed", error);
 			return send(response, 500, { error: "Internal server error" });
+		} finally {
+			releaseProject?.();
 		}
 	});
 	return {
