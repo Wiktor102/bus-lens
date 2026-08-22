@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -9,6 +9,7 @@ import { createArchiveHttpService, type ArchiveHttpService } from "../server/htt
 import { CURRENT_SCHEMA_VERSION, getSchemaVersion, openDatabase } from "../server/database.ts";
 import { ArchiveRepository } from "../server/archive-repository.ts";
 import { DatabaseManager, ProjectNotFoundError } from "../server/database-manager.ts";
+import { ProjectsService } from "../server/projects-service.ts";
 import {
 	DEFAULT_PROJECT_ID,
 	DEFAULT_PROJECT_NAME,
@@ -274,6 +275,38 @@ test("unknown project ids fail with ProjectNotFoundError", async () => {
 		const registry = new ProjectRegistry(rootDatabase);
 		const manager = new DatabaseManager({ rootDatabase, rootDatabasePath: rootPath, registry });
 		assert.throws(() => manager.forProject("ghost"), ProjectNotFoundError);
+		rootDatabase.close();
+	});
+});
+
+test("a failed eager open rolls back project creation", async () => {
+	await withTemporaryDirectory(async directory => {
+		const rootPath = join(directory, "bus-lens.sqlite");
+		const rootDatabase = openDatabase(rootPath);
+		const registry = new ProjectRegistry(rootDatabase);
+		ensureDefaultProject(registry, rootPath);
+		const projectsDirectory = join(directory, "projects");
+		mkdirSync(projectsDirectory, { recursive: true });
+		const brokenManager = {
+			forProject: (projectId: string) => {
+				// Simulate a half-created database file before the failure.
+				writeFileSync(join(projectsDirectory, `${projectId}.sqlite`), "not a database");
+				throw new Error("simulated allocation failure");
+			}
+		} as unknown as DatabaseManager;
+		const projects = new ProjectsService({ registry, manager: brokenManager, projectsDirectory });
+
+		await assert.rejects(projects.create("Broken"), /simulated allocation failure/);
+
+		// No registry row and no file survive the failed creation.
+		assert.deepEqual(registry.list().map(record => record.id), [DEFAULT_PROJECT_ID]);
+		let leftovers: string[] = [];
+		try {
+			leftovers = await readdir(projectsDirectory);
+		} catch {
+			// The directory may not exist at all.
+		}
+		assert.deepEqual(leftovers.filter(file => file.endsWith(".sqlite")), []);
 		rootDatabase.close();
 	});
 });
