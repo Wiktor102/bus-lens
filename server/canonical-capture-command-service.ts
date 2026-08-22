@@ -9,6 +9,7 @@ import {
 	type RawByteRecord,
 	type NormalizedSection
 } from "./canonical.ts";
+import { storedMarkerText } from "../src/domain/framing.ts";
 
 export const CANONICAL_STORAGE_STATUS = "canonical" as const;
 export const CANONICALIZATION_FAILED_STORAGE_STATUS = "canonicalization-failed" as const;
@@ -626,18 +627,7 @@ type StoredFramingSectionRow = {
 };
 
 function markerTextFromStoredBytes(value: string | null): string {
-	if (!value) return "";
-	try {
-		const bytes = JSON.parse(value) as unknown;
-		if (!Array.isArray(bytes)) return "";
-		return bytes
-			.map(Number)
-			.filter(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255)
-			.map(byte => byte.toString(16).padStart(2, "0").toUpperCase())
-			.join(" ");
-	} catch {
-		return "";
-	}
+	return storedMarkerText(value);
 }
 
 function framingRequestsFromStoredSections(rows: readonly StoredFramingSectionRow[]): FramingSectionRequest[] {

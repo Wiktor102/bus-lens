@@ -25,6 +25,17 @@ export function markerBytes(value: unknown): number[] {
 	return (value === undefined || value === null ? "" : String(value)).match(/[0-9a-f]{2}/gi)?.map(byte => parseInt(byte, 16)) || [];
 }
 
+/**
+ * Splits a marker expression on "|" into alternative byte sequences.
+ * "FF|00" frames on either 00 or FF; a plain "AA 55" is a single alternative.
+ */
+export function markerAlternatives(value: unknown): number[][] {
+	return String(value === undefined || value === null ? "" : value)
+		.split("|")
+		.map(part => markerBytes(part))
+		.filter(alternative => alternative.length > 0);
+}
+
 export function markerAt(stream: readonly FramingByte[], index: number, marker: readonly number[]): boolean {
 	return marker.length > 0 && marker.every((value, offset) => stream[index + offset]?.value === value);
 }
@@ -58,17 +69,23 @@ export function interpretSectionRanges({ stream, start: requestedStart, end: req
 		return ranges;
 	}
 
-	const marker = markerBytes(settings.frameMarker);
-	if (!marker.length) return [];
-	const markerMatchesAt = (index: number) => index + marker.length <= end && markerAt(stream, index, marker);
+	const markers = markerAlternatives(settings.frameMarker);
+	if (!markers.length) return [];
+	const markerLengthAt = (index: number): number => {
+		for (const marker of markers) {
+			if (index + marker.length <= end && markerAt(stream, index, marker)) return marker.length;
+		}
+		return 0;
+	};
 	const ranges: Array<[number, number]> = [];
 	if (settings.markerPosition === "end") {
 		let frameStart = start;
 		let foundMarker = false;
 		for (let index = start; index < end; index++) {
-			if (!markerMatchesAt(index)) continue;
+			const markerLength = markerLengthAt(index);
+			if (!markerLength) continue;
 			foundMarker = true;
-			const markerEnd = index + marker.length;
+			const markerEnd = index + markerLength;
 			ranges.push([frameStart, markerEnd]);
 			frameStart = markerEnd;
 			index = markerEnd - 1;
@@ -79,12 +96,43 @@ export function interpretSectionRanges({ stream, start: requestedStart, end: req
 
 	let frameStart = -1;
 	for (let index = start; index < end; index++) {
-		if (!markerMatchesAt(index)) continue;
+		const markerLength = markerLengthAt(index);
+		if (!markerLength) continue;
 		if (frameStart >= 0 && index > frameStart) ranges.push([frameStart, index]);
 		frameStart = index;
-		index += marker.length - 1;
+		index += markerLength - 1;
 	}
 	if (frameStart < 0) return [[start, end]];
 	if (frameStart < end) ranges.push([frameStart, end]);
 	return ranges;
+}
+
+/**
+ * Serializes a marker expression for persistence. A single alternative stays a
+ * flat byte array for backward compatibility; several become an array of arrays.
+ */
+export function markerBytesJson(value: unknown): string {
+	const alternatives = markerAlternatives(value);
+	return JSON.stringify(alternatives.length === 1 ? alternatives[0] : alternatives);
+}
+
+/**
+ * Renders stored marker JSON (flat array or array of arrays) as normalized hex
+ * text, joining alternatives with "|".
+ */
+export function storedMarkerText(value: unknown): string {
+	if (!value) return "";
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(String(value));
+	} catch {
+		return "";
+	}
+	if (!Array.isArray(parsed)) return "";
+	const alternatives = parsed.every(entry => typeof entry === "number") ? [parsed] : parsed;
+	return (Array.isArray(alternatives) ? alternatives : [])
+		.map(alternative => (Array.isArray(alternative) ? alternative.map(Number).filter(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255) : []))
+		.filter(alternative => alternative.length > 0)
+		.map(alternative => alternative.map(byte => byte.toString(16).padStart(2, "0").toUpperCase()).join(" "))
+		.join("|");
 }
