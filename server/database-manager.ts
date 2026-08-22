@@ -40,6 +40,11 @@ type CacheEntry = Readonly<{
 	closable: boolean;
 }>;
 
+type PendingClose = Readonly<{
+	promise: Promise<void>;
+	resolve: () => void;
+}>;
+
 const DEFAULT_CAPACITY = 8;
 
 /**
@@ -54,6 +59,9 @@ export class DatabaseManager {
 	private readonly capacity: number;
 	private readonly open: DatabaseOpener;
 	private readonly cache = new Map<string, CacheEntry>();
+	/** In-flight request counts; handles are only closed at zero. */
+	private readonly inFlight = new Map<string, number>();
+	private readonly pendingCloses = new Map<string, PendingClose>();
 
 	constructor(options: ManagerOptions) {
 		this.registry = options.registry;
@@ -73,15 +81,47 @@ export class DatabaseManager {
 		}
 		const entry = this.openContext(record);
 		this.cache.set(record.id, entry);
-		this.evictBeyondCapacity();
+		this.evictBeyondCapacity(record.id);
 		return entry.context;
 	}
 
-	close(projectId: string): void {
-		const entry = this.cache.get(projectId);
-		if (!entry) return;
-		this.cache.delete(projectId);
-		if (entry.closable) entry.context.database.close();
+	/**
+	 * Marks a resolved context as in use across awaits. Without this, an
+	 * interleaved eviction or explicit close could close the handle a
+	 * suspended request resumes into ("connection is not open").
+	 */
+	acquire(projectId: string): void {
+		this.inFlight.set(projectId, (this.inFlight.get(projectId) ?? 0) + 1);
+	}
+
+	release(projectId: string): void {
+		const count = this.inFlight.get(projectId);
+		if (!count) return;
+		if (count > 1) {
+			this.inFlight.set(projectId, count - 1);
+			return;
+		}
+		this.inFlight.delete(projectId);
+		const pending = this.pendingCloses.get(projectId);
+		if (!pending) return;
+		this.pendingCloses.delete(projectId);
+		this.closeNow(projectId);
+		pending.resolve();
+	}
+
+	/** Resolves once the last in-flight request for the project has finished. */
+	async close(projectId: string): Promise<void> {
+		if (this.inFlight.has(projectId)) {
+			const existing = this.pendingCloses.get(projectId);
+			if (existing) return existing.promise;
+			let resolve!: () => void;
+			const promise = new Promise<void>(resolveClose => {
+				resolve = resolveClose;
+			});
+			this.pendingCloses.set(projectId, { promise, resolve });
+			return promise;
+		}
+		this.closeNow(projectId);
 	}
 
 	closeAll(): void {
@@ -116,10 +156,15 @@ export class DatabaseManager {
 		};
 	}
 
-	private evictBeyondCapacity(): void {
+	/**
+	 * Closes unpinned handles oldest-first until capacity is respected. Pinned
+	 * (in-flight) entries and the freshly inserted context are never closed;
+	 * while they occupy slots the cache may temporarily exceed capacity.
+	 */
+	private evictBeyondCapacity(skipProjectId?: string): void {
 		for (const [projectId, entry] of [...this.cache]) {
 			if (this.closableCount() <= this.capacity) return;
-			if (!entry.closable) continue;
+			if (!entry.closable || projectId === skipProjectId || this.inFlight.has(projectId)) continue;
 			this.cache.delete(projectId);
 			entry.context.database.close();
 		}
@@ -129,5 +174,12 @@ export class DatabaseManager {
 		let count = 0;
 		for (const entry of this.cache.values()) if (entry.closable) count += 1;
 		return count;
+	}
+
+	private closeNow(projectId: string): void {
+		const entry = this.cache.get(projectId);
+		if (!entry) return;
+		this.cache.delete(projectId);
+		if (entry.closable) entry.context.database.close();
 	}
 }

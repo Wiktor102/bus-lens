@@ -161,6 +161,90 @@ test("the manager evicts the least-recently-used project beyond its capacity", a
 	});
 });
 
+test("eviction skips in-flight projects and resumes once released", async () => {
+	await withTemporaryDirectory(async directory => {
+		const rootPath = join(directory, "bus-lens.sqlite");
+		const rootDatabase = openDatabase(rootPath);
+		const registry = new ProjectRegistry(rootDatabase);
+		ensureDefaultProject(registry, rootPath);
+		const opened = new Map<string, ReturnType<typeof openDatabase>>();
+		const pathOf = (id: string) => join(directory, `${id}.sqlite`);
+		const manager = new DatabaseManager({
+			rootDatabase,
+			rootDatabasePath: rootPath,
+			registry,
+			capacity: 1,
+			openDatabase: path => {
+				const database = openDatabase(path);
+				opened.set(path, database);
+				return database;
+			}
+		});
+		for (const id of ["a", "b", "c"]) registry.ensureProject({ id, name: id, dbPath: pathOf(id) });
+
+		manager.forProject("a");
+		manager.acquire("a"); // a request resolved its context and is suspended across an await
+		manager.forProject("b");
+
+		// The pinned handle survives capacity pressure and the fresh context
+		// is never closed underneath its caller; the cache temporarily overflows.
+		assert.equal(opened.get(pathOf("a"))?.open, true);
+		assert.equal(opened.get(pathOf("b"))?.open, true);
+
+		manager.release("a");
+		manager.forProject("c"); // capacity applies again from the oldest entry
+		assert.equal(opened.get(pathOf("a"))?.open, false);
+		assert.equal(opened.get(pathOf("b"))?.open, false);
+		assert.equal(opened.get(pathOf("c"))?.open, true);
+		manager.closeAll();
+	});
+});
+
+test("close waits for in-flight requests before closing the handle", async () => {
+	await withTemporaryDirectory(async directory => {
+		const rootPath = join(directory, "bus-lens.sqlite");
+		const rootDatabase = openDatabase(rootPath);
+		const registry = new ProjectRegistry(rootDatabase);
+		ensureDefaultProject(registry, rootPath);
+		const opened = new Map<string, ReturnType<typeof openDatabase>>();
+		const manager = new DatabaseManager({
+			rootDatabase,
+			rootDatabasePath: rootPath,
+			registry,
+			openDatabase: path => {
+				const database = openDatabase(path);
+				opened.set(path, database);
+				return database;
+			}
+		});
+		registry.ensureProject({ id: "a", name: "A", dbPath: join(directory, "a.sqlite") });
+		const databasePath = join(directory, "a.sqlite");
+		manager.forProject("a");
+
+		manager.acquire("a");
+		const closing = manager.close("a");
+		let closed = false;
+		void closing.then(() => {
+			closed = true;
+		});
+		await Promise.resolve();
+		assert.equal(closed, false);
+		assert.equal(opened.get(databasePath)?.open, true);
+
+		manager.release("a");
+		await closing;
+		assert.equal(closed, true);
+		assert.equal(opened.get(databasePath)?.open, false);
+
+		// Closing an idle project stays immediate.
+		await manager.close("a");
+		manager.forProject("a");
+		await manager.close("a");
+		assert.equal(opened.get(databasePath)?.open, false);
+		rootDatabase.close();
+	});
+});
+
 test("unknown project ids fail with ProjectNotFoundError", async () => {
 	await withTemporaryDirectory(async directory => {
 		const rootPath = join(directory, "bus-lens.sqlite");
