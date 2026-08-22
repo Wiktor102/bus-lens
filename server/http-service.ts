@@ -89,6 +89,13 @@ function documentFrom(value: unknown): JsonDocument {
 	return value as JsonDocument;
 }
 
+function projectNameFromBody(body: JsonDocument): string {
+	const value = body.name;
+	// String() coercion would accept objects as "[object Object]"; names must be strings.
+	if (typeof value !== "string") throw new RepositoryValidationError("Project name must be a string");
+	return value;
+}
+
 function expectedVersion(request: IncomingMessage): number | undefined {
 	const value = request.headers["if-match"];
 	if (!value || Array.isArray(value)) return undefined;
@@ -287,11 +294,11 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 				if (!projectId && request.method === "GET") return send(response, 200, { projects: projects.list() });
 				if (!projectId && request.method === "POST") {
 					const body = documentFrom(await jsonBody(request, maxBodyBytes));
-					return send(response, 201, await projects.create(String(body.name ?? "")));
+					return send(response, 201, await projects.create(projectNameFromBody(body)));
 				}
 				if (projectId && request.method === "PATCH") {
 					const body = documentFrom(await jsonBody(request, maxBodyBytes));
-					return send(response, 200, projects.rename(projectId, String(body.name ?? "")));
+					return send(response, 200, projects.rename(projectId, projectNameFromBody(body)));
 				}
 				if (projectId && request.method === "DELETE") {
 					await projects.delete(projectId, requestedProjectId(request));

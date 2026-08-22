@@ -456,6 +456,11 @@ test("project CRUD creates managed databases and guards removal", async () => {
 		const invalid = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name: "  " } });
 		assert.equal(invalid.status, 400);
 
+		const coerced = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name: { a: 1 } } });
+		assert.equal(coerced.status, 400);
+		const notRenamed = await requestJson(baseUrl, `/api/projects/${project.id}`, { method: "PATCH", body: { name: 42 } });
+		assert.equal(notRenamed.status, 400);
+
 		const missing = await requestJson(baseUrl, "/api/projects/ghost", { method: "PATCH", body: { name: "x" } });
 		assert.equal(missing.status, 404);
 
