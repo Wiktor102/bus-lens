@@ -1,21 +1,22 @@
 import { createReadStream, existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { basename, extname, join, resolve } from "node:path";
+import { extname, join, resolve } from "node:path";
 import { backupDatabase, restoreDatabase } from "./backup.ts";
 import {
-	ArchiveRepository,
 	RepositoryConflictError,
 	RepositoryValidationError,
+	type ArchiveRepository,
 	type LegacyArchive,
 	type ArchiveIndex,
 	type JsonDocument
 } from "./archive-repository.ts";
 import { openDatabase, type SqliteDatabase } from "./database.ts";
-import { CanonicalQueryService } from "./canonical-query.ts";
+import { DatabaseManager, ProjectNotFoundError, type ProjectDatabaseContext } from "./database-manager.ts";
+import { ensureDefaultProject, ProjectRegistry } from "./project-registry.ts";
 import {
 	CanonicalCaptureCommandError,
-	CanonicalCaptureCommandService,
+	type CanonicalCaptureCommandService,
 	type CaptureMetadataPatch,
 	type CreateCaptureRequest,
 	type FramingSectionRequest
@@ -47,9 +48,12 @@ type ServiceOptions = {
 
 export type ArchiveHttpService = {
 	server: Server;
+	/** Default-project services, retained for embedders that bypass routing. */
 	repository: ArchiveRepository;
 	commandService: CanonicalCaptureCommandService;
 	database: SqliteDatabase;
+	registry: ProjectRegistry;
+	manager: DatabaseManager;
 	mcpAccess: McpAccess;
 	close: () => Promise<void>;
 };
@@ -124,11 +128,36 @@ async function serveStatic(response: ServerResponse, staticDirectory: string, pa
 	return true;
 }
 
+const PROJECT_HEADER = "x-bus-lens-project";
+
+function requestedProjectId(request: IncomingMessage): string | undefined {
+	const value = request.headers[PROJECT_HEADER];
+	if (!value || Array.isArray(value)) return undefined;
+	const trimmed = value.trim();
+	return trimmed || undefined;
+}
+
+/**
+ * A restore overwrites the destination file through the SQLite backup API.
+ * Doing that to the live root database would drop the projects registry out
+ * from under the running service, and doing it to any registered project file
+ * strands the cached open handles in replaced or unlinked inodes. The
+ * endpoint therefore refuses destinations that collide with live storage.
+ */
+function isLiveDatabasePath(candidate: string, livePaths: readonly string[]): boolean {
+	const resolved = resolve(candidate);
+	return livePaths.some(path => resolve(path) === resolved);
+}
+
 export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpService {
-	const database = openDatabase(options.databasePath);
-	const repository = new ArchiveRepository(database);
-	const canonicalQueries = new CanonicalQueryService(database);
-	const commandService = new CanonicalCaptureCommandService(database);
+	const rootDatabase = openDatabase(options.databasePath);
+	const rootDatabasePath = resolve(options.databasePath);
+	const registry = new ProjectRegistry(rootDatabase);
+	ensureDefaultProject(registry, rootDatabasePath);
+	const manager = new DatabaseManager({ rootDatabase, rootDatabasePath: options.databasePath, registry });
+	// Embedders that read service.repository directly keep observing the Default
+	// project; routed requests below resolve their own context per request.
+	const defaultContext = manager.forProject();
 	const staticDirectory = options.staticDirectory ? resolve(options.staticDirectory) : undefined;
 	const maxBodyBytes = options.maxBodyBytes ?? 128 * 1024 * 1024;
 	const phase4ToolRegistrar: McpToolRegistrar = (server, queries, recordClient, commands) => {
@@ -137,14 +166,17 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 		registerAgentNoteTools(server, queries, recordClient, commands);
 	};
 	const mcpAccess = createMcpAccess({
-		database,
-		databasePath: options.databasePath,
+		database: defaultContext.database,
+		databasePath: defaultContext.databasePath,
 		endpoint: options.mcpEndpoint ?? "http://127.0.0.1/mcp",
 		serverVersion: "1.0.0",
 		agentNotes: options.mcpAgentNotes,
 		toolRegistrar: options.mcpToolRegistrar ?? phase4ToolRegistrar
 	});
 	const server = createServer(async (request, response) => {
+		// Released in finally so every await below keeps its project handle
+		// pinned against eviction and explicit closes.
+		let releaseProject: (() => void) | undefined;
 		try {
 			const url = new URL(request.url ?? "/", "http://127.0.0.1");
 			const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
@@ -155,6 +187,22 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			}
 			if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { ok: true });
 			if (request.method === "GET" && url.pathname === "/api/agent-access") return send(response, 200, mcpAccess.getStatus());
+			let projectContext: ProjectDatabaseContext;
+			try {
+				projectContext = manager.forProject(requestedProjectId(request));
+			} catch (error) {
+				if (error instanceof ProjectNotFoundError) return send(response, 404, { error: error.message });
+				throw error;
+			}
+			manager.acquire(projectContext.projectId);
+			releaseProject = () => manager.release(projectContext.projectId);
+			// last_used_at feeds MRU agent targeting; reads are ambient noise
+			// (browsing one tab must not steal agent focus from another), while
+			// writes express real intent.
+			if (request.method !== "GET") registry.touch(projectContext.projectId);
+			const { repository } = projectContext;
+			const canonicalQueries = projectContext.queryService;
+			const commandService = projectContext.commandService;
 			if (request.method === "GET" && url.pathname === "/api/archive") {
 				return send(response, 200, { captures: repository.listCaptures(), folders: repository.listFolders(), index: repository.getArchiveIndex(), queue: repository.listQueue(), history: repository.listHistory(), settings: repository.getSettings() });
 			}
@@ -451,11 +499,15 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			}
 			if (segments[1] === "backup" && request.method === "POST") {
 				const { destinationPath } = documentFrom(await jsonBody(request, maxBodyBytes));
-				return send(response, 201, await backupDatabase(database, String(destinationPath)));
+				return send(response, 201, await backupDatabase(projectContext.database, String(destinationPath)));
 			}
 			if (segments[1] === "restore" && request.method === "POST") {
 				const { backupPath, destinationPath } = documentFrom(await jsonBody(request, maxBodyBytes));
-				await restoreDatabase(String(backupPath), String(destinationPath));
+				const destination = String(destinationPath ?? "");
+				if (isLiveDatabasePath(destination, [rootDatabasePath, ...registry.list().map(record => record.dbPath)])) {
+					return send(response, 409, { error: "Restore destination would overwrite a live project database; stop the service or choose another path" });
+				}
+				await restoreDatabase(String(backupPath), destination);
 				return send(response, 204, {});
 			}
 			const entity = segments[1] as Entity;
@@ -487,18 +539,23 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			if (error instanceof RepositoryValidationError || error instanceof SyntaxError) return send(response, 400, { error: error.message });
 			console.error("Archive service request failed", error);
 			return send(response, 500, { error: "Internal server error" });
+		} finally {
+			releaseProject?.();
 		}
 	});
 	return {
 		server,
-		repository,
-		commandService,
-		database,
+		repository: defaultContext.repository,
+		commandService: defaultContext.commandService,
+		database: rootDatabase,
+		registry,
+		manager,
 		mcpAccess,
 		close: async () => {
 			await mcpAccess.close();
 			await new Promise<void>(resolveClose => server.close(() => resolveClose()));
-			database.close();
+			manager.closeAll();
+			rootDatabase.close();
 		}
 	};
 }
