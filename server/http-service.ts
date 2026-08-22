@@ -205,7 +205,10 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			}
 			manager.acquire(projectContext.projectId);
 			releaseProject = () => manager.release(projectContext.projectId);
-			registry.touch(projectContext.projectId);
+			// last_used_at feeds MRU agent targeting; reads are ambient noise
+			// (browsing one tab must not steal agent focus from another), while
+			// writes express real intent.
+			if (request.method !== "GET") registry.touch(projectContext.projectId);
 			const { repository } = projectContext;
 			const canonicalQueries = projectContext.queryService;
 			const commandService = projectContext.commandService;
