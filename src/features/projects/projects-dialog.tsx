@@ -118,6 +118,10 @@ export function ProjectsDialog({ open, onClose }: { open: boolean; onClose: () =
 	const [draft, setDraft] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const busy = projectsQuery.isFetching;
+	const [creating, setCreating] = useState(false);
+	// A ref keeps the guard synchronous: two rapid Enter presses both see it
+	// before any re-render could update state.
+	const creatingRef = useRef(false);
 
 	useEffect(() => {
 		const dialog = dialogRef.current;
@@ -132,14 +136,20 @@ export function ProjectsDialog({ open, onClose }: { open: boolean; onClose: () =
 	}, [open]);
 
 	const create = async () => {
+		if (creatingRef.current) return;
 		const name = normalizeProjectName(draft);
 		if (!projectNameIsValid(name)) return;
+		creatingRef.current = true;
+		setCreating(true);
 		try {
 			await commands.createProject(name);
 			setDraft("");
 			setError(null);
 		} catch (createError) {
 			setError(createError instanceof Error ? createError.message : "Could not create the project");
+		} finally {
+			creatingRef.current = false;
+			setCreating(false);
 		}
 	};
 
@@ -183,9 +193,9 @@ export function ProjectsDialog({ open, onClose }: { open: boolean; onClose: () =
 						onChange={event => setDraft(event.currentTarget.value)}
 					/>
 				</label>
-				<button id="createProjectBtn" className="btn btn-primary" type="submit" disabled={!projectNameIsValid(draft)}>
-					<Plus aria-hidden="true" /> Create
-				</button>
+			<button id="createProjectBtn" className="btn btn-primary" type="submit" disabled={creating || !projectNameIsValid(draft)}>
+				<Plus aria-hidden="true" /> Create
+			</button>
 			</form>
 			{error ? <p className="conversion-error" role="alert">{error}</p> : null}
 			<ul id="projectsList" className="projects-list">
