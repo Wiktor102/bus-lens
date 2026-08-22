@@ -482,6 +482,60 @@ test("framing draft updates are recording-only, revision guarded, and derived-ro
 	}
 });
 
+test("a marker section without marker bytes stays pending instead of rejecting persistence", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		const service = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-09T00:00:00.000Z" });
+		service.createCapture({ captureId: "pending-marker", framing, inputFormat: "binary" });
+		service.startSession({ captureId: "pending-marker", sessionId: "pending-marker-session" });
+		const append = service.appendChunk({
+			captureId: "pending-marker",
+			sessionId: "pending-marker-session",
+			requestId: "pending-marker-request",
+			sequence: 0,
+			expectedStartOffset: 0,
+			bytes: [1, 2, 3]
+		});
+
+		// Switching section 01 to MARKER before typing marker bytes is the exact
+		// flow behind the "marker framing requires frameMarker bytes" 400.
+		const draft = service.updateFramingDraft({
+			captureId: "pending-marker",
+			expectedRevision: 0,
+			sections: [{ start: 0, framingMode: "marker", frameMarker: "", markerPosition: "start", collapseRuns: false, collapsed: false }]
+		});
+		assert.equal(draft.revision, 1);
+		assert.equal(draft.sections[0]?.framingMode, "marker");
+		assert.equal(draft.sections[0]?.frameMarker, "");
+
+		const finalization = service.finalizeSession({
+			captureId: "pending-marker",
+			sessionId: "pending-marker-session",
+			expectedDataRevision: append.dataRevision
+		});
+		assert.equal(finalization.job.status, "completed");
+		assert.deepEqual(
+			database.prepare("SELECT framing_mode, marker_bytes FROM framing_sections WHERE capture_id = 'pending-marker'").all(),
+			[{ framing_mode: "marker", marker_bytes: "[]" }]
+		);
+		assert.deepEqual(
+			database.prepare("SELECT bytes_json FROM materialized_frames WHERE capture_id = 'pending-marker'").all(),
+			[]
+		);
+
+		const reframe = service.reframe({
+			captureId: "pending-marker",
+			sections: [{ start: 0, framingMode: "marker", frameMarker: "", markerPosition: "end" }],
+			expectedActiveProfileId: finalization.profileId,
+			expectedDataRevision: append.dataRevision
+		});
+		assert.equal(reframe.verified, true);
+	} finally {
+		database.close();
+	}
+});
+
 test("finalization snapshots the latest framing draft", () => {
 	const database = openDatabase(":memory:");
 	installCommandSchema(database);

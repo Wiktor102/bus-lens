@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { SqliteDatabase } from "./database.ts";
-import { markerBytes as parseMarkerBytes } from "../src/domain/framing.ts";
 import {
 	buildCanonicalMaterialization,
 	normalizeSectionsForConversion,
@@ -593,9 +592,8 @@ function normalizeFramingSections(
 			throw new CanonicalCaptureValidationError("time framing requires a positive frameTimeGap", { index });
 		}
 		const frameMarker = String(section.frameMarker ?? "").trim();
-		if (framingMode === "marker" && !parseMarkerBytes(frameMarker).length) {
-			throw new CanonicalCaptureValidationError("marker framing requires frameMarker bytes", { index });
-		}
+		// An empty marker is a pending section: the shared domain engine frames
+		// zero messages until marker bytes are set, so persistence must accept it.
 		const markerPosition = section.markerPosition ?? "start";
 		if (markerPosition !== "start" && markerPosition !== "end") {
 			throw new CanonicalCaptureValidationError("markerPosition must be start or end", { index });
