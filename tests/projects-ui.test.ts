@@ -21,6 +21,17 @@ test("selector options pin the Default project first and keep registry order oth
 	assert.equal(options.find(option => option.value === "default")?.isDefault, true);
 });
 
+test("projects sharing a name are disambiguated in the picker labels", () => {
+	const first = project("aaaaaaaa-1111", "Bench");
+	const second = project("bbbbbbbb-2222", "Bench");
+	const options = orderedProjectOptions([first, second]);
+	assert.deepEqual(options.map(option => option.label), ["Bench · aaaaaaaa", "Bench · bbbbbbbb"]);
+
+	// Unique names stay untouched.
+	const unique = orderedProjectOptions([project("one", "One"), project("two", "Two")]);
+	assert.deepEqual(unique.map(option => option.label), ["One", "Two"]);
+});
+
 test("the selector disables switching while connected or recording and explains why", () => {
 	const base = {
 		projects: [project("default", "Default")],

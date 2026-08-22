@@ -26,7 +26,9 @@ export type ProjectSelectorInput = Readonly<{
 
 /**
  * The Default project always leads the list so a fresh install has exactly one
- * meaningful choice; everything else follows registry creation order.
+ * meaningful choice; everything else follows registry creation order. Names
+ * are not unique server-side, so duplicates are disambiguated with a short id
+ * suffix instead of silently coexisting.
  */
 export function orderedProjectOptions(projects: readonly ProjectSummary[]): ProjectOption[] {
 	const sorted = [...projects].sort((left, right) => {
@@ -35,11 +37,19 @@ export function orderedProjectOptions(projects: readonly ProjectSummary[]): Proj
 		}
 		return left.createdAt < right.createdAt ? -1 : left.createdAt > right.createdAt ? 1 : left.id.localeCompare(right.id);
 	});
+	const nameCounts = new Map<string, number>();
+	for (const project of sorted) nameCounts.set(project.name, (nameCounts.get(project.name) ?? 0) + 1);
 	return sorted.map(project => ({
 		value: project.id,
-		label: project.id === DEFAULT_PROJECT_ID ? `${project.name} (Default)` : project.name,
+		label: projectLabel(project, nameCounts.get(project.name) ?? 1),
 		isDefault: project.id === DEFAULT_PROJECT_ID
 	}));
+}
+
+function projectLabel(project: ProjectSummary, sameNameCount: number): string {
+	const base = project.id === DEFAULT_PROJECT_ID ? `${project.name} (Default)` : project.name;
+	if (sameNameCount > 1 && project.id !== DEFAULT_PROJECT_ID) return `${base} · ${project.id.slice(0, 8)}`;
+	return base;
 }
 
 export function deriveProjectSelectorState(input: ProjectSelectorInput): ProjectSelectorState {
