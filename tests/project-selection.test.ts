@@ -7,7 +7,7 @@ import {
 	readActiveProjectId,
 	writeActiveProjectId
 } from "../src/persistence/active-project.ts";
-import { ArchiveClient } from "../src/persistence/archive-client.ts";
+import { ArchiveClient, type ProjectSummary } from "../src/persistence/archive-client.ts";
 import { createArchiveDataLayer } from "../src/data/archive-data-layer.ts";
 import { archiveQueryKeys, createArchiveQueryOptions } from "../src/data/archive-queries.ts";
 
@@ -146,6 +146,51 @@ test("switching projects persists the selection and clears the whole archive cac
 	layer.commands.forgetActiveProject();
 	assert.equal(readActiveProjectId(storage), null);
 	assert.equal(reloads, 2);
+});
+
+const summaryOf = (id: string): ProjectSummary => ({ id, name: id, dbPath: `/data/${id}.sqlite`, createdAt: "c", lastUsedAt: "l" });
+
+async function withProjectsDataLayer(
+	storedId: string | null,
+	projects: ProjectSummary[],
+	run: (layer: ReturnType<typeof createArchiveDataLayer>, storage: { getItem: (key: string) => string | null }, reloads: () => number) => Promise<void>
+): Promise<void> {
+	const map = memoryStorage();
+	const storage = storageOf(map);
+	if (storedId !== null) writeActiveProjectId(storedId, storage);
+	const queryClient = new QueryClient();
+	let reloads = 0;
+	const client = Object.assign(new ArchiveClient(), {
+		health: async () => {},
+		load: async () => ({ captures: [], folders: [], sendQueue: [], sendHistory: [], sendSettings: {} }),
+		loadArchiveIndex: async () => ({ activeId: null, unfiledCollapsed: false, captures: [], folders: [] }),
+		listCaptures: async () => [],
+		listFolders: async () => [],
+		listQueue: async () => [],
+		listHistory: async () => [],
+		loadSettings: async () => ({}),
+		listCaptureSummaries: async () => [],
+		listProjects: async () => projects
+	}) as ArchiveClient;
+	const layer = createArchiveDataLayer(queryClient, client, storage, { reloadWindow: () => void (reloads += 1) });
+	await layer.ready;
+	await run(layer, storage, () => reloads);
+}
+
+test("a stored project id missing from the registry heals back to Default", async () => {
+	await withProjectsDataLayer("ghost", [summaryOf("default"), summaryOf("p-1")], async (layer, storage, reloads) => {
+		await layer.commands.listProjects();
+		assert.equal(readActiveProjectId(storage), null);
+		assert.equal(reloads(), 1);
+	});
+});
+
+test("a stored project id present in the registry is left alone", async () => {
+	await withProjectsDataLayer("p-1", [summaryOf("default"), summaryOf("p-1")], async (layer, _storage, reloads) => {
+		await layer.commands.listProjects();
+		assert.equal(readActiveProjectId(_storage), "p-1");
+		assert.equal(reloads(), 0);
+	});
 });
 
 test("the projects query option reads through the injected client", async () => {

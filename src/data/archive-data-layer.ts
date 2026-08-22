@@ -532,7 +532,16 @@ export function createArchiveDataLayer(
 		getCanonicalizationPreflight: captureId => queryClient.fetchQuery({ ...queries.canonicalizationPreflight(captureId), staleTime: 0 }),
 		getCanonicalizationJob: (captureId, jobId) => queryClient.fetchQuery({ ...queries.canonicalizationJob(captureId, jobId), staleTime: 0 }),
 		getLegacyBackup: captureId => queryClient.fetchQuery(queries.legacyBackup(captureId)),
-		listProjects: () => queryClient.ensureQueryData(queries.projects()),
+		listProjects: async () => {
+			const projects = await queryClient.ensureQueryData(queries.projects());
+			// Deletion is server-global while the selection is per-browser. A
+			// stored id missing from the registry would poison every routed
+			// request with 404s and render a blank selector, so it heals itself
+			// once back to Default.
+			const stored = readActiveProjectId(legacyStorage);
+			if (stored && !projects.some(project => project.id === stored)) commands.forgetActiveProject();
+			return projects;
+		},
 		createProject: name => run("createProject", name, () => client.createProject(name)),
 		renameProject: (projectId, name) => run("renameProject", { projectId, name }, () => client.renameProject(projectId, name)),
 		deleteProject: projectId => run("deleteProject", projectId, () => client.deleteProject(projectId)),
