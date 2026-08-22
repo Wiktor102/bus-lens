@@ -481,6 +481,25 @@ test("project CRUD creates managed databases and guards removal", async () => {
 	});
 });
 
+test("deeper project paths never match item CRUD", async () => {
+	await withHttpService(async ({ service, baseUrl }) => {
+		const created = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name: "Scoped" } });
+		const project = created.body as { id: string };
+
+	 const deeperRename = await requestJson(baseUrl, `/api/projects/${project.id}/anything`, {
+			method: "PATCH",
+			body: { name: "Hijacked" }
+		});
+		assert.equal(deeperRename.status, 405);
+
+		const deeperDelete = await requestJson(baseUrl, `/api/projects/${project.id}/anything`, { method: "DELETE" });
+		assert.equal(deeperDelete.status, 405);
+
+		const stillThere = service.registry.get(project.id);
+		assert.equal(stillThere?.name, "Scoped");
+	});
+});
+
 test("agent access follows the most-recently-used project", async () => {
 	await withHttpService(async ({ baseUrl }) => {
 		const created = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name: "Agent lab" } });
