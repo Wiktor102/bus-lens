@@ -345,16 +345,18 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			if (request.method === "GET" && url.pathname === "/api/agent-access") return send(response, 200, mcpTarget.access.getStatus());
 			if (segments[1] === "projects") {
 				const projectId = segments[2];
+				// CRUD only matches the exact collection/item shape; deeper paths
+				// must not silently rename or delete the addressed project.
 				if (!projectId && request.method === "GET") return send(response, 200, { projects: projects.list() });
 				if (!projectId && request.method === "POST") {
 					const body = documentFrom(await jsonBody(request, maxBodyBytes));
 					return send(response, 201, await projects.create(projectNameFromBody(body)));
 				}
-				if (projectId && request.method === "PATCH") {
+				if (projectId && segments.length === 3 && request.method === "PATCH") {
 					const body = documentFrom(await jsonBody(request, maxBodyBytes));
 					return send(response, 200, projects.rename(projectId, projectNameFromBody(body)));
 				}
-				if (projectId && request.method === "DELETE") {
+				if (projectId && segments.length === 3 && request.method === "DELETE") {
 					await projects.delete(projectId, requestedProjectId(request));
 					return send(response, 204, {});
 				}
