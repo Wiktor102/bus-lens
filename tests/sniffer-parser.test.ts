@@ -33,3 +33,16 @@ test("invalid directions resume scanning at the next marker", () => {
 
 	assert.deepEqual(bytes, [{ value: 0x20, direction: "tx" }]);
 });
+
+test("reports split firmware diagnostics without turning them into captured bytes", () => {
+	const bytes: Array<{ value: number; direction: string }> = [];
+	const diagnostics: Array<{ status: number; detail: number }> = [];
+	const parser = new SnifferParser(byte => bytes.push(byte), diagnostic => diagnostics.push(diagnostic));
+
+	parser.push(Uint8Array.from([0xa6, 0x02]));
+	parser.push(Uint8Array.from([0x01, 0xa5, 0x00, 0x42]));
+
+	assert.deepEqual(diagnostics, [{ status: 0x02, detail: 0x01 }]);
+	assert.deepEqual(bytes, [{ value: 0x42, direction: "rx" }]);
+	assert.equal(parser.pendingByteCount, 0);
+});

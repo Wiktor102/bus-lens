@@ -127,7 +127,19 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	let stopPromise: Promise<void> | null = null;
 	let startPromise: Promise<void> | null = null;
 	let recordingWorkflow: RecordingWorkflowState["status"] = "idle";
-	const snifferParser = new SnifferParser(({ value, direction }) => queueLiveBytes([value], direction));
+	const snifferParser = new SnifferParser(
+		({ value, direction }) => queueLiveBytes([value], direction),
+		({ status, detail }) => {
+			const reason = status === 1
+				? "DE timing history overflowed"
+				: status === 2
+					? "RMT capture overflowed or failed"
+					: status === 3
+						? "an invalid UART waveform was rejected"
+						: `firmware diagnostic ${status}`;
+			dependencies.showToast(`Sniffer warning: ${reason}${detail ? ` (${detail})` : ""}; this capture may be incomplete`);
+		}
+	);
 	const appendQueue = dependencies.recordingWriter
 		? new CaptureAppendQueue(
 				{ appendChunk: request => dependencies.recordingWriter!.appendChunk(request) },

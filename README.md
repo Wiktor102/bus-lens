@@ -74,6 +74,10 @@ The serial input is a raw binary stream, compatible with ESP32 `Serial.write()`,
 a directional sniffer stream of `A5 direction value` records. In sniffer mode,
 `A5 00 XX` is RX and `A5 01 XX` is TX relative to the monitored device. Every
 captured byte is stored with its own timestamp before any framing is applied.
+The Arduino-ESP32 3.x reference firmware is in
+[`firmware/esp32-rmt-sniffer`](firmware/esp32-rmt-sniffer); it uses RMT waveform
+capture so byte direction is determined at wire time instead of UART FIFO
+consumption time.
 
 Every capture is sectioned. The first section starts at raw byte 1, and each
 section header has its own **Frame by** mode and settings, so one capture can
