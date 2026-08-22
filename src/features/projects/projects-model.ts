@@ -44,8 +44,16 @@ export function orderedProjectOptions(projects: readonly ProjectSummary[]): Proj
 
 export function deriveProjectSelectorState(input: ProjectSelectorInput): ProjectSelectorState {
 	const busy = input.transportConnected || input.recordingCaptureId !== null;
+	const options = orderedProjectOptions(input.projects);
+	// A stored id can dangle when another profile deleted that project. The
+	// data layer heals it back to Default, but until the list confirms that,
+	// showing an explicit entry beats a silently blank controlled select.
+	const stored = input.activeProjectId;
+	if (stored && !options.some(option => option.value === stored)) {
+		options.unshift({ value: stored, label: "Unknown project", isDefault: false });
+	}
 	return {
-		options: orderedProjectOptions(input.projects),
+		options,
 		activeValue: input.activeProjectId ?? DEFAULT_PROJECT_ID,
 		disabled: busy,
 		disabledReason: busy

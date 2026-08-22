@@ -40,6 +40,30 @@ test("the selector disables switching while connected or recording and explains 
 	assert.match(connected.disabledReason ?? "", /disconnect/i);
 });
 
+test("a dangling stored project id renders as an explicit unknown entry", () => {
+	const state = deriveProjectSelectorState({
+		projects: [project("default", "Default")],
+		activeProjectId: "deleted-id",
+		transportConnected: false,
+		recordingCaptureId: null
+	});
+	assert.deepEqual(
+		state.options.map(option => [option.value, option.label]),
+		[["deleted-id", "Unknown project"], ["default", "Default (Default)"]]
+	);
+	assert.equal(state.activeValue, "deleted-id");
+
+	// While the projects list is still loading (empty), no stored id means the
+	// Default fallback must not flash an unknown entry.
+	const loading = deriveProjectSelectorState({
+		projects: [],
+		activeProjectId: null,
+		transportConnected: false,
+		recordingCaptureId: null
+	});
+	assert.equal(loading.options.some(option => option.label === "Unknown project"), false);
+});
+
 test("deletion guards mirror the server contract for Default and active projects", () => {
 	assert.match(projectDeletionBlocker({ id: "default" }, null) ?? "", /Default project cannot be deleted/);
 	assert.match(projectDeletionBlocker({ id: "p-1" }, "p-1") ?? "", /Switch away/);
