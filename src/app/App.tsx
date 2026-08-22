@@ -36,6 +36,8 @@ import {
 	ExportDialog,
 	PatternRemarkDialog
 } from "../features/dialogs/dialogs";
+import { MANAGE_PROJECTS_VALUE, deriveProjectSelectorState } from "../features/projects/projects-model";
+import { ProjectsDialog } from "../features/projects/projects-dialog";
 import { MessageStream } from "../features/message-stream/message-stream-view";
 import { useApplicationSelector, useApplicationSend } from "./application-store-provider";
 import {
@@ -72,7 +74,7 @@ import {
 import type { SendSettings } from "../shared/app-state.ts";
 import { MCP_SETTINGS_PATH, McpSettingsPage, type AgentAccessStatus } from "./mcp-settings-page";
 import { StatusSplitControl } from "./status-split-control";
-import { useArchiveDataLayer, useArchiveNotes, useArchiveSelectionSync, useSelectedArchiveCapture, useSendQueryState } from "../data/archive-react";
+import { useArchiveCommands, useArchiveDataLayer, useArchiveNotes, useArchiveSelectionSync, useProjects, useSelectedArchiveCapture, useSendQueryState } from "../data/archive-react";
 import "./styles.css";
 
 function ConnectionIcon({ connected }: { connected: boolean }) {
@@ -84,9 +86,17 @@ function ConnectionIcon({ connected }: { connected: boolean }) {
 	);
 }
 
-function TopBar() {
+function TopBar({ onOpenProjects }: { onOpenProjects: () => void }) {
 	const snapshot = useApplicationSelector(selectTransport);
 	const actions = getTransportActions();
+	const commands = useArchiveCommands();
+	const projectsQuery = useProjects();
+	const selector = deriveProjectSelectorState({
+		projects: projectsQuery.data ?? [],
+		activeProjectId: commands.activeProjectId(),
+		transportConnected: snapshot.connected,
+		recordingCaptureId: snapshot.recordingCaptureId
+	});
 	const [mcpStatus, setMcpStatus] = useState<AgentAccessStatus["status"] | "checking" | "unavailable">("checking");
 
 	useEffect(() => {
@@ -116,6 +126,33 @@ function TopBar() {
 				</div>
 			</div>
 			<div className="transport">
+				<label
+					id="projectSelectLabel"
+					className="project-select"
+					title={selector.disabledReason ?? "Active project"}
+				>
+					Project
+					<select
+						id="projectSelect"
+						value={selector.activeValue}
+						disabled={selector.disabled}
+						aria-label="Active project"
+						onChange={event => {
+							const value = event.currentTarget.value;
+							if (value === MANAGE_PROJECTS_VALUE) {
+								onOpenProjects();
+								return;
+							}
+							void commands.switchActiveProject(value);
+						}}
+					>
+						{selector.options.map(option => (
+							<option key={option.value} value={option.value}>{option.label}</option>
+						))}
+						<option value={MANAGE_PROJECTS_VALUE}>Manage…</option>
+					</select>
+				</label>
+				<span className="transport-divider" aria-hidden="true" />
 				<StatusSplitControl
 					statusId="mcpStatusBadge"
 					status={`MCP ${mcpStatus}`}
@@ -1256,6 +1293,7 @@ function App() {
 	const archive = useArchiveDataLayer();
 	useArchiveSelectionSync();
 	const [sendPopupOpen, setSendPopupOpen] = useState(false);
+	const [projectsDialogOpen, setProjectsDialogOpen] = useState(false);
 	const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
 	const [sidebarResizing, setSidebarResizing] = useState(false);
 	const viewState = useApplicationSelector(selectViewState);
@@ -1299,7 +1337,7 @@ function App() {
 	return (
 		<>
 			<div className="app-shell">
-				<TopBar />
+				<TopBar onOpenProjects={() => setProjectsDialogOpen(true)} />
 				<PersistenceErrorBanner />
 				{window.location.pathname === MCP_SETTINGS_PATH ? <McpSettingsPage /> : (
 					<main
@@ -1339,6 +1377,7 @@ function App() {
 			<AnnotationDialog />
 			<PatternRemarkDialog />
 			<ExportDialog />
+			<ProjectsDialog open={projectsDialogOpen} onClose={() => setProjectsDialogOpen(false)} />
 			<Toast sendPopupOpen={sendPopupOpen} />
 		</>
 	);

@@ -3324,3 +3324,124 @@ tr:hover .row-action,
 		border-left: 0;
 	}
 }
+
+.project-select {
+	color: var(--muted);
+	font: 9px var(--mono);
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	white-space: nowrap;
+}
+.project-select select {
+	background: transparent;
+	color: var(--ink);
+	border: 1px solid var(--line);
+	padding: 7px 8px;
+	font: 500 11px var(--mono);
+	outline: 0;
+	max-width: 180px;
+}
+.project-select select:hover:not(:disabled),
+.project-select select:focus-visible {
+	border-color: var(--acid-dim);
+}
+.project-select select:disabled {
+	opacity: 0.45;
+	cursor: not-allowed;
+}
+.project-select option {
+	background: var(--panel);
+}
+.projects-modal {
+	width: min(560px, 92vw);
+}
+.project-create {
+	display: flex;
+	align-items: end;
+	gap: 10px;
+	margin-bottom: 14px;
+}
+.project-create .field {
+	flex: 1;
+	margin: 0;
+}
+.projects-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: grid;
+	gap: 8px;
+	max-height: 320px;
+	overflow: auto;
+}
+.project-row {
+	border: 1px solid var(--line);
+	padding: 10px 12px;
+}
+.project-row[data-active] {
+	border-color: var(--acid-dim);
+}
+.project-row-main {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+.project-row-main input {
+	flex: 1;
+	padding: 6px 8px;
+	background: #0e120f;
+	border: 1px solid var(--line);
+	color: var(--ink);
+}
+.project-copy {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+.project-copy strong {
+	font-size: 13px;
+}
+.project-copy small {
+	width: 100%;
+	color: var(--muted);
+	font: 10px var(--mono);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.project-active-chip,
+.project-default-chip {
+	font: 700 9px var(--mono);
+	letter-spacing: 0.08em;
+	padding: 2px 6px;
+	border: 1px solid var(--line);
+	color: var(--muted);
+}
+.project-active-chip {
+	color: var(--acid);
+	border-color: var(--acid-dim);
+}
+.project-row-actions {
+	display: flex;
+	gap: 6px;
+}
+.project-row-actions .icon-btn.danger:hover:not(:disabled) {
+	color: var(--danger, #ff6b6b);
+}
+.project-row-actions .icon-btn.confirming {
+	color: var(--danger, #ff6b6b);
+	border-color: var(--danger, #ff6b6b);
+}
+.project-blocker {
+	color: var(--muted);
+	font: 10px var(--mono);
+}
+.project-switch-hint {
+	color: var(--muted);
+	font: 11px var(--sans);
+	margin: 12px 0 0;
+}
