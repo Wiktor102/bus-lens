@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -248,5 +249,40 @@ test("unknown project headers return 404 without touching storage", async () => 
 	await withHttpService(async ({ baseUrl }) => {
 		const result = await requestJson(baseUrl, "/api/archive", { projectId: "ghost" });
 		assert.equal(result.status, 404);
+	});
+});
+
+test("restore refuses destinations that collide with live project databases", async () => {
+	await withTemporaryDirectory(async directory => {
+		await withHttpService(async ({ service, baseUrl }) => {
+			const backupPath = join(directory, "seed-backup.sqlite");
+			openDatabase(backupPath).close();
+
+			const defaultPath = service.registry.require(DEFAULT_PROJECT_ID).dbPath;
+			const refusedRoot = await requestJson(baseUrl, "/api/restore", {
+				method: "POST",
+				body: { backupPath, destinationPath: defaultPath }
+			});
+			assert.equal(refusedRoot.status, 409);
+
+			const managedPath = join(directory, "projects", "managed.sqlite");
+			service.registry.ensureProject({ id: "managed", name: "Managed", dbPath: managedPath });
+			const refusedManaged = await requestJson(baseUrl, "/api/restore", {
+				method: "POST",
+				body: { backupPath, destinationPath: managedPath }
+			});
+			assert.equal(refusedManaged.status, 409);
+
+			// The service stays healthy after refusals and unrelated paths still restore.
+			const healthy = await requestJson(baseUrl, "/api/archive");
+			assert.equal(healthy.status, 200);
+			const restored = await requestJson(baseUrl, "/api/restore", {
+				method: "POST",
+				body: { backupPath, destinationPath: join(directory, "restored.sqlite") }
+			});
+			assert.equal(restored.status, 204);
+			assert.equal(existsSync(join(directory, "restored.sqlite")), true);
+			assert.equal(service.manager.forProject("managed").database.open, true);
+		}, directory);
 	});
 });

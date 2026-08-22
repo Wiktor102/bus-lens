@@ -146,10 +146,23 @@ function requestedProjectId(request: IncomingMessage): string | undefined {
 	return trimmed || undefined;
 }
 
+/**
+ * A restore overwrites the destination file through the SQLite backup API.
+ * Doing that to the live root database would drop the projects registry out
+ * from under the running service, and doing it to any registered project file
+ * strands the cached open handles in replaced or unlinked inodes. The
+ * endpoint therefore refuses destinations that collide with live storage.
+ */
+function isLiveDatabasePath(candidate: string, livePaths: readonly string[]): boolean {
+	const resolved = resolve(candidate);
+	return livePaths.some(path => resolve(path) === resolved);
+}
+
 export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpService {
 	const rootDatabase = openDatabase(options.databasePath);
+	const rootDatabasePath = resolve(options.databasePath);
 	const registry = new ProjectRegistry(rootDatabase);
-	ensureDefaultProject(registry, resolve(options.databasePath));
+	ensureDefaultProject(registry, rootDatabasePath);
 	const manager = new DatabaseManager({ rootDatabase, rootDatabasePath: options.databasePath, registry });
 	// Embedders that read service.repository directly keep observing the Default
 	// project; routed requests below resolve their own context per request.
@@ -491,7 +504,11 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			}
 			if (segments[1] === "restore" && request.method === "POST") {
 				const { backupPath, destinationPath } = documentFrom(await jsonBody(request, maxBodyBytes));
-				await restoreDatabase(String(backupPath), String(destinationPath));
+				const destination = String(destinationPath ?? "");
+				if (isLiveDatabasePath(destination, [rootDatabasePath, ...registry.list().map(record => record.dbPath)])) {
+					return send(response, 409, { error: "Restore destination would overwrite a live project database; stop the service or choose another path" });
+				}
+				await restoreDatabase(String(backupPath), destination);
 				return send(response, 204, {});
 			}
 			const entity = segments[1] as Entity;
