@@ -64,6 +64,28 @@ test("registry touch orders most-recently-used projects", async () => {
 	});
 });
 
+test("routed reads do not reorder most-recently-used projects but writes do", async () => {
+	await withTemporaryDirectory(async directory => {
+		await withHttpService(async ({ service, baseUrl }) => {
+			const labPath = join(directory, "projects", "lab.sqlite");
+			service.registry.ensureProject({ id: "lab", name: "Lab", dbPath: labPath });
+
+			// Reads leave the MRU pointing at the newest registered project.
+			await requestJson(baseUrl, "/api/archive", { projectId: DEFAULT_PROJECT_ID });
+			assert.equal(service.registry.mostRecentlyUsed()?.id, "lab");
+
+			// A write to Default is a real usage signal and retargets the MRU.
+			const put = await requestJson(baseUrl, "/api/captures/default-capture", {
+				method: "PUT",
+				projectId: DEFAULT_PROJECT_ID,
+				body: { id: "default-capture", name: "Default capture", messages: [], byteStream: [] }
+			});
+			assert.equal(put.status, 200);
+			assert.equal(service.registry.mostRecentlyUsed()?.id, DEFAULT_PROJECT_ID);
+		}, directory);
+	});
+});
+
 test("registry rejects empty names and unknown ids", async () => {
 	await withTemporaryDirectory(async directory => {
 		const database = openDatabase(join(directory, "root.sqlite"));
