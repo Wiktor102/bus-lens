@@ -9,7 +9,8 @@ import type {
 	CanonicalNote,
 	CreateCaptureRequest,
 	MigrationReport,
-	PatchMetadataRequest
+	PatchMetadataRequest,
+	ProjectSummary
 } from "../persistence/archive-client.ts";
 import type {
 	AppState,
@@ -37,6 +38,7 @@ export const archiveQueryKeys = {
 	queue: () => [...archiveRoot, "queue"] as const,
 	history: () => [...archiveRoot, "history"] as const,
 	settings: () => [...archiveRoot, "settings"] as const,
+	projects: () => [...archiveRoot, "projects"] as const,
 	canonicalization: (captureId: string) => [...archiveQueryKeys.capture(captureId), "canonicalization"] as const,
 	canonicalizationJob: (captureId: string, jobId: string) =>
 		[...archiveQueryKeys.canonicalization(captureId), "jobs", jobId] as const,
@@ -55,6 +57,7 @@ export type ArchiveQueryKey =
 	| ReturnType<typeof archiveQueryKeys.queue>
 	| ReturnType<typeof archiveQueryKeys.history>
 	| ReturnType<typeof archiveQueryKeys.settings>
+	| ReturnType<typeof archiveQueryKeys.projects>
 	| ReturnType<typeof archiveQueryKeys.canonicalization>
 	| ReturnType<typeof archiveQueryKeys.canonicalizationJob>
 	| ReturnType<typeof archiveQueryKeys.legacyBackup>
@@ -69,6 +72,7 @@ export type ArchiveQuerySource = Pick<
 	| "getCanonicalizationJob"
 	| "getLegacyBackup"
 	| "listNotes"
+	| "listProjects"
 > & Partial<Pick<ArchiveClient, "loadArchiveIndex" | "listCaptures" | "listFolders" | "listQueue" | "listHistory" | "loadSettings">>;
 
 export type ArchiveMutationSource = Pick<
@@ -88,6 +92,9 @@ export type ArchiveMutationSource = Pick<
 	| "patchMetadata"
 	| "startCanonicalization"
 	| "delete"
+	| "createProject"
+	| "renameProject"
+	| "deleteProject"
 >;
 
 export type SaveArchiveIndexCommand = Readonly<{
@@ -112,6 +119,11 @@ export type SaveHistoryItemCommand = Readonly<{
 	item: SendHistoryEntry;
 }>;
 
+export type RenameProjectCommand = Readonly<{
+	projectId: string;
+	name: string;
+}>;
+
 type ArchiveMutationData = {
 	migrate: { variables: AppState; result: MigrationReport };
 	saveLegacyCaptureDocument: { variables: Capture; result: void };
@@ -128,6 +140,9 @@ type ArchiveMutationData = {
 	patchMetadata: { variables: PatchMetadataRequest; result: CaptureState };
 	startCanonicalization: { variables: string; result: CanonicalizationJob };
 	deleteCapture: { variables: string; result: void };
+	createProject: { variables: string; result: ProjectSummary };
+	renameProject: { variables: RenameProjectCommand; result: ProjectSummary };
+	deleteProject: { variables: string; result: void };
 };
 
 export type ArchiveMutationName = keyof ArchiveMutationData;
@@ -232,7 +247,12 @@ export const archiveMutationCachePolicy: ArchiveMutationCachePolicy = {
 	createCapture: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.captures()],
 	patchMetadata: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.captures()],
 	startCanonicalization: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.captures()],
-	deleteCapture: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.captures()]
+	deleteCapture: () => [archiveQueryKeys.snapshot(), archiveQueryKeys.captures()],
+	// Project membership changes only affect the registry listing; the active
+	// project switch is a full cache clear plus reload, not a mutation policy.
+	createProject: () => [archiveQueryKeys.projects()],
+	renameProject: () => [archiveQueryKeys.projects()],
+	deleteProject: () => [archiveQueryKeys.projects()]
 };
 
 export async function invalidateArchiveMutationCache<Name extends ArchiveMutationName>(
@@ -305,6 +325,10 @@ export function createArchiveQueryOptions(client: ArchiveQuerySource) {
 			queryFn: () => client.loadSettings
 				? client.loadSettings().then(normalizeArchiveSettings)
 				: client.load().then(state => normalizeArchiveSettings(state.sendSettings))
+		}),
+		projects: () => queryOptions<ProjectSummary[], Error, ProjectSummary[], ReturnType<typeof archiveQueryKeys.projects>>({
+			queryKey: archiveQueryKeys.projects(),
+			queryFn: () => client.listProjects()
 		}),
 		canonicalizationPreflight: (captureId: string) => queryOptions<CanonicalizationPreflight>({
 			queryKey: archiveQueryKeys.canonicalization(captureId),
@@ -410,6 +434,21 @@ export function createArchiveMutationOptions(client: ArchiveMutationSource, quer
 			mutationKey: [...archiveQueryKeys.captures(), "delete"],
 			mutationFn: captureId => client.delete(captureId),
 			onSuccess: queryClient ? createArchiveMutationSuccessHandler(queryClient, "deleteCapture") : undefined
+		}),
+		createProject: () => mutationOptions<ProjectSummary, Error, string>({
+			mutationKey: [...archiveQueryKeys.projects(), "create"],
+			mutationFn: name => client.createProject(name),
+			onSuccess: queryClient ? createArchiveMutationSuccessHandler(queryClient, "createProject") : undefined
+		}),
+		renameProject: () => mutationOptions<ProjectSummary, Error, RenameProjectCommand>({
+			mutationKey: [...archiveQueryKeys.projects(), "rename"],
+			mutationFn: command => client.renameProject(command.projectId, command.name),
+			onSuccess: queryClient ? createArchiveMutationSuccessHandler(queryClient, "renameProject") : undefined
+		}),
+		deleteProject: () => mutationOptions<void, Error, string>({
+			mutationKey: [...archiveQueryKeys.projects(), "delete"],
+			mutationFn: projectId => client.deleteProject(projectId),
+			onSuccess: queryClient ? createArchiveMutationSuccessHandler(queryClient, "deleteProject") : undefined
 		})
 	};
 }

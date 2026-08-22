@@ -559,8 +559,10 @@ export function archiveReport(archive: AppState, fingerprint: string): Migration
 	};
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-	const response = await fetch(`/api${path}`, { ...init, headers: { "content-type": "application/json", ...(init?.headers ?? {}) } });
+async function request<T>(path: string, init?: RequestInit, projectId?: string | null): Promise<T> {
+	const headers: Record<string, string> = { "content-type": "application/json", ...(init?.headers as Record<string, string> ?? {}) };
+	if (projectId) headers["x-bus-lens-project"] = projectId;
+	const response = await fetch(`/api${path}`, { ...init, headers });
 	if (!response.ok) throw new Error(`Archive service ${response.status}: ${await response.text()}`);
 	return response.status === 204 ? (undefined as T) : (await response.json() as T);
 }
@@ -577,19 +579,56 @@ function requestBody(body: unknown): RequestInit {
 	return { body: JSON.stringify(jsonSafe(body)) };
 }
 
-async function requestJson<T>(path: string, method: string, body?: unknown): Promise<T> {
-	return request<T>(path, { method, ...(body === undefined ? {} : requestBody(body)) });
-}
-
 function documentWithId<T extends object>(record: { id?: string; document: T }): T {
 	const id = record.id || (record.document as { id?: unknown }).id;
 	return id ? { ...record.document, id } as T : record.document;
 }
 
+export type ProjectSummary = Readonly<{
+	id: string;
+	name: string;
+	dbPath: string;
+	createdAt: string;
+	lastUsedAt: string;
+}>;
+
+export type ArchiveClientOptions = Readonly<{
+	/** Returns the project every request is routed to; absent means Default. */
+	getActiveProjectId?: () => string | null | undefined;
+}>;
+
 export class ArchiveClient implements CaptureWriter {
-	async health(): Promise<void> { await request("/health"); }
+	private readonly getActiveProjectId: () => string | null | undefined;
+
+	constructor(options: ArchiveClientOptions = {}) {
+		this.getActiveProjectId = options.getActiveProjectId ?? (() => null);
+	}
+
+	/** Every archive request is routed through here so project routing stays one line. */
+	private send<T>(path: string, init?: RequestInit): Promise<T> {
+		return request<T>(path, init, this.getActiveProjectId());
+	}
+
+	async listProjects(): Promise<ProjectSummary[]> {
+		const payload = await this.send<{ projects: ProjectSummary[] }>("/projects");
+		return Array.isArray(payload.projects) ? payload.projects : [];
+	}
+
+	async createProject(name: string): Promise<ProjectSummary> {
+		return this.send<ProjectSummary>("/projects", { method: "POST", ...requestBody({ name }) });
+	}
+
+	async renameProject(projectId: string, name: string): Promise<ProjectSummary> {
+		return this.send<ProjectSummary>(`/projects/${encodeURIComponent(projectId)}`, { method: "PATCH", ...requestBody({ name }) });
+	}
+
+	async deleteProject(projectId: string): Promise<void> {
+		await this.send<void>(`/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+	}
+
+	async health(): Promise<void> { await this.send("/health"); }
 	async load(): Promise<AppState> {
-		const archive = await request<{
+		const archive = await this.send<{
 			captures: Array<{ id?: string; document: Capture }>;
 			folders: Array<{ id?: string; document: StoredFolder }>;
 			index: { activeId: string | null; unfiledCollapsed: boolean };
@@ -608,36 +647,36 @@ export class ArchiveClient implements CaptureWriter {
 		};
 	}
 	async loadArchiveIndex(): Promise<ArchiveIndex> {
-		return request<ArchiveIndex>("/archive-index");
+		return this.send<ArchiveIndex>("/archive-index");
 	}
 	async listCaptures(): Promise<CaptureListItem[]> {
-		const records = await request<Array<{ id?: string; document: CaptureListItem }>>("/captures");
+		const records = await this.send<Array<{ id?: string; document: CaptureListItem }>>("/captures");
 		return records.map(documentWithId);
 	}
 	async listFolders(): Promise<StoredFolder[]> {
-		const records = await request<Array<{ id?: string; document: StoredFolder }>>("/folders");
+		const records = await this.send<Array<{ id?: string; document: StoredFolder }>>("/folders");
 		return records.map(documentWithId);
 	}
 	async listQueue(): Promise<SendQueueEntry[]> {
-		const records = await request<Array<{ id?: string; document: Record<string, unknown> }>>("/queue");
+		const records = await this.send<Array<{ id?: string; document: Record<string, unknown> }>>("/queue");
 		return records.map(documentWithId) as SendQueueEntry[];
 	}
 	async listHistory(): Promise<SendHistoryEntry[]> {
-		const records = await request<Array<{ id?: string; document: Record<string, unknown> }>>("/history");
+		const records = await this.send<Array<{ id?: string; document: Record<string, unknown> }>>("/history");
 		return records.map(documentWithId) as SendHistoryEntry[];
 	}
 	async loadSettings(): Promise<Partial<SendSettings>> {
-		const settings = await request<{ send?: Record<string, unknown> }>("/settings");
+		const settings = await this.send<{ send?: Record<string, unknown> }>("/settings");
 		return (settings.send ?? {}) as Partial<SendSettings>;
 	}
 	async migrate(archive: AppState): Promise<MigrationReport> {
 		const fingerprint = await archiveFingerprint(archive);
 		const report = archiveReport(archive, fingerprint);
-		await request("/migrations/local-storage", { method: "POST", ...requestBody({ fingerprint, archive, report }) });
+		await this.send("/migrations/local-storage", { method: "POST", ...requestBody({ fingerprint, archive, report }) });
 		return report;
 	}
 	async listCaptureSummaries(): Promise<CanonicalCaptureSummary[]> {
-		const summaries = await request<unknown>("/canonical/captures");
+		const summaries = await this.send<unknown>("/canonical/captures");
 		if (!Array.isArray(summaries)) return [];
 		return summaries.filter((summary): summary is CanonicalCaptureSummary => {
 			if (!summary || typeof summary !== "object") return false;
@@ -652,146 +691,144 @@ export class ArchiveClient implements CaptureWriter {
 	}
 
 	async getCanonicalizationPreflight(captureId: string): Promise<CanonicalizationPreflight> {
-		return requestJson<CanonicalizationPreflight>(`${capturePath(captureId)}/canonicalization`, "GET");
+		return this.send<CanonicalizationPreflight>(`${capturePath(captureId)}/canonicalization`, { method: "GET" });
 	}
 
 	async startCanonicalization(captureId: string): Promise<CanonicalizationJob> {
-		return requestJson<CanonicalizationJob>(`${capturePath(captureId)}/canonicalization`, "POST", {});
+		return this.send<CanonicalizationJob>(`${capturePath(captureId)}/canonicalization`, { method: "POST", ...requestBody({}) });
 	}
 
 	async getCanonicalizationJob(captureId: string, jobId: string): Promise<CanonicalizationJob> {
-		return requestJson<CanonicalizationJob>(
+		return this.send<CanonicalizationJob>(
 			`${capturePath(captureId)}/canonicalization/jobs/${encodeURIComponent(jobId)}`,
-			"GET"
+			{ method: "GET" }
 		);
 	}
 
 	async getLegacyBackup(captureId: string): Promise<LegacyBackupResponse> {
-		return requestJson<LegacyBackupResponse>(`${capturePath(captureId)}/legacy-backup`, "GET");
+		return this.send<LegacyBackupResponse>(`${capturePath(captureId)}/legacy-backup`, { method: "GET" });
 	}
 
 	/** Persist a legacy JSON capture only while its server storage is unconverted. */
 	async saveLegacyCaptureDocument(capture: Capture): Promise<void> {
-		await request(capturePath(String(capture.id)), { method: "PUT", ...requestBody(capture) });
+		await this.send(capturePath(String(capture.id)), { method: "PUT", ...requestBody(capture) });
 	}
 
 	async loadCapture(captureId: string): Promise<Capture> {
-		const record = await request<{ id?: string; document: Capture }>(capturePath(captureId));
+		const record = await this.send<{ id?: string; document: Capture }>(capturePath(captureId));
 		return documentWithId(record);
 	}
 
-	async saveFolder(folder: StoredFolder): Promise<void> { await request(`/folders/${encodeURIComponent(folder.id)}`, { method: "PUT", ...requestBody(folder) }); }
+	async saveFolder(folder: StoredFolder): Promise<void> { await this.send(`/folders/${encodeURIComponent(folder.id)}`, { method: "PUT", ...requestBody(folder) }); }
 	async deleteCapture(captureId: string): Promise<void> { await this.delete(captureId); }
-	async deleteFolder(folderId: string): Promise<void> { await request(`/folders/${encodeURIComponent(folderId)}`, { method: "DELETE" }); }
+	async deleteFolder(folderId: string): Promise<void> { await this.send(`/folders/${encodeURIComponent(folderId)}`, { method: "DELETE" }); }
 	async saveQueueItem(item: SendQueueEntry, position?: number): Promise<void> {
 		if (!item.id) throw new Error("queue item id is required");
-		await request(`/queue/${encodeURIComponent(item.id)}`, { method: "PUT", ...requestBody({ ...item, ...(position === undefined ? {} : { position }) }) });
+		await this.send(`/queue/${encodeURIComponent(item.id)}`, { method: "PUT", ...requestBody({ ...item, ...(position === undefined ? {} : { position }) }) });
 	}
-	async deleteQueueItem(queueItemId: string): Promise<void> { await request(`/queue/${encodeURIComponent(queueItemId)}`, { method: "DELETE" }); }
+	async deleteQueueItem(queueItemId: string): Promise<void> { await this.send(`/queue/${encodeURIComponent(queueItemId)}`, { method: "DELETE" }); }
 	async saveHistoryItem(item: SendHistoryEntry): Promise<void> {
 		const id = typeof item.id === "string" ? item.id : "";
 		if (!id) throw new Error("history item id is required");
-		await request(`/history/${encodeURIComponent(id)}`, { method: "PUT", ...requestBody(item) });
+		await this.send(`/history/${encodeURIComponent(id)}`, { method: "PUT", ...requestBody(item) });
 	}
-	async deleteHistoryItem(historyItemId: string): Promise<void> { await request(`/history/${encodeURIComponent(historyItemId)}`, { method: "DELETE" }); }
+	async deleteHistoryItem(historyItemId: string): Promise<void> { await this.send(`/history/${encodeURIComponent(historyItemId)}`, { method: "DELETE" }); }
 	async saveArchiveIndex(index: ArchiveIndex): Promise<void> {
-		await request("/archive-index", { method: "PUT", ...requestBody(index) });
+		await this.send("/archive-index", { method: "PUT", ...requestBody(index) });
 	}
 	async saveSendState(state: AppState): Promise<void> {
-		await Promise.all((state.sendQueue ?? []).map((item, index) => request(`/queue/${encodeURIComponent(String(item.id ?? `queue-${index}`))}`, { method: "PUT", ...requestBody(item) })));
-		await Promise.all((state.sendHistory ?? []).map((item, index) => request(`/history/${encodeURIComponent(String(item.id ?? `history-${index}`))}`, { method: "PUT", ...requestBody(item) })));
+		await Promise.all((state.sendQueue ?? []).map((item, index) => this.send(`/queue/${encodeURIComponent(String(item.id ?? `queue-${index}`))}`, { method: "PUT", ...requestBody(item) })));
+		await Promise.all((state.sendHistory ?? []).map((item, index) => this.send(`/history/${encodeURIComponent(String(item.id ?? `history-${index}`))}`, { method: "PUT", ...requestBody(item) })));
 	}
-	async saveSettings(settings: Partial<SendSettings> | undefined): Promise<void> { await request("/settings/send", { method: "PUT", ...requestBody(settings ?? {}) }); }
+	async saveSettings(settings: Partial<SendSettings> | undefined): Promise<void> { await this.send("/settings/send", { method: "PUT", ...requestBody(settings ?? {}) }); }
 
 	async createCapture(command: CreateCaptureRequest): Promise<CaptureState> {
-		return requestJson<CaptureState>("/captures", "POST", command);
+		return this.send<CaptureState>("/captures", { method: "POST", ...requestBody(command) });
 	}
 
 	async patchMetadata(command: PatchMetadataRequest): Promise<CaptureState> {
-		return requestJson<CaptureState>(`${capturePath(command.captureId)}/metadata`, "PATCH", {
+		return this.send<CaptureState>(`${capturePath(command.captureId)}/metadata`, { method: "PATCH", ...requestBody({
 			patch: command.patch,
 			expectedMetadataRevision: command.expectedMetadataRevision
-		});
+		}) });
 	}
 
 	async startSession(command: StartSessionRequest): Promise<StartSessionResponse> {
-		return requestJson<StartSessionResponse>(`${capturePath(command.captureId)}/sessions`, "POST", {
+		return this.send<StartSessionResponse>(`${capturePath(command.captureId)}/sessions`, { method: "POST", ...requestBody({
 			sessionId: command.sessionId,
 			startedAt: command.startedAt
-		});
+		}) });
 	}
 
 	async appendChunk(command: AppendChunkRequest): Promise<AppendChunkResponse> {
 		const { captureId: _captureId, ...body } = command;
-		return requestJson<AppendChunkResponse>(`${capturePath(command.captureId)}/raw-chunks`, "POST", body);
+		return this.send<AppendChunkResponse>(`${capturePath(command.captureId)}/raw-chunks`, { method: "POST", ...requestBody(body) });
 	}
 
 	async finalizeSession(command: FinalizeSessionRequest): Promise<FinalizeSessionResponse> {
-		return requestJson<FinalizeSessionResponse>(
+		return this.send<FinalizeSessionResponse>(
 			`${capturePath(command.captureId)}/sessions/${encodeURIComponent(command.sessionId)}/finalize`,
-			"POST",
-			{ expectedDataRevision: command.expectedDataRevision }
+			{ method: "POST", ...requestBody({ expectedDataRevision: command.expectedDataRevision }) }
 		);
 	}
 
 	async updateFramingDraft(command: UpdateFramingDraftRequest): Promise<UpdateFramingDraftResponse> {
-		return requestJson<UpdateFramingDraftResponse>(`${capturePath(command.captureId)}/framing-draft`, "PATCH", {
+		return this.send<UpdateFramingDraftResponse>(`${capturePath(command.captureId)}/framing-draft`, { method: "PATCH", ...requestBody({
 			sections: command.sections,
 			expectedRevision: command.expectedRevision
-		});
+		}) });
 	}
 
 	async reframe(command: ReframeRequest): Promise<ReframeResponse> {
 		const { captureId: _captureId, ...body } = command;
-		return requestJson<ReframeResponse>(`${capturePath(command.captureId)}/framing-revisions`, "POST", body);
+		return this.send<ReframeResponse>(`${capturePath(command.captureId)}/framing-revisions`, { method: "POST", ...requestBody(body) });
 	}
 
 	async updateFramingSectionView(command: FramingSectionViewRequest): Promise<FramingSectionViewResponse> {
 		const { captureId: _captureId, sectionId: _sectionId, profileId: _profileId, ...body } = command;
-		return requestJson<FramingSectionViewResponse>(
+		return this.send<FramingSectionViewResponse>(
 			`${capturePath(command.captureId)}/framing-sections/${encodeURIComponent(command.sectionId)}/view`,
-			"PATCH",
-			{ profileId: command.profileId, ...body }
+			{ method: "PATCH", ...requestBody({ profileId: command.profileId, ...body }) }
 		);
 	}
 
 	async setByteVisibility(command: ByteVisibilityRequest): Promise<VisibilityResponse> {
-		return requestJson<VisibilityResponse>(`${capturePath(command.captureId)}/bytes/${encodeURIComponent(String(command.rawOffset))}/visibility`, "PUT", { hidden: command.hidden });
+		return this.send<VisibilityResponse>(`${capturePath(command.captureId)}/bytes/${encodeURIComponent(String(command.rawOffset))}/visibility`, { method: "PUT", ...requestBody({ hidden: command.hidden }) });
 	}
 
 	async deleteByteVisibility(captureId: string, rawOffset: number): Promise<void> {
-		await request<void>(`${capturePath(captureId)}/bytes/${encodeURIComponent(String(rawOffset))}/visibility`, { method: "DELETE" });
+		await this.send<void>(`${capturePath(captureId)}/bytes/${encodeURIComponent(String(rawOffset))}/visibility`, { method: "DELETE" });
 	}
 
 	async setFrameVisibility(command: FrameVisibilityRequest): Promise<VisibilityResponse> {
 		if (!command.frameId) throw new Error("frameId is required for the frame visibility endpoint");
-		return requestJson<VisibilityResponse>(`${capturePath(command.captureId)}/frames/${encodeURIComponent(command.frameId)}/visibility`, "PUT", { hidden: command.hidden });
+		return this.send<VisibilityResponse>(`${capturePath(command.captureId)}/frames/${encodeURIComponent(command.frameId)}/visibility`, { method: "PUT", ...requestBody({ hidden: command.hidden }) });
 	}
 
 	async deleteFrameVisibility(command: DeleteFrameVisibilityRequest): Promise<void> {
-		await request<void>(`${capturePath(command.captureId)}/frames/${encodeURIComponent(command.frameId)}/visibility`, { method: "DELETE" });
+		await this.send<void>(`${capturePath(command.captureId)}/frames/${encodeURIComponent(command.frameId)}/visibility`, { method: "DELETE" });
 	}
 
 	async listNotes(captureId: string): Promise<readonly CanonicalNote[]> {
-		return requestJson<readonly CanonicalNote[]>(notePath(captureId), "GET");
+		return this.send<readonly CanonicalNote[]>(notePath(captureId), { method: "GET" });
 	}
 
 	async createNote(command: CreateNoteRequest): Promise<NoteResponse> {
 		const { captureId: _captureId, ...body } = command;
-		return requestJson<NoteResponse>(notePath(command.captureId), "POST", body);
+		return this.send<NoteResponse>(notePath(command.captureId), { method: "POST", ...requestBody(body) });
 	}
 
 	async updateNote(command: UpdateNoteRequest): Promise<NoteResponse> {
 		const { captureId: _captureId, noteId: _noteId, ...body } = command;
-		return requestJson<NoteResponse>(notePath(command.captureId, command.noteId), "PATCH", body);
+		return this.send<NoteResponse>(notePath(command.captureId, command.noteId), { method: "PATCH", ...requestBody(body) });
 	}
 
 	async deleteNote(command: DeleteNoteRequest): Promise<ContentRevisionResponse> {
-		return requestJson<ContentRevisionResponse>(notePath(command.captureId, command.noteId), "DELETE");
+		return this.send<ContentRevisionResponse>(notePath(command.captureId, command.noteId), { method: "DELETE" });
 	}
 
 	async clearData(command: ClearCaptureDataRequest): Promise<ClearCaptureDataResponse> {
-		return requestJson<ClearCaptureDataResponse>(`${capturePath(command.captureId)}/data`, "DELETE");
+		return this.send<ClearCaptureDataResponse>(`${capturePath(command.captureId)}/data`, { method: "DELETE" });
 	}
 
 	async clearCaptureData(command: ClearCaptureDataRequest): Promise<ClearCaptureDataResponse> {
@@ -800,7 +837,7 @@ export class ArchiveClient implements CaptureWriter {
 
 	async duplicate(command: DuplicateCaptureRequest): Promise<DuplicateCaptureResponse> {
 		const { captureId: _captureId, ...body } = command;
-		return requestJson<DuplicateCaptureResponse>(`${capturePath(command.captureId)}/duplicate`, "POST", body);
+		return this.send<DuplicateCaptureResponse>(`${capturePath(command.captureId)}/duplicate`, { method: "POST", ...requestBody(body) });
 	}
 
 	async duplicateCapture(command: DuplicateCaptureRequest): Promise<DuplicateCaptureResponse> {
@@ -808,6 +845,6 @@ export class ArchiveClient implements CaptureWriter {
 	}
 
 	async delete(captureId: string): Promise<void> {
-		await request<void>(capturePath(captureId), { method: "DELETE" });
+		await this.send<void>(capturePath(captureId), { method: "DELETE" });
 	}
 }
