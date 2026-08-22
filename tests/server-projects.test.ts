@@ -392,3 +392,93 @@ test("restore refuses destinations that collide with live project databases", as
 		}, directory);
 	});
 });
+
+test("project CRUD creates managed databases and guards removal", async () => {
+	await withHttpService(async ({ service, baseUrl }) => {
+		const created = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name: "Field log" } });
+		assert.equal(created.status, 201);
+		const project = created.body as { id: string; name: string; dbPath: string };
+		assert.equal(project.name, "Field log");
+		assert.match(project.dbPath, /projects[\\/].+\.sqlite$/);
+
+		// Creation eagerly migrates the new database.
+		const context = service.manager.forProject(project.id);
+		assert.equal(getSchemaVersion(context.database), CURRENT_SCHEMA_VERSION);
+
+		const listed = await requestJson(baseUrl, "/api/projects");
+		assert.equal(listed.status, 200);
+		assert.deepEqual(
+			(listed.body as { projects: Array<{ id: string }> }).projects.map(entry => entry.id),
+			[DEFAULT_PROJECT_ID, project.id]
+		);
+
+		const renamed = await requestJson(baseUrl, `/api/projects/${project.id}`, { method: "PATCH", body: { name: "Renamed" } });
+		assert.equal(renamed.status, 200);
+		assert.equal((renamed.body as { name: string }).name, "Renamed");
+
+		const invalid = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name: "  " } });
+		assert.equal(invalid.status, 400);
+
+		const missing = await requestJson(baseUrl, "/api/projects/ghost", { method: "PATCH", body: { name: "x" } });
+		assert.equal(missing.status, 404);
+
+		const deleteDefault = await requestJson(baseUrl, `/api/projects/${DEFAULT_PROJECT_ID}`, { method: "DELETE" });
+		assert.equal(deleteDefault.status, 409);
+
+		const deleteActive = await requestJson(baseUrl, `/api/projects/${project.id}`, { method: "DELETE", projectId: project.id });
+		assert.equal(deleteActive.status, 409);
+
+		const deleted = await requestJson(baseUrl, `/api/projects/${project.id}`, { method: "DELETE" });
+		assert.equal(deleted.status, 204);
+		assert.equal(service.registry.get(project.id), undefined);
+		assert.equal(existsSync(`${project.dbPath}.removed`), true);
+		assert.equal(existsSync(project.dbPath), false);
+
+		const afterDelete = await requestJson(baseUrl, "/api/archive", { projectId: project.id });
+		assert.equal(afterDelete.status, 404);
+	});
+});
+
+test("agent access follows the most-recently-used project", async () => {
+	await withHttpService(async ({ baseUrl }) => {
+		const created = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name: "Agent lab" } });
+		const project = created.body as { id: string };
+
+		await requestJson(baseUrl, "/api/captures/agent-lab-capture", {
+			method: "PUT",
+			projectId: project.id,
+			body: { id: "agent-lab-capture", name: "Agent lab capture", messages: [], byteStream: [] }
+		});
+
+		const response = await fetch(`${baseUrl}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				"MCP-Protocol-Version": "2026-07-28",
+				"Mcp-Method": "tools/call",
+				"Mcp-Name": "list_captures"
+			},
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 1,
+				method: "tools/call",
+				params: {
+					name: "list_captures",
+					arguments: {},
+					_meta: {
+						"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+						"io.modelcontextprotocol/clientInfo": { name: "projects-test", version: "1.0" },
+						"io.modelcontextprotocol/clientCapabilities": {}
+					}
+				}
+			})
+		});
+		assert.equal(response.status, 200);
+		const payload = await response.json() as { result?: { structuredContent?: { data?: { captures?: Array<{ id: string }> } } } };
+		assert.deepEqual(
+			(payload.result?.structuredContent?.data?.captures ?? []).map(capture => capture.id),
+			["agent-lab-capture"]
+		);
+	});
+});
