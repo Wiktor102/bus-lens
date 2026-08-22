@@ -461,6 +461,35 @@ export function createArchiveDataLayer(
 		);
 	}
 
+	// Every recording write flows through this writer, so the switch fence
+	// lives right beside it: switching projects while a session could still
+	// append would silently route later chunks into the other project's
+	// database, and that invariant must not depend on view-layer guards.
+	let openRecordingSessions = 0;
+	const recordingWriter: ArchiveClient = new Proxy(client, {
+		get: (target, property) => {
+			if (property === "startSession") {
+				return async (request: Parameters<ArchiveClient["startSession"]>[0]) => {
+					// Count only sessions the server actually opened.
+					const response = await target.startSession(request);
+					openRecordingSessions += 1;
+					return response;
+				};
+			}
+			if (property === "finalizeSession") {
+				return async (request: Parameters<ArchiveClient["finalizeSession"]>[0]) => {
+					try {
+						return await target.finalizeSession(request);
+					} finally {
+						openRecordingSessions = Math.max(0, openRecordingSessions - 1);
+					}
+				};
+			}
+			const value = Reflect.get(target, property, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		}
+	});
+
 	const commands: ArchiveCommands = {
 		hydrate: async () => {
 			const [index, folders, queue, history, settings, summaries, fullState] = await Promise.all([
@@ -546,6 +575,9 @@ export function createArchiveDataLayer(
 		renameProject: (projectId, name) => run("renameProject", { projectId, name }, () => client.renameProject(projectId, name)),
 		deleteProject: projectId => run("deleteProject", projectId, () => client.deleteProject(projectId)),
 		switchActiveProject: async projectId => {
+			if (openRecordingSessions > 0) {
+				throw commandError("switchActiveProject", new Error("Stop recording before switching projects"));
+			}
 			const current = readActiveProjectId(legacyStorage);
 			if (current === projectId) return;
 			writeActiveProjectId(projectId, legacyStorage);
@@ -560,7 +592,7 @@ export function createArchiveDataLayer(
 			reloadWindow();
 		},
 		activeProjectId: () => readActiveProjectId(legacyStorage),
-		recordingWriter: client
+		recordingWriter
 	};
 
 	const legacyStorage = storage || browserStorage();

@@ -153,7 +153,8 @@ const summaryOf = (id: string): ProjectSummary => ({ id, name: id, dbPath: `/dat
 async function withProjectsDataLayer(
 	storedId: string | null,
 	projects: ProjectSummary[],
-	run: (layer: ReturnType<typeof createArchiveDataLayer>, storage: { getItem: (key: string) => string | null }, reloads: () => number) => Promise<void>
+	run: (layer: ReturnType<typeof createArchiveDataLayer>, storage: { getItem: (key: string) => string | null }, reloads: () => number) => Promise<void>,
+	clientOverrides: Partial<ArchiveClient> = {}
 ): Promise<void> {
 	const map = memoryStorage();
 	const storage = storageOf(map);
@@ -170,7 +171,11 @@ async function withProjectsDataLayer(
 		listHistory: async () => [],
 		loadSettings: async () => ({}),
 		listCaptureSummaries: async () => [],
-		listProjects: async () => projects
+		listProjects: async () => projects,
+		startSession: async () => ({ sessionId: "s-1", nextChunkSequence: 1, nextRawOffset: 0, dataRevision: 1 }),
+		finalizeSession: async () => ({ dataRevision: 2 }),
+		appendChunk: async () => ({ accepted: true, nextChunkSequence: 1, nextRawOffset: 0, dataRevision: 1 }),
+		...clientOverrides
 	}) as ArchiveClient;
 	const layer = createArchiveDataLayer(queryClient, client, storage, { reloadWindow: () => void (reloads += 1) });
 	await layer.ready;
@@ -191,6 +196,36 @@ test("a stored project id present in the registry is left alone", async () => {
 		assert.equal(readActiveProjectId(_storage), "p-1");
 		assert.equal(reloads(), 0);
 	});
+});
+
+test("switching projects is fenced while a recording session is open", async () => {
+	await withProjectsDataLayer(null, [summaryOf("default"), summaryOf("p-2")], async (layer, storage, reloads) => {
+		await layer.commands.recordingWriter.startSession({ captureId: "cap-1", sessionId: "s-1" });
+
+		await assert.rejects(layer.commands.switchActiveProject("p-2"), /Stop recording before switching projects/);
+		assert.equal(readActiveProjectId(storage), null);
+		assert.equal(reloads(), 0);
+
+		// Finalizing closes the fence and switching proceeds.
+		await layer.commands.recordingWriter.finalizeSession({ captureId: "cap-1", sessionId: "s-1", expectedDataRevision: 1 });
+		await layer.commands.switchActiveProject("p-2");
+		assert.equal(readActiveProjectId(storage), "p-2");
+		assert.equal(reloads(), 1);
+	});
+});
+
+test("a failed recording session start does not engage the switch fence", async () => {
+	await withProjectsDataLayer(
+		null,
+		[summaryOf("default"), summaryOf("p-2")],
+		async (layer, storage, reloads) => {
+			await assert.rejects(layer.commands.recordingWriter.startSession({ captureId: "cap-1", sessionId: "s-1" }), /no server/);
+			await layer.commands.switchActiveProject("p-2");
+			assert.equal(readActiveProjectId(storage), "p-2");
+			assert.equal(reloads(), 1);
+		},
+		{ startSession: async () => Promise.reject(new Error("no server session")) }
+	);
 });
 
 test("the projects query option reads through the injected client", async () => {
