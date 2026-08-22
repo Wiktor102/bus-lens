@@ -530,6 +530,42 @@ test("HTTP finalization synthesizes canonical reads and creates a new profile pe
 	});
 });
 
+test("HTTP framing drafts accept a pending marker section while recording", async () => {
+	await withHttpService(async ({ request }) => {
+		await createCanonical(request, "pending-marker-capture");
+		await startSession(request, "pending-marker-capture", "pending-marker-session");
+		const appended = await appendChunk(request, "pending-marker-capture", "pending-marker-session", {
+			requestId: "pending-marker-data-0",
+			sequence: 0,
+			expectedStartOffset: 0,
+			timestamp: 100,
+			direction: "rx",
+			bytes: [0xaa, 0x01, 0x02]
+		});
+		status(appended, 200);
+
+		const pendingDraft = await request("/api/captures/pending-marker-capture/framing-draft", {
+			method: "PATCH",
+			body: {
+				expectedRevision: 0,
+				sections: [{ start: 0, framingMode: "marker", frameMarker: "", markerPosition: "start" }]
+			}
+		});
+		status(pendingDraft, 200);
+		assert.equal(record(pendingDraft.body).revision, 1);
+
+		const markerDraft = await request("/api/captures/pending-marker-capture/framing-draft", {
+			method: "PATCH",
+			body: {
+				expectedRevision: 1,
+				sections: [{ start: 0, framingMode: "marker", frameMarker: "AA", markerPosition: "end" }]
+			}
+		});
+		status(markerDraft, 200);
+		assert.equal(record(markerDraft.body).revision, 2);
+	});
+});
+
 test("HTTP framing drafts stay draft-only while recording and stale reframes are rejected", async () => {
 	await withHttpService(async ({ request, service }) => {
 		await createCanonical(request, "framing-capture");
