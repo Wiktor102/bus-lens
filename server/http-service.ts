@@ -188,6 +188,7 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 	// most-recently-used project and is recreated when that target changes.
 	let mcpTarget = { access: createMcpAccessForContext(defaultContext), databasePath: defaultContext.databasePath };
 	let mcpRetargetChain: Promise<void> = Promise.resolve();
+	let mcpClosing = false;
 	const mcpRetargetDebounceMs = Math.max(0, options.mcpRetargetDebounceMs ?? 250);
 	const mcpHandoffGraceMs = Math.max(0, options.mcpHandoffGraceMs ?? 5_000);
 	type RetiredMcpAccess = { timer: NodeJS.Timeout; run: () => Promise<void> };
@@ -218,14 +219,27 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			await entry.run();
 		}
 	}
+	let wakeMcpQuietWindow: (() => void) | undefined;
 	async function waitForMcpQuietWindow(): Promise<void> {
 		if (!mcpRetargetDebounceMs) return;
 		await new Promise<void>(resolveQuiet => {
-			const timer = setTimeout(resolveQuiet, mcpRetargetDebounceMs);
+			const timer = setTimeout(() => {
+				wakeMcpQuietWindow = undefined;
+				resolveQuiet();
+			}, mcpRetargetDebounceMs);
 			timer.unref?.();
+			// Shutdown interrupts the window instead of waiting it out.
+			wakeMcpQuietWindow = () => {
+				clearTimeout(timer);
+				resolveQuiet();
+			};
 		});
 	}
 	async function ensureMcpProject(): Promise<McpAccess> {
+		// Shutdown sets this before draining the chain, so a pending retarget
+		// can never recreate agent access (and re-open project handles) after
+		// close() has already torn the manager and root database down.
+		if (mcpClosing) return mcpTarget.access;
 		const mru = registry.mostRecentlyUsed();
 		const targetPath = mru ? resolve(mru.dbPath) : rootDatabasePath;
 		if (targetPath === mcpTarget.databasePath) return mcpTarget.access;
@@ -658,6 +672,11 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			return mcpTarget.access;
 		},
 		close: async () => {
+			mcpClosing = true;
+			// A retarget already chained behind the quiet window must finish (or
+			// be skipped) before the handles it would touch are gone.
+			wakeMcpQuietWindow?.();
+			await mcpRetargetChain;
 			await flushRetiredMcpAccesses();
 			await mcpTarget.access.close();
 			await new Promise<void>(resolveClose => server.close(() => resolveClose()));

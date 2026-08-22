@@ -526,6 +526,7 @@ async function callListCaptures(baseUrl: string): Promise<string[]> {
 		headers: {
 			"content-type": "application/json",
 			accept: "application/json, text/event-stream",
+			connection: "close",
 			"MCP-Protocol-Version": "2026-07-28",
 			"Mcp-Method": "tools/call",
 			"Mcp-Name": "list_captures"
@@ -608,5 +609,48 @@ test("replaced agent targets close after the handoff grace window", async () => 
 			// ...and is closed once the window elapses.
 			assert.equal(initialAccess.getStatus().status, "stopped");
 		}, directory, { mcpRetargetDebounceMs: 10, mcpHandoffGraceMs: 300 });
+	});
+});
+
+test("shutdown drains a pending retarget instead of leaking the recreated access", async () => {
+	await withTemporaryDirectory(async directory => {
+		const target = await mkdtemp(join(tmpdir(), "bus-lens-projects-shutdown-"));
+		try {
+			const service = createArchiveHttpService({
+				databasePath: join(target, "bus-lens.sqlite"),
+				mcpRetargetDebounceMs: 500,
+				mcpHandoffGraceMs: 20
+			});
+			await new Promise<void>((resolveListen, reject) => {
+				service.server.once("error", reject);
+				service.server.listen({ host: "127.0.0.1", port: 0 });
+				service.server.once("listening", resolveListen);
+			});
+			const baseUrl = `http://127.0.0.1:${(service.server.address() as AddressInfo).port}`;
+
+			const created = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name: "Shutdown" } });
+			const project = created.body as { id: string };
+			const initialAccess = service.mcpAccess;
+
+			await requestJson(baseUrl, "/api/captures/shutdown-capture", {
+				method: "PUT",
+				projectId: project.id,
+				body: { id: "shutdown-capture", name: "Shutdown capture", messages: [], byteStream: [] }
+			});
+
+			// Schedule a debounced retarget, give the /mcp request time to park
+			// inside the quiet window, then shut down before it elapses.
+			void callListCaptures(baseUrl).catch(() => "aborted");
+			await new Promise(resolveSchedule => setTimeout(resolveSchedule, 120));
+			await service.close();
+
+			// The chained retarget completed inside close(): the swapped-in
+			// access was closed with everything else instead of leaking.
+			assert.equal(initialAccess.getStatus().status, "stopped");
+			assert.notEqual(service.mcpAccess, initialAccess);
+			assert.equal(service.mcpAccess.getStatus().status, "stopped");
+		} finally {
+			await rm(target, { recursive: true, force: true });
+		}
 	});
 });

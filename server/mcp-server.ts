@@ -338,10 +338,15 @@ export function createMcpAccess(options: McpAccessOptions): McpAccess {
 	let running = true;
 	const agentNotesStatus = (): AgentAccessStatus["agentNotes"] => {
 		if (options.agentNotes && options.agentNotes !== "not-available-in-this-phase") return options.agentNotes;
-		const value = options.database.prepare("SELECT value_json FROM application_settings WHERE key = @key").get({ key: ALLOW_AGENT_AUTHORED_NOTES_SETTING }) as { value_json: string } | undefined;
 		try {
-			return value && JSON.parse(value.value_json) === true ? "enabled" : "disabled";
+			const value = options.database.prepare("SELECT value_json FROM application_settings WHERE key = @key").get({ key: ALLOW_AGENT_AUTHORED_NOTES_SETTING }) as { value_json: string } | undefined;
+			try {
+				return value && JSON.parse(value.value_json) === true ? "enabled" : "disabled";
+			} catch {
+				return "disabled";
+			}
 		} catch {
+			// A closed database means access is shutting down; report instead of throwing.
 			return "disabled";
 		}
 	};
