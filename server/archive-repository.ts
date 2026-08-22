@@ -7,6 +7,7 @@ import {
 	getPreviousProfiles as listCanonicalPreviousProfiles,
 	type VerificationReport
 } from "./canonical.ts";
+import { storedMarkerText } from "../src/domain/framing.ts";
 
 export type JsonDocument = Record<string, unknown>;
 
@@ -742,13 +743,7 @@ export class ArchiveRepository {
 				collapsed: number;
 			}>;
 			frameSections = sections.map(s => {
-				let marker = "";
-				if (s.marker_bytes) {
-					try {
-						const arr: number[] = JSON.parse(s.marker_bytes) as number[];
-						marker = arr.map(b => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
-					} catch {}
-				}
+				const marker = storedMarkerText(s.marker_bytes);
 				return {
 					id: s.id,
 					start: s.start_offset,
