@@ -536,6 +536,54 @@ test("a marker section without marker bytes stays pending instead of rejecting p
 	}
 });
 
+test("persists alternative markers as nested JSON and verifies reframes against them", () => {
+	const database = openDatabase(":memory:");
+	installCommandSchema(database);
+	try {
+		const service = new CanonicalCaptureCommandService(database, { nowIso: () => "2026-08-09T00:00:00.000Z" });
+		service.createCapture({ captureId: "alt-marker", framing, inputFormat: "binary" });
+		service.startSession({ captureId: "alt-marker", sessionId: "alt-marker-session" });
+		const append = service.appendChunk({
+			captureId: "alt-marker",
+			sessionId: "alt-marker-session",
+			requestId: "alt-marker-request",
+			sequence: 0,
+			expectedStartOffset: 0,
+			bytes: [1, 255, 2, 0]
+		});
+		service.updateFramingDraft({
+			captureId: "alt-marker",
+			expectedRevision: 0,
+			sections: [{ start: 0, framingMode: "marker", frameMarker: "FF|00", markerPosition: "end", collapseRuns: false, collapsed: false }]
+		});
+
+		const finalization = service.finalizeSession({
+			captureId: "alt-marker",
+			sessionId: "alt-marker-session",
+			expectedDataRevision: append.dataRevision
+		});
+		assert.equal(finalization.job.status, "completed");
+		assert.deepEqual(
+			database.prepare("SELECT framing_mode, marker_bytes FROM framing_sections WHERE capture_id = 'alt-marker'").all(),
+			[{ framing_mode: "marker", marker_bytes: "[[255],[0]]" }]
+		);
+		assert.deepEqual(
+			database.prepare("SELECT bytes_json FROM materialized_frames WHERE capture_id = 'alt-marker'").all(),
+			[{ bytes_json: "[1,255]" }, { bytes_json: "[2,0]" }]
+		);
+
+		const reframe = service.reframe({
+			captureId: "alt-marker",
+			sections: [{ start: 0, framingMode: "marker", frameMarker: "FF|00", markerPosition: "end" }],
+			expectedActiveProfileId: finalization.profileId,
+			expectedDataRevision: append.dataRevision
+		});
+		assert.equal(reframe.verified, true);
+	} finally {
+		database.close();
+	}
+});
+
 test("finalization snapshots the latest framing draft", () => {
 	const database = openDatabase(":memory:");
 	installCommandSchema(database);

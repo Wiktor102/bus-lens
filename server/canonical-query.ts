@@ -41,6 +41,7 @@ import {
 	type NormalizedDifferentialScope
 } from "./differential-analysis.ts";
 import { deriveTransitionPositionAggregates } from "./transition-positions.ts";
+import { storedMarkerText } from "../src/domain/framing.ts";
 import type {
 	AgentEvidenceClassification,
 	AgentHiddenPolicy,
