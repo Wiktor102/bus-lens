@@ -33,7 +33,8 @@ export type LengthFramingRule = {
 
 export type MarkerFramingRule = {
 	mode: "marker";
-	marker: readonly number[];
+	/** Alternative byte sequences; a frame boundary matches any of them. */
+	marker: readonly (readonly number[])[];
 	position: "start" | "end";
 };
 

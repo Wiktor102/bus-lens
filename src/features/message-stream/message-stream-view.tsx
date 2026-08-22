@@ -207,7 +207,7 @@ function SectionEntry({
 									Marker
 									<input
 										data-section-marker={section.id}
-										placeholder="AA 55"
+										placeholder="AA 55|FF"
 										spellCheck={false}
 										value={markerDraft}
 										disabled={mutationsDisabled}
@@ -294,7 +294,7 @@ function MarkerPromptEntry({
 					<div>
 						<h2>Enter a marker byte sequence</h2>
 						<p>
-							Messages are paused until this section has a marker. Enter hexadecimal bytes above, for example <code>AA 55</code>, then press Enter.
+							Messages are paused until this section has a marker. Enter hexadecimal bytes above, for example <code>AA 55</code>; use <code>|</code> for alternatives, e.g. <code>FF|00</code>. Then press Enter.
 						</p>
 					</div>
 				</div>

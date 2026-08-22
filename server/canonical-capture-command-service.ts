@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { SqliteDatabase } from "./database.ts";
-import { markerBytes as parseMarkerBytes } from "../src/domain/framing.ts";
 import {
 	buildCanonicalMaterialization,
 	normalizeSectionsForConversion,
@@ -10,6 +9,7 @@ import {
 	type RawByteRecord,
 	type NormalizedSection
 } from "./canonical.ts";
+import { storedMarkerText } from "../src/domain/framing.ts";
 
 export const CANONICAL_STORAGE_STATUS = "canonical" as const;
 export const CANONICALIZATION_FAILED_STORAGE_STATUS = "canonicalization-failed" as const;
@@ -593,9 +593,8 @@ function normalizeFramingSections(
 			throw new CanonicalCaptureValidationError("time framing requires a positive frameTimeGap", { index });
 		}
 		const frameMarker = String(section.frameMarker ?? "").trim();
-		if (framingMode === "marker" && !parseMarkerBytes(frameMarker).length) {
-			throw new CanonicalCaptureValidationError("marker framing requires frameMarker bytes", { index });
-		}
+		// An empty marker is a pending section: the shared domain engine frames
+		// zero messages until marker bytes are set, so persistence must accept it.
 		const markerPosition = section.markerPosition ?? "start";
 		if (markerPosition !== "start" && markerPosition !== "end") {
 			throw new CanonicalCaptureValidationError("markerPosition must be start or end", { index });
@@ -628,18 +627,7 @@ type StoredFramingSectionRow = {
 };
 
 function markerTextFromStoredBytes(value: string | null): string {
-	if (!value) return "";
-	try {
-		const bytes = JSON.parse(value) as unknown;
-		if (!Array.isArray(bytes)) return "";
-		return bytes
-			.map(Number)
-			.filter(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255)
-			.map(byte => byte.toString(16).padStart(2, "0").toUpperCase())
-			.join(" ");
-	} catch {
-		return "";
-	}
+	return storedMarkerText(value);
 }
 
 function framingRequestsFromStoredSections(rows: readonly StoredFramingSectionRow[]): FramingSectionRequest[] {

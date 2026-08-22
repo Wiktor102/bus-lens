@@ -6,6 +6,7 @@ import {
 	frameWidth,
 	hexByte,
 	makeMessage,
+	markerAlternatives,
 	markerAt,
 	markerBytes,
 	normalizeCapture,
@@ -18,6 +19,7 @@ import {
 	visibleMessages,
 	visiblePositionForRawByte
 } from "../src/features/capture/capture-framing.ts";
+import { markerBytesJson, storedMarkerText } from "../src/domain/framing.ts";
 
 function capture(values: number[], timestamps = values.map((_, index) => index)) {
 	return {
@@ -213,6 +215,62 @@ test("frames marker START and END sections with their own marker settings", () =
 	];
 	rebuildPreview(ends);
 	assert.deepEqual(ends.messages.map(message => message.bytes), [[0x10, 0xbb], [0x20, 0xbb], [0x30]]);
+});
+
+test("parses marker expressions and persists alternatives with backward-compatible JSON", () => {
+	assert.deepEqual(markerAlternatives("FF|00"), [[0xff], [0x00]]);
+	assert.deepEqual(markerAlternatives("AA 55|0D 0A|7E"), [[0xaa, 0x55], [0x0d, 0x0a], [0x7e]]);
+	assert.deepEqual(markerAlternatives("FF||00|"), [[0xff], [0x00]]);
+	assert.deepEqual(markerBytesJson("AA 55"), "[170,85]");
+	assert.deepEqual(markerBytesJson("FF|00"), "[[255],[0]]");
+	assert.equal(storedMarkerText("[[255],[0]]"), "FF|00");
+	assert.equal(storedMarkerText("[170,85]"), "AA 55");
+	assert.equal(storedMarkerText("[]"), "");
+	assert.equal(storedMarkerText("not json"), "");
+});
+
+test("frames on any alternative when the marker expression uses |", () => {
+	const starts = capture([0x01, 0xff, 0x02, 0x00, 0x03]);
+	starts.frameSections = [
+		{ id: "starts", start: 0, framingMode: "marker", frameMarker: "FF|00", markerPosition: "start" }
+	];
+	rebuildPreview(starts);
+	assert.deepEqual(starts.messages.map(message => message.bytes), [[0xff, 0x02], [0x00, 0x03]]);
+
+	const ends = capture([0x10, 0x00, 0x20, 0xff, 0x30]);
+	ends.frameSections = [
+		{ id: "ends", start: 0, framingMode: "marker", frameMarker: "FF|00", markerPosition: "end" }
+	];
+	rebuildPreview(ends);
+	assert.deepEqual(ends.messages.map(message => message.bytes), [[0x10, 0x00], [0x20, 0xff], [0x30]]);
+
+	const mixedLengths = capture([0xaa, 0x55, 0x01, 0x0d, 0x0a, 0x02]);
+	mixedLengths.frameSections = [
+		{ id: "mixed", start: 0, framingMode: "marker", frameMarker: "AA 55|0D 0A", markerPosition: "end" }
+	];
+	rebuildPreview(mixedLengths);
+	assert.deepEqual(mixedLengths.messages.map(message => message.bytes), [[0xaa, 0x55], [0x01, 0x0d, 0x0a], [0x02]]);
+});
+
+test("extends marker-end previews framed by alternative markers", () => {
+	const current = {
+		id: "live-marker-alternatives",
+		byteStream: [0x01, 0xff].map((value, rawOffset) => ({ value, timestamp: rawOffset, rawOffset })),
+		messages: [],
+		notes: [],
+		frameSections: [{ id: "section", start: 0, framingMode: "marker", frameMarker: "FF|00", markerPosition: "end" }]
+	} as Capture;
+	rebuildPreview(current, (() => { let id = 0; return () => `message-${++id}`; })());
+	const firstMessageId = current.messages[0]?.id;
+	const previousLength = current.byteStream!.length;
+	current.byteStream!.push(
+		{ value: 0x02, timestamp: 2, rawOffset: 2 },
+		{ value: 0x00, timestamp: 3, rawOffset: 3 }
+	);
+
+	assert.equal(appendLivePreview(current, previousLength, () => "new-message"), true);
+	assert.equal(current.messages[0]?.id, firstMessageId);
+	assert.deepEqual(current.messages.map(message => message.bytes), [[0x01, 0xff], [0x02, 0x00]]);
 });
 
 test("frames time-gap sections from their own first byte", () => {
