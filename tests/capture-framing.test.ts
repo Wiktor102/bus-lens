@@ -273,6 +273,27 @@ test("extends marker-end previews framed by alternative markers", () => {
 	assert.deepEqual(current.messages.map(message => message.bytes), [[0x01, 0xff], [0x02, 0x00]]);
 });
 
+test("rebuilds marker-end previews when alternatives share a prefix", () => {
+	const current = {
+		id: "live-overlapping-marker-alternatives",
+		byteStream: [0x01, 0xaa, 0x55].map((value, rawOffset) => ({ value, timestamp: rawOffset, rawOffset })),
+		messages: [],
+		notes: [],
+		frameSections: [{ id: "section", start: 0, framingMode: "marker", frameMarker: "AA 55|AA", markerPosition: "end" }]
+	} as Capture;
+	rebuildPreview(current);
+	const previousLength = current.byteStream!.length;
+	current.byteStream!.push(
+		{ value: 0x02, timestamp: 3, rawOffset: 3 },
+		{ value: 0xaa, timestamp: 4, rawOffset: 4 },
+		{ value: 0x55, timestamp: 5, rawOffset: 5 }
+	);
+
+	assert.equal(appendLivePreview(current, previousLength), false);
+	rebuildPreview(current);
+	assert.deepEqual(current.messages.map(message => message.bytes), [[0x01, 0xaa, 0x55], [0x02, 0xaa, 0x55]]);
+});
+
 test("frames time-gap sections from their own first byte", () => {
 	const current = capture([1, 2, 3, 4, 5, 6], [0, 2, 10, 11, 20, 21]);
 	current.frameSections = [

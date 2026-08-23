@@ -536,6 +536,14 @@ function endsWithAnyMarker(message: CaptureMessage, markers: number[][]): boolea
 	return markers.some(marker => marker.length > 0 && marker.every((value, index) => message.bytes.at(-marker.length + index) === value));
 }
 
+function markersHavePrefixOverlap(markers: number[][]): boolean {
+	return markers.some((marker, index) => markers.some((alternative, alternativeIndex) =>
+		index !== alternativeIndex &&
+		alternative.length < marker.length &&
+		alternative.every((value, byteIndex) => marker[byteIndex] === value)
+	));
+}
+
 function appendMarkerEndFramedPreview(
 	capture: Capture,
 	section: CaptureSection,
@@ -632,6 +640,8 @@ export function appendLivePreview(capture: Capture, previousByteStreamLength: nu
 		})))) return false;
 		return markAppended(true);
 	}
+	const markers = parseMarkerAlternatives(settings.frameMarker);
+	if (markersHavePrefixOverlap(markers)) return false;
 	return markAppended(appendMarkerEndFramedPreview(capture, section, appended, sectionMessages, generateId));
 }
 
