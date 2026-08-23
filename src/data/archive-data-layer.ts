@@ -191,7 +191,32 @@ export function createArchiveDataLayer(
 	options?: ArchiveDataLayerOptions
 ): ArchiveDataLayer {
 	const reloadWindow = options?.reloadWindow ?? (typeof window === "undefined" ? () => undefined : () => window.location.reload());
-	const queries = createArchiveQueryOptions(client);
+	const baseQueries = createArchiveQueryOptions(client);
+	let selectionRecoveryStarted = false;
+	const reconcileProjectSelection = (projects: ProjectSummary[]): void => {
+		const stored = readActiveProjectId(projectStorage);
+		if (!stored || projects.some(project => project.id === stored) || selectionRecoveryStarted) return;
+		selectionRecoveryStarted = true;
+		clearActiveProjectId(projectStorage);
+		queryClient.removeQueries({
+			predicate: query => query.queryKey[0] === archiveQueryKeys.all[0] && query.queryKey[1] !== "projects"
+		});
+		reloadWindow();
+	};
+	const queries = {
+		...baseQueries,
+		projects: () => {
+			const options = baseQueries.projects();
+			return {
+				...options,
+				queryFn: async () => {
+					const projects = await client.listProjects();
+					reconcileProjectSelection(projects);
+					return projects;
+				}
+			};
+		}
+	};
 	let settingsWriteChain: Promise<void> = Promise.resolve();
 	const mutationSuccess = <Name extends ArchiveMutationName>(
 		name: Name,
@@ -563,14 +588,7 @@ export function createArchiveDataLayer(
 		getCanonicalizationJob: (captureId, jobId) => queryClient.fetchQuery({ ...queries.canonicalizationJob(captureId, jobId), staleTime: 0 }),
 		getLegacyBackup: captureId => queryClient.fetchQuery(queries.legacyBackup(captureId)),
 		listProjects: async () => {
-			const projects = await queryClient.ensureQueryData(queries.projects());
-			// Deletion is server-global while the selection is per-browser. A
-			// stored id missing from the registry would poison every routed
-			// request with 404s and render a blank selector, so it heals itself
-			// once back to Default.
-			const stored = readActiveProjectId(projectStorage);
-			if (stored && !projects.some(project => project.id === stored)) commands.forgetActiveProject();
-			return projects;
+			return queryClient.ensureQueryData(queries.projects());
 		},
 		createProject: name => run("createProject", name, () => client.createProject(name)),
 		renameProject: (projectId, name) => run("renameProject", { projectId, name }, () => client.renameProject(projectId, name)),
@@ -601,6 +619,11 @@ export function createArchiveDataLayer(
 	const legacyArchive = readLegacyArchive(legacyStorage);
 	const ready = (async () => {
 		await client.health();
+		// Reconcile the tab-local route before the first routed archive read.
+		// A reload has already been requested when recovery starts, so this
+		// instance must not issue a request with the stale captured project id.
+		if (readActiveProjectId(projectStorage)) await queryClient.ensureQueryData(queries.projects());
+		if (selectionRecoveryStarted) return;
 		const serverState = await client.load();
 		if (legacyArchive && !hasStoredState(serverState)) {
 			await client.migrate(legacyArchive);

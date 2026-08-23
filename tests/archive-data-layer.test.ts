@@ -4,7 +4,7 @@ import { QueryObserver } from "@tanstack/react-query";
 import { ArchiveClient, type ArchiveIndex, type CanonicalNote } from "../src/persistence/archive-client.ts";
 import { createArchiveDataLayer } from "../src/data/archive-data-layer.ts";
 import { createTestQueryClient } from "../src/test-utils/query-client.ts";
-import type { AppState, SendQueueEntry, SendSettings } from "../src/shared/app-state.ts";
+import { STORAGE_KEY, type AppState, type SendQueueEntry, type SendSettings } from "../src/shared/app-state.ts";
 
 type TestServer = {
 	state: AppState;
@@ -254,7 +254,7 @@ test("migrates a legacy local archive before removing its compatibility copy", a
 	const raw = JSON.stringify({ captures: [{ id: "legacy", name: "Legacy", messages: [], byteStream: [] }], folders: [] });
 	let stored: string | null = raw;
 	const storage = {
-		getItem: () => stored,
+		getItem: (key: string) => key === STORAGE_KEY ? stored : null,
 		removeItem: () => { stored = null; }
 	};
 	const layer = createArchiveDataLayer(createTestQueryClient(), createTestClient(server), storage);

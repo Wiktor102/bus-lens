@@ -207,6 +207,23 @@ test("a stored project id missing from the registry heals back to Default", asyn
 	});
 });
 
+test("bootstrap heals a dangling project before the first routed archive load", async () => {
+	let loadCalls = 0;
+	await withProjectsDataLayer(
+		"ghost",
+		[summaryOf("default")],
+		async (_layer, storage, reloads) => {
+			assert.equal(readActiveProjectId(storage), null);
+			assert.equal(reloads(), 1);
+			assert.equal(loadCalls, 0);
+		},
+		{ load: async () => {
+			loadCalls += 1;
+			throw new Error("Unknown project ghost");
+		} }
+	);
+});
+
 test("a stored project id present in the registry is left alone", async () => {
 	await withProjectsDataLayer("p-1", [summaryOf("default"), summaryOf("p-1")], async (layer, _storage, reloads) => {
 		await layer.commands.listProjects();
