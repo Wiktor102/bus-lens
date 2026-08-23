@@ -1,5 +1,6 @@
 import {
 	interpretSectionRanges,
+	markerAlternatives as parseMarkerAlternatives,
 	markerAt as interpretMarkerAt,
 	markerBytes as parseMarkerBytes,
 	type MarkerPosition,
@@ -213,9 +214,9 @@ function normalizeFrameTimeGap(value: unknown, fallback = DEFAULT_FRAME_TIME_GAP
 
 function normalizeMarker(value: unknown, configured = true): string {
 	if (!configured) return "";
-	return markerBytes(value)
-		.map(hexByte)
-		.join(" ");
+	return parseMarkerAlternatives(value)
+		.map(alternative => alternative.map(hexByte).join(" "))
+		.join("|");
 }
 
 function sectionModeValue(section: CaptureSection): unknown {
@@ -413,6 +414,10 @@ export function markerAt(stream: PreviewByteRecord[], index: number, marker: num
 	return interpretMarkerAt(stream, index, marker);
 }
 
+export function markerAlternatives(value: unknown): number[][] {
+	return parseMarkerAlternatives(value);
+}
+
 export function frameSectionRanges(
 	stream: PreviewByteRecord[],
 	sectionStart: number,
@@ -527,8 +532,16 @@ function appendTimeFramedPreview(
 	return true;
 }
 
-function endsWithMarker(message: CaptureMessage, marker: number[]): boolean {
-	return marker.length > 0 && marker.every((value, index) => message.bytes.at(-marker.length + index) === value);
+function endsWithAnyMarker(message: CaptureMessage, markers: number[][]): boolean {
+	return markers.some(marker => marker.length > 0 && marker.every((value, index) => message.bytes.at(-marker.length + index) === value));
+}
+
+function markersHavePrefixOverlap(markers: number[][]): boolean {
+	return markers.some((marker, index) => markers.some((alternative, alternativeIndex) =>
+		index !== alternativeIndex &&
+		alternative.length < marker.length &&
+		alternative.every((value, byteIndex) => marker[byteIndex] === value)
+	));
 }
 
 function appendMarkerEndFramedPreview(
@@ -540,11 +553,11 @@ function appendMarkerEndFramedPreview(
 ): boolean {
 	const messages = capture.messages || (capture.messages = []);
 	const settings = normalizeSectionFramingSettings(section, DEFAULT_FRAME_SIZE);
-	const marker = parseMarkerBytes(settings.frameMarker);
-	if (!marker.length) return true;
+	const markers = parseMarkerAlternatives(settings.frameMarker);
+	if (!markers.length) return true;
 	let current = sectionMessages.at(-1);
 	let byteStart = current?._byteEnd ?? 0;
-	if (current && endsWithMarker(current, marker)) current = undefined;
+	if (current && endsWithAnyMarker(current, markers)) current = undefined;
 	for (const record of records) {
 		if (!current) {
 			current = liveMessageFromRecords([record], String(section.id), messages.length, byteStart, generateId);
@@ -554,7 +567,7 @@ function appendMarkerEndFramedPreview(
 			appendRecordsToLiveMessage(current, [record]);
 			byteStart = current._byteEnd ?? byteStart;
 		}
-		if (endsWithMarker(current, marker)) current = undefined;
+		if (endsWithAnyMarker(current, markers)) current = undefined;
 	}
 	return true;
 }
@@ -612,20 +625,23 @@ export function appendLivePreview(capture: Capture, previousByteStreamLength: nu
 		// A marker-end section has no visible messages until its first marker.
 		// Once one appears, use the full path so any pre-marker bytes are kept
 		// exactly as the established framing implementation defines them.
-		const marker = parseMarkerBytes(settings.frameMarker);
-		const previousSectionRecords = marker.length > 1
+		const markers = parseMarkerAlternatives(settings.frameMarker);
+		const maxMarkerLength = Math.max(0, ...markers.map(marker => marker.length));
+		const previousSectionRecords = maxMarkerLength > 1
 			? stream
 					.slice(0, previousByteStreamLength)
 					.filter(record => (record.rawOffset ?? 0) >= sectionStart && !record.hidden)
-					.slice(-(marker.length - 1))
+					.slice(-(maxMarkerLength - 1))
 			: [];
 		const markerCandidate = [...previousSectionRecords, ...appended];
-		if (marker.length && markerCandidate.some((record, index) => marker.every((value, markerIndex) => {
+		if (markers.some(marker => markerCandidate.some((record, index) => marker.every((value, markerIndex) => {
 			const candidate = markerCandidate[index + markerIndex]?.value;
 			return candidate === value;
-		}))) return false;
+		})))) return false;
 		return markAppended(true);
 	}
+	const markers = parseMarkerAlternatives(settings.frameMarker);
+	if (markersHavePrefixOverlap(markers)) return false;
 	return markAppended(appendMarkerEndFramedPreview(capture, section, appended, sectionMessages, generateId));
 }
 

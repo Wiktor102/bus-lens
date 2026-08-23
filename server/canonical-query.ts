@@ -41,6 +41,7 @@ import {
 	type NormalizedDifferentialScope
 } from "./differential-analysis.ts";
 import { deriveTransitionPositionAggregates } from "./transition-positions.ts";
+import { storedMarkerText } from "../src/domain/framing.ts";
 import type {
 	AgentEvidenceClassification,
 	AgentHiddenPolicy,
@@ -1067,9 +1068,7 @@ function capturePredicate(alias: string, filters: NormalizedCaptureDiscoveryFilt
 }
 
 function markerText(value: string | null): string | null {
-	if (!value) return null;
-	const bytes = jsonArray<number>(value);
-	return bytes.length ? bytes.map(byte => Number(byte).toString(16).padStart(2, "0").toUpperCase()).join(" ") : null;
+	return storedMarkerText(value) || null;
 }
 
 function previewText(text: string, max = 240): string {

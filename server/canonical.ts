@@ -11,7 +11,8 @@ import {
 // identical framing/analysis results.
 import {
 	interpretSectionRanges,
-	markerBytes as parseMarkerBytes
+	markerAlternatives as parseMarkerAlternatives,
+	markerBytesJson
 } from "../src/domain/framing.ts";
 import {
 	countSignatures,
@@ -189,7 +190,9 @@ function normalizeFrameTimeGap(value: unknown, fallback = 5): number {
 }
 function normalizeMarker(value: unknown, configured = true): string {
 	if (!configured) return "";
-	return parseMarkerBytes(value).map(b => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+	return parseMarkerAlternatives(value)
+		.map(alternative => alternative.map(b => b.toString(16).padStart(2, "0").toUpperCase()).join(" "))
+		.join("|");
 }
 function sectionModeValue(section: CaptureSection): unknown {
 	return section.framingMode ?? section.frameMode ?? section.previewMode;
@@ -1443,7 +1446,7 @@ export function convertCaptureDocumentToCanonical(
 						position: i,
 						framingMode: s.framingMode,
 						frameLength: s.framingMode === "length" ? s.frameSize : null,
-						markerBytes: s.framingMode === "marker" ? JSON.stringify(parseMarkerBytes(s.frameMarker)) : null,
+						markerBytes: s.framingMode === "marker" ? markerBytesJson(s.frameMarker) : null,
 						markerPosition: s.framingMode === "marker" ? s.markerPosition : null,
 						timeGapMs: s.framingMode === "time" ? s.frameTimeGap : null,
 						collapseRuns: s.collapseRuns ? 1 : 0,
@@ -1867,7 +1870,7 @@ function canonicalFramingMatches(database: SqliteDatabase, captureId: string, se
 	if (stored.length !== sections.length) return false;
 	return stored.every((row, index) => {
 		const section = sections[index];
-		const expectedMarker = section.framingMode === "marker" ? JSON.stringify(parseMarkerBytes(section.frameMarker)) : null;
+		const expectedMarker = section.framingMode === "marker" ? markerBytesJson(section.frameMarker) : null;
 		return (
 			row.start_offset === section.start &&
 			row.framing_mode === section.framingMode &&
@@ -2184,7 +2187,7 @@ export function persistCanonicalMaterializationRows(
 				position: i,
 				framingMode: section.framingMode,
 				frameLength: section.framingMode === "length" ? section.frameSize : null,
-				markerBytes: section.framingMode === "marker" ? JSON.stringify(parseMarkerBytes(section.frameMarker)) : null,
+				markerBytes: section.framingMode === "marker" ? markerBytesJson(section.frameMarker) : null,
 				markerPosition: section.framingMode === "marker" ? section.markerPosition : null,
 				timeGapMs: section.framingMode === "time" ? section.frameTimeGap : null,
 				collapseRuns: section.collapseRuns ? 1 : 0,
@@ -2484,7 +2487,7 @@ export function createFramingRevision(
 					position: i,
 					framingMode: s.framingMode,
 					frameLength: s.framingMode === "length" ? s.frameSize : null,
-					markerBytes: s.framingMode === "marker" ? JSON.stringify(parseMarkerBytes(s.frameMarker)) : null,
+					markerBytes: s.framingMode === "marker" ? markerBytesJson(s.frameMarker) : null,
 					markerPosition: s.framingMode === "marker" ? s.markerPosition : null,
 					timeGapMs: s.framingMode === "time" ? s.frameTimeGap : null,
 					collapseRuns: s.collapseRuns ? 1 : 0,
