@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Check, ChevronDown, ChevronRight, Copy, Radio, ShieldCheck } from "lucide-react";
 import { useArchiveCommands, useProjects } from "../data/archive-react";
+import { orderedProjectOptions } from "../features/projects/projects-model";
 import type { ProjectSummary } from "../persistence/archive-client";
 import { createClaudeMcpConfig, createCodexMcpConfig, resolveMcpEndpoint } from "./agent-config";
 import { getMcpStatus, McpRecentlyUsedError, setMcpAgentNotes, setMcpProject, type AgentAccessStatus } from "./mcp-access";
@@ -50,13 +51,15 @@ function relativeTime(value: string): string {
 }
 
 function ProjectRouting({ projects, status, busy, onSelect }: { projects: readonly ProjectSummary[]; status: AgentAccessStatus; busy: boolean; onSelect: (project: ProjectSummary) => void }) {
+	const projectsById = new Map(projects.map(project => [project.id, project]));
 	return (
 		<section className="mcp-settings-section" aria-labelledby="mcpProjectTitle">
 			<div className="mcp-section-heading"><span className="mcp-section-icon" aria-hidden="true"><Radio /></span><span><strong id="mcpProjectTitle">MCP project</strong><small>The endpoint reads one project until you move it.</small></span></div>
-			<div className="mcp-project-list">{projects.map(project => {
+			<div className="mcp-project-list">{orderedProjectOptions(projects).map(option => {
+				const project = projectsById.get(option.value)!;
 				const selected = project.id === status.project.id;
 				return <div className="mcp-project-row" data-selected={selected || undefined} key={project.id}>
-					<span className="mcp-project-indicator" aria-hidden="true" /><span><strong>{project.name}</strong><small>{selected ? "Serving MCP now" : "Available"}</small></span>
+					<span className="mcp-project-indicator" aria-hidden="true" /><span><strong>{option.label}</strong><small>{selected ? "Serving MCP now" : "Available"}</small></span>
 					{selected ? <span className="mcp-project-current"><Check aria-hidden="true" /> Current</span> : <button className="btn btn-secondary" type="button" disabled={busy} onClick={() => onSelect(project)}>Use for MCP</button>}
 				</div>;
 			})}</div>
