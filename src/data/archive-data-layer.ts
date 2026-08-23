@@ -504,11 +504,9 @@ export function createArchiveDataLayer(
 			}
 			if (property === "finalizeSession") {
 				return async (request: Parameters<ArchiveClient["finalizeSession"]>[0]) => {
-					try {
-						return await target.finalizeSession(request);
-					} finally {
-						openRecordingSessions = Math.max(0, openRecordingSessions - 1);
-					}
+					const response = await target.finalizeSession(request);
+					openRecordingSessions = Math.max(0, openRecordingSessions - 1);
+					return response;
 				};
 			}
 			const value = Reflect.get(target, property, target);

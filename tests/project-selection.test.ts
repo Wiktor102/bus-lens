@@ -262,6 +262,35 @@ test("a failed recording session start does not engage the switch fence", async 
 	);
 });
 
+test("a failed finalization keeps the project switch fence engaged", async () => {
+	let finalizeAttempts = 0;
+	await withProjectsDataLayer(
+		null,
+		[summaryOf("default"), summaryOf("p-2")],
+		async (layer, storage, reloads) => {
+			await layer.commands.recordingWriter.startSession({ captureId: "cap-1", sessionId: "s-1" });
+			await assert.rejects(
+				layer.commands.recordingWriter.finalizeSession({ captureId: "cap-1", sessionId: "s-1", expectedDataRevision: 1 }),
+				/finalize failed/
+			);
+			await assert.rejects(layer.commands.switchActiveProject("p-2"), /Stop recording before switching projects/);
+			assert.equal(readActiveProjectId(storage), null);
+			assert.equal(reloads(), 0);
+
+			await layer.commands.recordingWriter.finalizeSession({ captureId: "cap-1", sessionId: "s-1", expectedDataRevision: 1 });
+			await layer.commands.switchActiveProject("p-2");
+			assert.equal(readActiveProjectId(storage), "p-2");
+		},
+		{
+			finalizeSession: async () => {
+				finalizeAttempts += 1;
+				if (finalizeAttempts === 1) throw new Error("finalize failed");
+				return { dataRevision: 2 };
+			}
+		}
+	);
+});
+
 test("the projects query option reads through the injected client", async () => {
 	const originalFetch = globalThis.fetch;
 	try {
