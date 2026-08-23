@@ -237,6 +237,8 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 	const closeMcpTarget = async (target: McpTarget): Promise<void> => {
 		try {
 			await target.access.close();
+		} catch (error) {
+			console.error("Bus Lens MCP close failed", error);
 		} finally {
 			target.release();
 		}
@@ -262,14 +264,12 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 		try {
 			registry.setMcpProjectId(projectId);
 		} catch (error) {
-			await nextTarget.access.close();
-			nextTarget.release();
+			await closeMcpTarget(nextTarget);
 			throw error;
 		}
 		const previous = mcpTarget;
 		mcpTarget = nextTarget;
-		await previous.access.close();
-		previous.release();
+		await closeMcpTarget(previous);
 	}
 	let activeRequests = 0;
 	let maintenance = false;

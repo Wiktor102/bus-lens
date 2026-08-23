@@ -981,6 +981,35 @@ test("explicit routing closes the replaced target after confirmation", async () 
 	});
 });
 
+test("explicit routing releases the replaced target when its close fails", async () => {
+	await withTemporaryDirectory(async directory => {
+		await withHttpService(async ({ service, baseUrl }) => {
+			const created = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name: "Close failure" } });
+			const project = created.body as { id: string };
+			const initialAccess = service.mcpAccess;
+			const mutableAccess = initialAccess as { close: () => Promise<void> };
+			const originalClose = mutableAccess.close;
+			const originalConsoleError = console.error;
+			const closeErrors: unknown[][] = [];
+			console.error = (...values: unknown[]) => { closeErrors.push(values); };
+			mutableAccess.close = async () => { throw new Error("test close failure"); };
+			try {
+				const routed = await requestJson(baseUrl, "/api/agent-access", { method: "PUT", body: { projectId: project.id } });
+				assert.equal(routed.status, 200);
+				assert.equal((routed.body as { project: { id: string } }).project.id, project.id);
+				assert.equal(service.mcpAccess === initialAccess, false);
+				const leases = (service.manager as unknown as { inFlight: Map<string, number> }).inFlight;
+				assert.equal(leases.has(DEFAULT_PROJECT_ID), false);
+				assert.match(String(closeErrors[0]?.[0]), /MCP close failed/);
+			} finally {
+				mutableAccess.close = originalClose;
+				console.error = originalConsoleError;
+				await originalClose();
+			}
+		}, directory);
+	});
+});
+
 test("the active agent target stays open across project cache eviction", async () => {
 	await withTemporaryDirectory(async directory => {
 		await withHttpService(async ({ service, baseUrl }) => {
