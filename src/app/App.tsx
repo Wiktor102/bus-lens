@@ -73,10 +73,11 @@ import {
 } from "../shared/view-state";
 import type { SendSettings } from "../shared/app-state.ts";
 import { MCP_SETTINGS_PATH, McpSettingsPage, type AgentAccessStatus } from "./mcp-settings-page";
-import { getMcpStatus, McpRecentlyUsedError, setMcpProject } from "./mcp-access";
+import { McpRecentlyUsedError } from "./mcp-access";
 import { McpRetargetDialog } from "./mcp-retarget-dialog";
 import { StatusSplitControl } from "./status-split-control";
 import { useArchiveCommands, useArchiveDataLayer, useArchiveNotes, useArchiveSelectionSync, useProjects, useSelectedArchiveCapture, useSendQueryState } from "../data/archive-react";
+import { useMcpProjectMutationPending, useMcpStatus, useSetMcpProject } from "../data/mcp-react";
 import "./styles.css";
 
 function ConnectionIcon({ connected }: { connected: boolean }) {
@@ -99,21 +100,12 @@ function TopBar({ onOpenProjects }: { onOpenProjects: () => void }) {
 		transportConnected: snapshot.connected,
 		recordingCaptureId: snapshot.recordingCaptureId
 	});
-	const [mcpStatus, setMcpStatus] = useState<AgentAccessStatus | "checking" | "unavailable">("checking");
+	const mcpStatusQuery = useMcpStatus();
+	const setMcpProjectMutation = useSetMcpProject();
+	const movingMcp = useMcpProjectMutationPending();
 	const [mcpConfirmation, setMcpConfirmation] = useState<AgentAccessStatus | null>(null);
-	const [movingMcp, setMovingMcp] = useState(false);
-
-	useEffect(() => {
-		let disposed = false;
-		void getMcpStatus()
-			.then(value => {
-				if (!disposed) setMcpStatus(value);
-			})
-			.catch(() => {
-				if (!disposed) setMcpStatus("unavailable");
-			});
-		return () => { disposed = true; };
-	}, []);
+	const mcpStatus: AgentAccessStatus | "checking" | "unavailable" = mcpStatusQuery.data
+		?? (mcpStatusQuery.isPending ? "checking" : "unavailable");
 
 	const activeProjectId = selector.activeValue;
 	const activeProjectName = selector.options.find(option => option.value === activeProjectId)?.label ?? "current project";
@@ -126,16 +118,11 @@ function TopBar({ onOpenProjects }: { onOpenProjects: () => void }) {
 				? "MCP this project"
 				: `MCP ${mcpStatus.project.name}`;
 	const moveMcp = async (force: boolean): Promise<void> => {
-		setMovingMcp(true);
 		try {
-			const next = await setMcpProject(activeProjectId, force);
-			setMcpStatus(next);
+			await setMcpProjectMutation.mutateAsync({ projectId: activeProjectId, force });
 			setMcpConfirmation(null);
 		} catch (error) {
 			if (error instanceof McpRecentlyUsedError) setMcpConfirmation(error.status);
-			else setMcpStatus("unavailable");
-		} finally {
-			setMovingMcp(false);
 		}
 	};
 

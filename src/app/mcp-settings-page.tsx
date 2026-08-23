@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Check, ChevronDown, ChevronRight, Copy, Radio, ShieldCheck } from "lucide-react";
 import { useArchiveCommands, useProjects } from "../data/archive-react";
+import { useMcpProjectMutationPending, useMcpStatus, useSetMcpAgentNotes, useSetMcpProject } from "../data/mcp-react";
 import { orderedProjectOptions } from "../features/projects/projects-model";
 import type { ProjectSummary } from "../persistence/archive-client";
 import { createClaudeMcpConfig, createCodexMcpConfig, resolveMcpEndpoint } from "./agent-config";
-import { getMcpStatus, McpRecentlyUsedError, setMcpAgentNotes, setMcpProject, type AgentAccessStatus } from "./mcp-access";
+import { McpRecentlyUsedError, type AgentAccessStatus } from "./mcp-access";
 import { McpRetargetDialog } from "./mcp-retarget-dialog";
 
 export const MCP_SETTINGS_PATH = "/settings/mcp";
@@ -70,45 +71,36 @@ function ProjectRouting({ projects, status, busy, onSelect }: { projects: readon
 function AgentAccessPanel() {
 	const commands = useArchiveCommands();
 	const projectsQuery = useProjects();
-	const [status, setStatus] = useState<AgentAccessStatus | null>(null);
+	const statusQuery = useMcpStatus();
+	const setProjectMutation = useSetMcpProject();
+	const setNotesMutation = useSetMcpAgentNotes();
+	const busy = useMcpProjectMutationPending();
 	const [error, setError] = useState<string | null>(null);
-	const [busy, setBusy] = useState(false);
-	const [savingNotes, setSavingNotes] = useState(false);
 	const [confirmation, setConfirmation] = useState<Readonly<{ status: AgentAccessStatus; target: ProjectSummary }> | null>(null);
-	useEffect(() => {
-		let disposed = false;
-		void getMcpStatus().then(value => { if (!disposed) setStatus(value); }).catch(() => { if (!disposed) setError("The local MCP service did not respond."); });
-		return () => { disposed = true; };
-	}, []);
+	const status = statusQuery.data ?? null;
+	const visibleError = error ?? (statusQuery.isError && !status ? "The local MCP service did not respond." : null);
 	const projects = projectsQuery.data ?? [];
 	const activeProjectId = commands.activeProjectId() ?? "default";
 	const activeProject = projects.find(project => project.id === activeProjectId);
 	const endpoint = resolveMcpEndpoint(status?.endpoint, window.location.origin);
 	const changeProject = async (project: ProjectSummary, force: boolean): Promise<void> => {
-		setBusy(true);
 		setError(null);
 		try {
-			const next = await setMcpProject(project.id, force);
-			setStatus(next);
+			await setProjectMutation.mutateAsync({ projectId: project.id, force });
 			setConfirmation(null);
 		} catch (changeError) {
 			if (changeError instanceof McpRecentlyUsedError) setConfirmation({ status: changeError.status, target: project });
 			else setError(changeError instanceof Error ? changeError.message : "Could not change the MCP project.");
-		} finally {
-			setBusy(false);
 		}
 	};
 	const updateNotes = async (enabled: boolean): Promise<void> => {
 		if (!status) return;
-		setSavingNotes(true);
+		const projectId = status.project.id;
 		setError(null);
 		try {
-			await setMcpAgentNotes(status.project.id, enabled);
-			setStatus(current => current ? { ...current, agentNotes: enabled ? "enabled" : "disabled" } : current);
+			await setNotesMutation.mutateAsync({ projectId, enabled });
 		} catch (notesError) {
 			setError(notesError instanceof Error ? notesError.message : "Could not update agent note access.");
-		} finally {
-			setSavingNotes(false);
 		}
 	};
 	return <>
@@ -117,11 +109,11 @@ function AgentAccessPanel() {
 			<div><span className="eyebrow">Global MCP endpoint</span><h2>{status?.project.name ?? "No project status"}</h2><p>{status ? "All MCP requests are routed to this project." : "Bus Lens could not read the MCP service status."}</p></div>
 			{status && activeProject && activeProject.id !== status.project.id ? <button className="btn btn-warning" type="button" disabled={busy} onClick={() => { void changeProject(activeProject, false); }}>Use this project</button> : null}
 		</section>
-		{error ? <p className="conversion-error mcp-error" role="alert">{error}</p> : null}
+		{visibleError ? <p className="conversion-error mcp-error" role="alert">{visibleError}</p> : null}
 		{status ? <ProjectRouting projects={projects} status={status} busy={busy} onSelect={project => { void changeProject(project, false); }} /> : null}
 		{status ? <section className="mcp-settings-section" aria-labelledby="mcpAccessTitle">
 			<div className="mcp-section-heading"><span className="mcp-section-icon" aria-hidden="true"><ShieldCheck /></span><span><strong id="mcpAccessTitle">Access</strong><small>Analysis is read-only. Agent notes are the only optional write.</small></span></div>
-			<label className="agent-notes-toggle"><span><strong>Allow agent-authored notes</strong><small>Agents can append evidence-linked notes in {status.project.name}.</small></span><input type="checkbox" checked={status.agentNotes === "enabled"} disabled={savingNotes} onChange={event => { const enabled = event.currentTarget.checked; void updateNotes(enabled); }} /></label>
+			<label className="agent-notes-toggle"><span><strong>Allow agent-authored notes</strong><small>Agents can append evidence-linked notes in {status.project.name}.</small></span><input type="checkbox" checked={status.agentNotes === "enabled"} disabled={setNotesMutation.isPending} onChange={event => { const enabled = event.currentTarget.checked; void updateNotes(enabled); }} /></label>
 		</section> : null}
 		{status ? <section className="mcp-settings-section" aria-labelledby="mcpClientsTitle">
 			<div className="mcp-section-heading"><span className="mcp-section-icon mcp-client-count" aria-hidden="true">{status.recentClients.length}</span><span><strong id="mcpClientsTitle">Recent clients</strong><small>Self-reported MCP activity for the current target.</small></span></div>
