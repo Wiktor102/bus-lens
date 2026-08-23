@@ -866,7 +866,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 			: "";
 		dependencies.publishDialogCommand({
 			type: "confirmation",
-			eyebrow: "Archive maintenance",
 			title: "Delete folder?",
 			message: `“${folder.name}” will be removed from the archive.`,
 			detail: detail || "Captures already in other folders will not be affected.",
@@ -1042,7 +1041,6 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (!item || rejectLockedMutation(item)) return;
 		dependencies.publishDialogCommand({
 			type: "confirmation",
-			eyebrow: "Archive maintenance",
 			title: "Delete capture?",
 			message: `“${item.name}” will be permanently removed.`,
 			detail: "Captured bytes, framing, notes, annotations, and metadata will be deleted.",

@@ -192,7 +192,6 @@ test("application store isolates typed confirmation actions", () => {
 	const store = createTestApplicationStore();
 	const confirmation: DialogCommandInput = {
 		type: "confirmation",
-		eyebrow: "Archive maintenance",
 		title: "Delete capture?",
 		message: "The capture will be removed.",
 		detail: "This cannot be undone.",
@@ -206,6 +205,7 @@ test("application store isolates typed confirmation actions", () => {
 	const snapshot = selectDialog(store.getSnapshot());
 	assert.equal(snapshot?.type, "confirmation");
 	if (snapshot?.type !== "confirmation") return;
+	assert.equal(snapshot.eyebrow, undefined);
 	assert.equal(snapshot.action.captureId, "capture-1");
 
 	store.send({ type: "dialog/command-changed", command: null });
