@@ -52,7 +52,10 @@ function ProjectRow({
 						aria-label="Project name"
 						value={renaming.name}
 						autoFocus
-						onChange={event => setRenaming({ projectId: project.id, name: event.currentTarget.value })}
+						onChange={event => {
+							const name = event.currentTarget.value;
+							setRenaming({ projectId: project.id, name });
+						}}
 					/>
 					<button className="icon-btn" type="submit" disabled={!projectNameIsValid(renaming.name)} aria-label="Save name">
 						<Check aria-hidden="true" />
@@ -193,7 +196,10 @@ export function ProjectsDialog({ open, onClose }: { open: boolean; onClose: () =
 						ref={nameRef}
 						placeholder="e.g. Bench tests"
 						value={draft}
-						onChange={event => setDraft(event.currentTarget.value)}
+						onChange={event => {
+							const name = event.currentTarget.value;
+							setDraft(name);
+						}}
 					/>
 				</label>
 			<button id="createProjectBtn" className="btn btn-primary" type="submit" disabled={creating || !projectNameIsValid(draft)}>
