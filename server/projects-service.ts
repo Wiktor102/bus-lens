@@ -69,6 +69,9 @@ export class ProjectsService {
 		if (requesterActiveProjectId && projectId === requesterActiveProjectId) {
 			throw new ProjectRegistryError("conflict", "Switch away from a project before deleting it");
 		}
+		if (projectId === this.registry.mcpProjectId()) {
+			throw new ProjectRegistryError("conflict", "Move MCP to another project before deleting it");
+		}
 		const record = this.registry.require(projectId);
 		let releaseDeletion: () => void;
 		try {

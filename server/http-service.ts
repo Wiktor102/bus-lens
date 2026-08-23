@@ -55,11 +55,9 @@ type ServiceOptions = {
 	mcpEndpoint?: string;
 	mcpAgentNotes?: AgentAccessStatus["agentNotes"];
 	mcpToolRegistrar?: McpToolRegistrar;
-	/** Collapses bursts of MRU flips before recreating agent access. */
-	mcpRetargetDebounceMs?: number;
-	/** Keeps replaced agent targets alive this long for in-flight tool calls. */
-	mcpHandoffGraceMs?: number;
 };
+
+export const MCP_RECENT_USE_WINDOW_MS = 30_000;
 
 export type ArchiveHttpService = {
 	server: Server;
@@ -243,89 +241,35 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			target.release();
 		}
 	};
-	// Agents do not send the routing header, so agent access follows the
-	// most-recently-used project and is recreated when that target changes.
-	let mcpTarget = createMcpTarget(defaultContext);
-	let mcpRetargetChain: Promise<void> = Promise.resolve();
-	let mcpClosing = false;
-	const mcpRetargetDebounceMs = Math.max(0, options.mcpRetargetDebounceMs ?? 250);
-	const mcpHandoffGraceMs = Math.max(0, options.mcpHandoffGraceMs ?? 5_000);
-	type RetiredMcpAccess = { timer: NodeJS.Timeout; run: () => Promise<void> };
-	const retiredMcpAccesses: RetiredMcpAccess[] = [];
-	function retireMcpAccess(target: McpTarget): void {
-		let settled = false;
-		const run = async (): Promise<void> => {
-			if (settled) return;
-			settled = true;
-			try {
-				await closeMcpTarget(target);
-			} catch (error) {
-				console.error("Bus Lens MCP close failed", error);
-			}
+	let mcpTarget = createMcpTarget(manager.forProject(registry.mcpProjectId()));
+	const mcpStatus = () => {
+		const project = registry.require(mcpTarget.projectId);
+		return {
+			...mcpTarget.access.getStatus(),
+			project: { id: project.id, name: project.name },
+			recentUseWindowMs: MCP_RECENT_USE_WINDOW_MS
 		};
-		// Replaced targets stay servicable for in-flight tool calls during the
-		// grace window instead of cutting agent sessions off mid-call.
-		const timer = setTimeout(() => {
-			void run();
-		}, mcpHandoffGraceMs);
-		timer.unref?.();
-		retiredMcpAccesses.push({ timer, run });
-	}
-	async function flushRetiredMcpAccesses(): Promise<void> {
-		const pending = retiredMcpAccesses.splice(0);
-		for (const entry of pending) {
-			clearTimeout(entry.timer);
-			await entry.run();
+	};
+	const mcpRecentlyUsed = (): boolean => {
+		const status = mcpTarget.access.getStatus();
+		if (status.activeRequests > 0) return true;
+		if (!status.lastRequestAt) return false;
+		return Date.now() - Date.parse(status.lastRequestAt) < MCP_RECENT_USE_WINDOW_MS;
+	};
+	async function setMcpProject(projectId: string): Promise<void> {
+		if (projectId === mcpTarget.projectId) return;
+		const nextTarget = createMcpTarget(manager.forProject(projectId));
+		try {
+			registry.setMcpProjectId(projectId);
+		} catch (error) {
+			await nextTarget.access.close();
+			nextTarget.release();
+			throw error;
 		}
-	}
-	let wakeMcpQuietWindow: (() => void) | undefined;
-	async function waitForMcpQuietWindow(): Promise<void> {
-		if (!mcpRetargetDebounceMs) return;
-		await new Promise<void>(resolveQuiet => {
-			const timer = setTimeout(() => {
-				wakeMcpQuietWindow = undefined;
-				resolveQuiet();
-			}, mcpRetargetDebounceMs);
-			timer.unref?.();
-			// Shutdown interrupts the window instead of waiting it out.
-			wakeMcpQuietWindow = () => {
-				clearTimeout(timer);
-				resolveQuiet();
-			};
-		});
-	}
-	async function ensureMcpProject(): Promise<McpAccess> {
-		// Shutdown sets this before draining the chain, so a pending retarget
-		// can never recreate agent access (and re-open project handles) after
-		// close() has already torn the manager and root database down.
-		if (mcpClosing) return mcpTarget.access;
-		const mru = registry.mostRecentlyUsed();
-		const targetPath = mru ? resolve(mru.dbPath) : rootDatabasePath;
-		if (targetPath === mcpTarget.databasePath) return mcpTarget.access;
-		const retarget = mcpRetargetChain.then(async () => {
-			// Interleaved traffic across projects flips the MRU rapidly; waiting
-			// out a quiet window collapses each burst into one retarget instead
-			// of recreating agent access (and dropping agent sessions) per flip.
-			await waitForMcpQuietWindow();
-			const latest = registry.mostRecentlyUsed();
-			const nextPath = latest ? resolve(latest.dbPath) : rootDatabasePath;
-			if (nextPath === mcpTarget.databasePath) return;
-			let context = defaultContext;
-			try {
-				context = manager.forProject(latest?.id);
-			} catch {
-				context = defaultContext;
-			}
-			const nextTarget = createMcpTarget(context);
-			const previous = mcpTarget;
-			mcpTarget = nextTarget;
-			retireMcpAccess(previous);
-		}).catch(error => {
-			console.error("Bus Lens MCP retargeting failed", error);
-		});
-		mcpRetargetChain = retarget;
-		await retarget;
-		return mcpTarget.access;
+		const previous = mcpTarget;
+		mcpTarget = nextTarget;
+		await previous.access.close();
+		previous.release();
 	}
 	let activeRequests = 0;
 	let maintenance = false;
@@ -363,12 +307,25 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			activeRequests += 1;
 			requestActive = true;
 			const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
-			if (url.pathname === "/mcp") return await (await ensureMcpProject()).handle(request, response);
+			if (url.pathname === "/mcp") return await mcpTarget.access.handle(request, response);
 			if (segments[0] !== "api") {
 				if (staticDirectory && await serveStatic(response, staticDirectory, url.pathname)) return;
 				return send(response, 404, { error: "Not found" });
 			}
-			if (request.method === "GET" && url.pathname === "/api/agent-access") return send(response, 200, mcpTarget.access.getStatus());
+			if (url.pathname === "/api/agent-access") {
+				if (request.method === "GET") return send(response, 200, mcpStatus());
+				if (request.method === "PUT") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					if (typeof body.projectId !== "string" || !body.projectId) throw new RepositoryValidationError("projectId must be a non-empty string");
+					registry.require(body.projectId);
+					if (body.projectId !== mcpTarget.projectId && mcpRecentlyUsed() && body.force !== true) {
+						return send(response, 409, { error: "MCP was used recently", code: "MCP_RECENTLY_USED", status: mcpStatus() });
+					}
+					await setMcpProject(body.projectId);
+					return send(response, 200, mcpStatus());
+				}
+				return send(response, 405, { error: "Method not allowed" });
+			}
 			if (segments[1] === "projects") {
 				const projectId = segments[2];
 				// CRUD only matches the exact collection/item shape; deeper paths
@@ -407,8 +364,6 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 				if (!endMaintenance) return send(response, 409, { error: "Another database restore is already in progress" });
 				const restoresMcpTarget = mcpTarget.projectId === projectContext.projectId;
 				try {
-					await mcpRetargetChain;
-					await flushRetiredMcpAccesses();
 					try {
 						if (restoresMcpTarget) await closeMcpTarget(mcpTarget);
 						await manager.close(projectContext.projectId);
@@ -417,7 +372,6 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 						const reopenedContext = manager.forProject(projectContext.projectId);
 						if (restoresMcpTarget) mcpTarget = createMcpTarget(reopenedContext);
 					}
-					registry.touch(projectContext.projectId);
 					return send(response, 204, {});
 				} finally {
 					endMaintenance();
@@ -425,10 +379,6 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			}
 			manager.acquire(projectContext.projectId);
 			releaseProject = () => manager.release(projectContext.projectId);
-			// last_used_at feeds MRU agent targeting; reads are ambient noise
-			// (browsing one tab must not steal agent focus from another), while
-			// writes express real intent.
-			if (request.method !== "GET") registry.touch(projectContext.projectId);
 			const { repository } = projectContext;
 			const canonicalQueries = projectContext.queryService;
 			const commandService = projectContext.commandService;
@@ -782,8 +732,7 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 		registry,
 		manager,
 		projects,
-		// Live view: retargeting swaps the underlying access, so a snapshot
-		// here would go stale for embedders after the first MRU change.
+		// Live view: explicit UI routing swaps the underlying access.
 		get mcpAccess() {
 			return mcpTarget.access;
 		},
@@ -796,8 +745,6 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 					firstError ??= error;
 				}
 			};
-			mcpClosing = true;
-			wakeMcpQuietWindow?.();
 			// Stop accepting requests now, but do not wait for long-lived MCP
 			// subscriptions until closing their handler has ended the streams.
 			const httpClose = attempt(() => new Promise<void>((resolveClose, rejectClose) => {
@@ -806,10 +753,6 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 					else resolveClose();
 				});
 			}));
-			// A retarget already chained behind the quiet window must finish (or
-			// be skipped) before the handles it would touch are gone.
-			await attempt(() => mcpRetargetChain);
-			await attempt(flushRetiredMcpAccesses);
 			await attempt(() => closeMcpTarget(mcpTarget));
 			await httpClose;
 			await attempt(() => manager.closeAll());

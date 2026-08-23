@@ -129,41 +129,32 @@ test("the service migrates legacy control tables into the dedicated registry dat
 	});
 });
 
-test("registry touch orders most-recently-used projects", async () => {
+test("the registry stores one explicit MCP project", async () => {
 	await withTemporaryDirectory(async directory => {
 		const database = openDatabase(join(directory, "root.sqlite"));
 		const registry = new ProjectRegistry(database);
-		let clock = 0;
-		const timed = new ProjectRegistry(database, () => new Date(++clock * 1000).toISOString());
-		timed.ensureProject({ id: "a", name: "A", dbPath: join(directory, "a.sqlite") });
-		timed.ensureProject({ id: "b", name: "B", dbPath: join(directory, "b.sqlite") });
-		timed.touch("a");
-		assert.equal(timed.mostRecentlyUsed()?.id, "a");
-		timed.touch("b");
-		assert.equal(timed.mostRecentlyUsed()?.id, "b");
-		assert.equal(registry.list().length, 2);
+		ensureDefaultProject(registry, join(directory, "root.sqlite"));
+		registry.ensureProject({ id: "a", name: "A", dbPath: join(directory, "a.sqlite") });
+		assert.equal(registry.mcpProjectId(), DEFAULT_PROJECT_ID);
+		registry.setMcpProjectId("a");
+		assert.equal(registry.mcpProjectId(), "a");
+		assert.throws(() => registry.setMcpProjectId("missing"), /Unknown project/);
 		database.close();
 	});
 });
 
-test("routed reads do not reorder most-recently-used projects but writes do", async () => {
+test("ordinary project traffic does not change the explicit MCP project", async () => {
 	await withTemporaryDirectory(async directory => {
 		await withHttpService(async ({ service, baseUrl }) => {
 			const labPath = join(directory, "projects", "lab.sqlite");
 			service.registry.ensureProject({ id: "lab", name: "Lab", dbPath: labPath });
-
-			// Reads leave the MRU pointing at the newest registered project.
-			await requestJson(baseUrl, "/api/archive", { projectId: DEFAULT_PROJECT_ID });
-			assert.equal(service.registry.mostRecentlyUsed()?.id, "lab");
-
-			// A write to Default is a real usage signal and retargets the MRU.
-			const put = await requestJson(baseUrl, "/api/captures/default-capture", {
+			const put = await requestJson(baseUrl, "/api/captures/lab-capture", {
 				method: "PUT",
-				projectId: DEFAULT_PROJECT_ID,
-				body: { id: "default-capture", name: "Default capture", messages: [], byteStream: [] }
+				projectId: "lab",
+				body: { id: "lab-capture", name: "Lab capture", messages: [], byteStream: [] }
 			});
 			assert.equal(put.status, 200);
-			assert.equal(service.registry.mostRecentlyUsed()?.id, DEFAULT_PROJECT_ID);
+			assert.equal(service.registry.mcpProjectId(), DEFAULT_PROJECT_ID);
 		}, directory);
 	});
 });
@@ -853,7 +844,7 @@ test("deeper project paths never match item CRUD", async () => {
 	});
 });
 
-test("agent access follows the most-recently-used project", async () => {
+test("agent access changes only through the explicit routing endpoint", async () => {
 	await withHttpService(async ({ baseUrl }) => {
 		const created = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name: "Agent lab" } });
 		const project = created.body as { id: string };
@@ -863,6 +854,13 @@ test("agent access follows the most-recently-used project", async () => {
 			projectId: project.id,
 			body: { id: "agent-lab-capture", name: "Agent lab capture", messages: [], byteStream: [] }
 		});
+		assert.deepEqual(await callListCaptures(baseUrl), []);
+		const guarded = await requestJson(baseUrl, "/api/agent-access", { method: "PUT", body: { projectId: project.id } });
+		assert.equal(guarded.status, 409);
+		assert.equal((guarded.body as { code: string }).code, "MCP_RECENTLY_USED");
+		const routed = await requestJson(baseUrl, "/api/agent-access", { method: "PUT", body: { projectId: project.id, force: true } });
+		assert.equal(routed.status, 200);
+		assert.equal((routed.body as { project: { id: string } }).project.id, project.id);
 
 		const response = await fetch(`${baseUrl}/mcp`, {
 			method: "POST",
@@ -928,7 +926,7 @@ async function callListCaptures(baseUrl: string): Promise<string[]> {
 	return (payload.result?.structuredContent?.data?.captures ?? []).map(capture => capture.id);
 }
 
-test("interleaved writes collapse into one retarget and the exposed access stays live", async () => {
+test("interleaved project writes leave the MCP target unchanged", async () => {
 	await withTemporaryDirectory(async directory => {
 		await withHttpService(async ({ service, baseUrl }) => {
 			const projects: Array<{ id: string; name: string }> = [];
@@ -952,15 +950,17 @@ test("interleaved writes collapse into one retarget and the exposed access stays
 				}
 			}
 
-			const captures = await callListCaptures(baseUrl);
+			assert.equal(service.mcpAccess, initialAccess);
 			const lastProject = projects[projects.length - 1]!;
+			await requestJson(baseUrl, "/api/agent-access", { method: "PUT", body: { projectId: lastProject.id } });
+			const captures = await callListCaptures(baseUrl);
 			assert.deepEqual(captures, [`${lastProject.id}-capture`]);
 			assert.notEqual(service.mcpAccess, initialAccess);
-		}, directory, { mcpRetargetDebounceMs: 10 });
+		}, directory);
 	});
 });
 
-test("replaced agent targets close after the handoff grace window", async () => {
+test("explicit routing closes the replaced target after confirmation", async () => {
 	await withTemporaryDirectory(async directory => {
 		await withHttpService(async ({ service, baseUrl }) => {
 			const created = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name: "Handoff" } });
@@ -973,19 +973,11 @@ test("replaced agent targets close after the handoff grace window", async () => 
 				projectId: project.id,
 				body: { id: "handoff-capture", name: "Handoff capture", messages: [], byteStream: [] }
 			});
-			// No /mcp traffic yet, so nothing has been retired.
-			assert.equal(initialAccess.getStatus().status, "running");
-
-			// The response resumes exactly when the swap completes, so the
-			// previous target must still be inside its grace window here.
+			await requestJson(baseUrl, "/api/agent-access", { method: "PUT", body: { projectId: project.id } });
 			assert.deepEqual(await callListCaptures(baseUrl), ["handoff-capture"]);
 			assert.notEqual(service.mcpAccess, initialAccess);
-			assert.equal(initialAccess.getStatus().status, "running");
-
-			await new Promise(resolveGrace => setTimeout(resolveGrace, 800));
-			// ...and is closed once the window elapses.
 			assert.equal(initialAccess.getStatus().status, "stopped");
-		}, directory, { mcpRetargetDebounceMs: 10, mcpHandoffGraceMs: 300 });
+		}, directory);
 	});
 });
 
@@ -1004,6 +996,7 @@ test("the active agent target stays open across project cache eviction", async (
 				projectId: target.id,
 				body: { id: "pinned-capture", name: "Pinned", messages: [], byteStream: [] }
 			});
+			await requestJson(baseUrl, "/api/agent-access", { method: "PUT", body: { projectId: target.id } });
 			assert.deepEqual(await callListCaptures(baseUrl), ["pinned-capture"]);
 			const targetedAccess = service.mcpAccess;
 
@@ -1014,18 +1007,16 @@ test("the active agent target stays open across project cache eviction", async (
 
 			assert.equal(service.mcpAccess, targetedAccess);
 			assert.deepEqual(await callListCaptures(baseUrl), ["pinned-capture"]);
-		}, directory, { mcpRetargetDebounceMs: 0 });
+		}, directory);
 	});
 });
 
-test("shutdown drains a pending retarget instead of leaking the recreated access", async () => {
+test("shutdown closes the explicitly selected target", async () => {
 	await withTemporaryDirectory(async directory => {
 		const target = await mkdtemp(join(tmpdir(), "bus-lens-projects-shutdown-"));
 		try {
 			const service = createArchiveHttpService({
-				databasePath: join(target, "bus-lens.sqlite"),
-				mcpRetargetDebounceMs: 500,
-				mcpHandoffGraceMs: 20
+				databasePath: join(target, "bus-lens.sqlite")
 			});
 			await new Promise<void>((resolveListen, reject) => {
 				service.server.once("error", reject);
@@ -1043,15 +1034,9 @@ test("shutdown drains a pending retarget instead of leaking the recreated access
 				projectId: project.id,
 				body: { id: "shutdown-capture", name: "Shutdown capture", messages: [], byteStream: [] }
 			});
-
-			// Schedule a debounced retarget, give the /mcp request time to park
-			// inside the quiet window, then shut down before it elapses.
-			void callListCaptures(baseUrl).catch(() => "aborted");
-			await new Promise(resolveSchedule => setTimeout(resolveSchedule, 120));
+			await requestJson(baseUrl, "/api/agent-access", { method: "PUT", body: { projectId: project.id } });
 			await service.close();
 
-			// The chained retarget completed inside close(): the swapped-in
-			// access was closed with everything else instead of leaking.
 			assert.equal(initialAccess.getStatus().status, "stopped");
 			assert.notEqual(service.mcpAccess, initialAccess);
 			assert.equal(service.mcpAccess.getStatus().status, "stopped");

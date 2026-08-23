@@ -73,6 +73,8 @@ import {
 } from "../shared/view-state";
 import type { SendSettings } from "../shared/app-state.ts";
 import { MCP_SETTINGS_PATH, McpSettingsPage, type AgentAccessStatus } from "./mcp-settings-page";
+import { getMcpStatus, McpRecentlyUsedError, setMcpProject } from "./mcp-access";
+import { McpRetargetDialog } from "./mcp-retarget-dialog";
 import { StatusSplitControl } from "./status-split-control";
 import { useArchiveCommands, useArchiveDataLayer, useArchiveNotes, useArchiveSelectionSync, useProjects, useSelectedArchiveCapture, useSendQueryState } from "../data/archive-react";
 import "./styles.css";
@@ -97,14 +99,15 @@ function TopBar({ onOpenProjects }: { onOpenProjects: () => void }) {
 		transportConnected: snapshot.connected,
 		recordingCaptureId: snapshot.recordingCaptureId
 	});
-	const [mcpStatus, setMcpStatus] = useState<AgentAccessStatus["status"] | "checking" | "unavailable">("checking");
+	const [mcpStatus, setMcpStatus] = useState<AgentAccessStatus | "checking" | "unavailable">("checking");
+	const [mcpConfirmation, setMcpConfirmation] = useState<AgentAccessStatus | null>(null);
+	const [movingMcp, setMovingMcp] = useState(false);
 
 	useEffect(() => {
 		let disposed = false;
-		void fetch("/api/agent-access", { headers: { accept: "application/json" } })
-			.then(response => response.ok ? response.json() as Promise<Pick<AgentAccessStatus, "status">> : Promise.reject(new Error("MCP status unavailable")))
+		void getMcpStatus()
 			.then(value => {
-				if (!disposed) setMcpStatus(value.status);
+				if (!disposed) setMcpStatus(value);
 			})
 			.catch(() => {
 				if (!disposed) setMcpStatus("unavailable");
@@ -112,8 +115,32 @@ function TopBar({ onOpenProjects }: { onOpenProjects: () => void }) {
 		return () => { disposed = true; };
 	}, []);
 
+	const activeProjectId = selector.activeValue;
+	const activeProjectName = selector.options.find(option => option.value === activeProjectId)?.label ?? "current project";
+	const mcpMatchesProject = typeof mcpStatus === "object" && mcpStatus.project.id === activeProjectId;
+	const mcpLabel = mcpStatus === "checking"
+		? "MCP checking"
+		: mcpStatus === "unavailable"
+			? "MCP unavailable"
+			: mcpMatchesProject
+				? "MCP this project"
+				: `MCP ${mcpStatus.project.name}`;
+	const moveMcp = async (force: boolean): Promise<void> => {
+		setMovingMcp(true);
+		try {
+			const next = await setMcpProject(activeProjectId, force);
+			setMcpStatus(next);
+			setMcpConfirmation(null);
+		} catch (error) {
+			if (error instanceof McpRecentlyUsedError) setMcpConfirmation(error.status);
+			else setMcpStatus("unavailable");
+		} finally {
+			setMovingMcp(false);
+		}
+	};
+
 	return (
-		<header className="topbar">
+		<><header className="topbar">
 			<div className="brand">
 				<span className="brand-mark" aria-hidden="true">
 					<i />
@@ -162,8 +189,14 @@ function TopBar({ onOpenProjects }: { onOpenProjects: () => void }) {
 				<span className="transport-divider" aria-hidden="true" />
 				<StatusSplitControl
 					statusId="mcpStatusBadge"
-					status={`MCP ${mcpStatus}`}
-					connected={mcpStatus === "running"}
+					status={mcpLabel}
+					connected={mcpMatchesProject}
+					tone={typeof mcpStatus === "object" && !mcpMatchesProject ? "warning" : "default"}
+					statusAction={typeof mcpStatus === "object" && !mcpMatchesProject ? {
+						label: `Move MCP from ${mcpStatus.project.name} to ${activeProjectName}`,
+						disabled: movingMcp,
+						onClick: () => { void moveMcp(false); }
+					} : undefined}
 					action={
 						<a
 							id="mcpSettingsBtn"
@@ -204,6 +237,13 @@ function TopBar({ onOpenProjects }: { onOpenProjects: () => void }) {
 				</button>
 			</div>
 		</header>
+		<McpRetargetDialog
+			status={mcpConfirmation}
+			targetName={activeProjectName}
+			busy={movingMcp}
+			onCancel={() => setMcpConfirmation(null)}
+			onConfirm={() => { void moveMcp(true); }}
+		/></>
 	);
 }
 

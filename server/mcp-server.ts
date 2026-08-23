@@ -116,6 +116,8 @@ export type AgentAccessStatus = Readonly<{
 	readAccess: "available";
 	agentNotes: "not-available-in-this-phase" | "disabled" | "enabled";
 	recentClients: readonly RecentClient[];
+	activeRequests: number;
+	lastRequestAt?: string;
 }>;
 
 export type McpToolRegistrar = (server: McpServer, queries: McpQueryExecutor, recordClient: (context: unknown, server: McpServer) => void, commands: CanonicalCaptureCommandService) => void;
@@ -336,6 +338,8 @@ export function createMcpAccess(options: McpAccessOptions): McpAccess {
 	const commands = new CanonicalCaptureCommandService(options.database);
 	const recentClients: RecentClient[] = [];
 	let running = true;
+	let activeRequests = 0;
+	let lastRequestAt: string | undefined;
 	const agentNotesStatus = (): AgentAccessStatus["agentNotes"] => {
 		if (options.agentNotes && options.agentNotes !== "not-available-in-this-phase") return options.agentNotes;
 		try {
@@ -384,7 +388,9 @@ export function createMcpAccess(options: McpAccessOptions): McpAccess {
 		supportedProtocolEras: MCP_PROTOCOL_VERSIONS,
 		readAccess: "available",
 		agentNotes: agentNotesStatus(),
-		recentClients: recentClients
+		recentClients: recentClients,
+		activeRequests,
+		...(lastRequestAt ? { lastRequestAt } : {})
 	});
 	return {
 		handler: safeHandler,
@@ -392,6 +398,9 @@ export function createMcpAccess(options: McpAccessOptions): McpAccess {
 		endpoint: options.endpoint,
 		getStatus,
 		handle: async (request, response) => {
+			activeRequests += 1;
+			lastRequestAt = new Date().toISOString();
+			try {
 			const hostRejected = hostValidation(new Request(options.endpoint, { headers: request.headers as Record<string, string> }), localhostAllowedHostnames());
 			const originRejected = originValidation(new Request(options.endpoint, { headers: request.headers as Record<string, string> }), localhostAllowedOrigins());
 			// The response helpers are fetch-shaped; plain node:http needs the same
@@ -421,6 +430,9 @@ export function createMcpAccess(options: McpAccessOptions): McpAccess {
 				return;
 			}
 			await nodeHandler(replayableRequest(request, boundedBody.body), response);
+			} finally {
+				activeRequests -= 1;
+			}
 		},
 		close: async () => {
 			running = false;

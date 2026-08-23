@@ -197,24 +197,22 @@ export class ProjectRegistry {
 		return this.require(projectId);
 	}
 
-	touch(projectId: string): void {
-		this.require(projectId);
-		this.database.prepare("UPDATE projects SET last_used_at = @lastUsedAt WHERE id = @id").run({
-			id: projectId,
-			lastUsedAt: this.nowIso()
-		});
-	}
-
 	remove(projectId: string): void {
 		this.require(projectId);
 		this.database.prepare("DELETE FROM projects WHERE id = @id").run({ id: projectId });
 	}
 
-	mostRecentlyUsed(): ProjectRecord | undefined {
-		const row = this.database
-			.prepare("SELECT id, name, db_path, created_at, last_used_at FROM projects ORDER BY last_used_at DESC, id LIMIT 1")
-			.get() as ProjectRow | undefined;
-		return row ? recordFrom(row) : undefined;
+	mcpProjectId(): string {
+		const row = this.database.prepare("SELECT project_id FROM project_routing WHERE key = 'mcp'").get() as { project_id: string } | undefined;
+		return row && this.get(row.project_id) ? row.project_id : DEFAULT_PROJECT_ID;
+	}
+
+	setMcpProjectId(projectId: string): void {
+		this.require(projectId);
+		this.database.prepare(`
+			INSERT INTO project_routing (key, project_id) VALUES ('mcp', @projectId)
+			ON CONFLICT(key) DO UPDATE SET project_id = excluded.project_id
+		`).run({ projectId });
 	}
 }
 
