@@ -10,7 +10,6 @@ import {
 } from "./projects-model";
 
 type RenameDraft = Readonly<{ projectId: string; name: string }>;
-type PendingProjectAction = Readonly<{ projectId: string }>;
 
 function ProjectRow({
 	project,
@@ -121,7 +120,7 @@ export function ProjectsDialog({ open, onClose }: { open: boolean; onClose: () =
 	const [error, setError] = useState<string | null>(null);
 	// Only the row being renamed/deleted locks up; unrelated rows stay
 	// interactive during list refetches and other rows' mutations.
-	const [pendingAction, setPendingAction] = useState<PendingProjectAction | null>(null);
+	const [pendingProjectIds, setPendingProjectIds] = useState<ReadonlySet<string>>(() => new Set());
 	const [creating, setCreating] = useState(false);
 	// A ref keeps the guard synchronous: two rapid Enter presses both see it
 	// before any re-render could update state.
@@ -208,22 +207,30 @@ export function ProjectsDialog({ open, onClose }: { open: boolean; onClose: () =
 						key={project.id}
 						project={project}
 						activeProjectId={activeProjectId}
-						busy={pendingAction?.projectId === project.id}
+						busy={pendingProjectIds.has(project.id)}
 						onRename={(projectId, name) => {
-							setPendingAction({ projectId });
+							setPendingProjectIds(current => new Set(current).add(projectId));
 							void commands.renameProject(projectId, name)
 								.catch(renameError =>
 									setError(renameError instanceof Error ? renameError.message : "Could not rename the project")
 								)
-								.finally(() => setPendingAction(null));
+								.finally(() => setPendingProjectIds(current => {
+									const next = new Set(current);
+									next.delete(projectId);
+									return next;
+								}));
 						}}
 						onDelete={projectId => {
-							setPendingAction({ projectId });
+							setPendingProjectIds(current => new Set(current).add(projectId));
 							void commands.deleteProject(projectId)
 								.catch(deleteError =>
 									setError(deleteError instanceof Error ? deleteError.message : "Could not delete the project")
 								)
-								.finally(() => setPendingAction(null));
+								.finally(() => setPendingProjectIds(current => {
+									const next = new Set(current);
+									next.delete(projectId);
+									return next;
+								}));
 						}}
 					/>
 				))}
