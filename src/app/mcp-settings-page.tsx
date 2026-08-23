@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { createClaudeMcpConfig, createCodexMcpConfig, resolveMcpEndpoint } from "./agent-config";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { useArchiveDataLayer } from "../data/archive-react";
 
 export const MCP_SETTINGS_PATH = "/settings/mcp";
 type ConfigName = "codex" | "claude";
@@ -76,6 +77,7 @@ function AgentConfigCard({ codexConfig, claudeConfig }: { codexConfig: string; c
 }
 
 function AgentAccessPanel() {
+	const { client } = useArchiveDataLayer();
 	const [status, setStatus] = useState<AgentAccessStatus | null>(null);
 	const [savingNotes, setSavingNotes] = useState(false);
 
@@ -98,12 +100,7 @@ function AgentAccessPanel() {
 	const setAgentNotes = async (enabled: boolean): Promise<void> => {
 		setSavingNotes(true);
 		try {
-			const response = await fetch("/api/settings/allow_agent_authored_notes", {
-				method: "PUT",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify(enabled)
-			});
-			if (!response.ok) throw new Error("Could not update agent-note setting");
+			await client.setApplicationSetting("allow_agent_authored_notes", enabled);
 			setStatus(current => current ? { ...current, agentNotes: enabled ? "enabled" : "disabled" } : current);
 		} catch {
 			// The read-only status remains authoritative when the setting write fails.

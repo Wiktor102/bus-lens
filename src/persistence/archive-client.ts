@@ -702,6 +702,9 @@ export class ArchiveClient implements CaptureWriter {
 		await Promise.all((state.sendHistory ?? []).map((item, index) => request(`/history/${encodeURIComponent(String(item.id ?? `history-${index}`))}`, { method: "PUT", ...requestBody(item) })));
 	}
 	async saveSettings(settings: Partial<SendSettings> | undefined): Promise<void> { await request("/settings/send", { method: "PUT", ...requestBody(settings ?? {}) }); }
+	async setApplicationSetting(key: string, value: unknown): Promise<void> {
+		await request(`/settings/${encodeURIComponent(key)}`, { method: "PUT", ...requestBody(value) });
+	}
 
 	async createCapture(command: CreateCaptureRequest): Promise<CaptureState> {
 		return requestJson<CaptureState>("/captures", "POST", command);
