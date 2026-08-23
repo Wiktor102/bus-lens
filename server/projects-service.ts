@@ -71,12 +71,13 @@ export class ProjectsService {
 		}
 		const record = this.registry.require(projectId);
 		await this.manager.close(projectId);
-		this.registry.remove(projectId);
 		const removedPath = `${record.dbPath}.removed`;
-		if (!existsSync(record.dbPath)) return;
-		// Deferred cleanup: `.removed` files currently accumulate across delete
-		// cycles and are never swept.
-		await rename(record.dbPath, removedPath);
+		if (existsSync(record.dbPath)) {
+			// Rename before removing the registry row. A failed soft-delete must
+			// leave the project reachable so the user can retry or recover it.
+			await rename(record.dbPath, removedPath);
+		}
+		this.registry.remove(projectId);
 	}
 
 	private async removeDatabaseFiles(dbPath: string): Promise<void> {

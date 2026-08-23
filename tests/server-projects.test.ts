@@ -465,6 +465,27 @@ test("a failed eager open rolls back project creation", async () => {
 	});
 });
 
+test("a failed soft-delete keeps the project registered", async () => {
+	await withTemporaryDirectory(async directory => {
+		const rootPath = join(directory, "bus-lens.sqlite");
+		const rootDatabase = openDatabase(rootPath);
+		const registry = new ProjectRegistry(rootDatabase);
+		ensureDefaultProject(registry, rootPath);
+		const manager = new DatabaseManager({ rootDatabase, rootDatabasePath: rootPath, registry });
+		const projects = new ProjectsService({ registry, manager, projectsDirectory: join(directory, "projects") });
+		const project = await projects.create("Recoverable");
+		const blockedDestination = `${project.dbPath}.removed`;
+		mkdirSync(blockedDestination, { recursive: true });
+		writeFileSync(join(blockedDestination, "blocker"), "keep destination non-empty");
+
+		await assert.rejects(projects.delete(project.id));
+		assert.equal(registry.get(project.id)?.dbPath, project.dbPath);
+		assert.equal(existsSync(project.dbPath), true);
+
+		rootDatabase.close();
+	});
+});
+
 type HttpFixture = {
 	service: ArchiveHttpService;
 	baseUrl: string;
