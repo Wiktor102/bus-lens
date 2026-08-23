@@ -4,23 +4,28 @@ import { request as httpRequest } from "node:http";
 import test from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
 	CLIENT_CAPABILITIES_META_KEY,
 	CLIENT_INFO_META_KEY,
 	PROTOCOL_VERSION_META_KEY
 } from "@modelcontextprotocol/server";
+import { z } from "zod";
 import { createArchiveHttpService } from "../server/http-service.ts";
 import { assertLoopbackHost } from "../server/config.ts";
-import { MCP_REQUEST_LIMIT_BYTES } from "../server/mcp-server.ts";
+import { MCP_REQUEST_LIMIT_BYTES, type McpToolRegistrar } from "../server/mcp-server.ts";
 
 type JsonSchema = {
 	properties?: Record<string, JsonSchema>;
 	required?: string[];
 };
 
-async function withService(run: (baseUrl: string, service: ReturnType<typeof createArchiveHttpService>) => Promise<void>): Promise<void> {
+async function withService(
+	run: (baseUrl: string, service: ReturnType<typeof createArchiveHttpService>) => Promise<void>,
+	mcpToolRegistrar?: McpToolRegistrar
+): Promise<void> {
 	const directory = await mkdtemp(join(tmpdir(), "bus-lens-mcp-test-"));
-	const service = createArchiveHttpService({ databasePath: join(directory, "archive.sqlite"), mcpEndpoint: "http://127.0.0.1:4174/mcp" });
+	const service = createArchiveHttpService({ databasePath: join(directory, "archive.sqlite"), mcpEndpoint: "http://127.0.0.1:4174/mcp", mcpToolRegistrar });
 	try {
 		await new Promise<void>(resolve => service.server.listen(0, "127.0.0.1", resolve));
 		const address = service.server.address();
@@ -186,4 +191,35 @@ test("agent access status reports stateless recent clients rather than connectio
 		assert.equal(status.recentClients[0]?.reportedClientName, "orientation-test");
 	assert.equal(service.mcpAccess.getStatus().agentNotes, "disabled");
 	});
+});
+
+test("agent access records recent use when an MCP request finishes", async () => {
+	let markStarted!: () => void;
+	let finishRequest!: () => void;
+	const started = new Promise<void>(resolve => { markStarted = resolve; });
+	const mayFinish = new Promise<void>(resolve => { finishRequest = resolve; });
+	const registerWaitTool: McpToolRegistrar = server => {
+		server.registerTool("wait_for_test", { inputSchema: z.object({}) }, async () => {
+			markStarted();
+			await mayFinish;
+			return { content: [{ type: "text" as const, text: "finished" }] };
+		});
+	};
+
+	await withService(async (baseUrl, service) => {
+		const responsePromise = modernCall(baseUrl, "tools/call", { name: "wait_for_test", arguments: {} });
+		await started;
+		assert.equal(service.mcpAccess.getStatus().activeRequests, 1);
+		assert.equal(service.mcpAccess.getStatus().lastRequestAt, undefined);
+
+		await delay(10);
+		const completionBoundary = Date.now();
+		finishRequest();
+		const response = await responsePromise;
+		assert.equal(response.status, 200);
+		const status = service.mcpAccess.getStatus();
+		assert.equal(status.activeRequests, 0);
+		assert.ok(status.lastRequestAt);
+		assert.ok(Date.parse(status.lastRequestAt) >= completionBoundary);
+	}, registerWaitTool);
 });

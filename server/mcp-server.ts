@@ -399,7 +399,6 @@ export function createMcpAccess(options: McpAccessOptions): McpAccess {
 		getStatus,
 		handle: async (request, response) => {
 			activeRequests += 1;
-			lastRequestAt = new Date().toISOString();
 			try {
 			const hostRejected = hostValidation(new Request(options.endpoint, { headers: request.headers as Record<string, string> }), localhostAllowedHostnames());
 			const originRejected = originValidation(new Request(options.endpoint, { headers: request.headers as Record<string, string> }), localhostAllowedOrigins());
@@ -432,6 +431,7 @@ export function createMcpAccess(options: McpAccessOptions): McpAccess {
 			await nodeHandler(replayableRequest(request, boundedBody.body), response);
 			} finally {
 				activeRequests -= 1;
+				lastRequestAt = new Date().toISOString();
 			}
 		},
 		close: async () => {
