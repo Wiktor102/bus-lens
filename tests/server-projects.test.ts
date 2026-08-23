@@ -868,6 +868,35 @@ test("replaced agent targets close after the handoff grace window", async () => 
 	});
 });
 
+test("the active agent target stays open across project cache eviction", async () => {
+	await withTemporaryDirectory(async directory => {
+		await withHttpService(async ({ service, baseUrl }) => {
+			const evictionProjectIds: string[] = [];
+			for (let index = 0; index < 10; index += 1) {
+				const created = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name: `Eviction ${index}` } });
+				evictionProjectIds.push((created.body as { id: string }).id);
+			}
+			const targetResponse = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name: "Agent target" } });
+			const target = targetResponse.body as { id: string };
+			await requestJson(baseUrl, "/api/captures/pinned-capture", {
+				method: "PUT",
+				projectId: target.id,
+				body: { id: "pinned-capture", name: "Pinned", messages: [], byteStream: [] }
+			});
+			assert.deepEqual(await callListCaptures(baseUrl), ["pinned-capture"]);
+			const targetedAccess = service.mcpAccess;
+
+			for (const projectId of evictionProjectIds) {
+				const response = await requestJson(baseUrl, "/api/archive", { projectId });
+				assert.equal(response.status, 200);
+			}
+
+			assert.equal(service.mcpAccess, targetedAccess);
+			assert.deepEqual(await callListCaptures(baseUrl), ["pinned-capture"]);
+		}, directory, { mcpRetargetDebounceMs: 0 });
+	});
+});
+
 test("shutdown drains a pending retarget instead of leaking the recreated access", async () => {
 	await withTemporaryDirectory(async directory => {
 		const target = await mkdtemp(join(tmpdir(), "bus-lens-projects-shutdown-"));

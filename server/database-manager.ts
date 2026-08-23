@@ -123,10 +123,12 @@ export class DatabaseManager {
 		}
 		this.inFlight.delete(projectId);
 		const pending = this.pendingCloses.get(projectId);
-		if (!pending) return;
-		this.pendingCloses.delete(projectId);
-		this.closeNow(projectId);
-		pending.resolve();
+		if (pending) {
+			this.pendingCloses.delete(projectId);
+			this.closeNow(projectId);
+			pending.resolve();
+		}
+		this.evictBeyondCapacity();
 	}
 
 	/** Resolves once the last in-flight request for the project has finished. */

@@ -208,33 +208,54 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 		registerComparisonTools(server, queries, recordClient);
 		registerAgentNoteTools(server, queries, recordClient, commands);
 	};
-	const createMcpAccessForContext = (context: ProjectDatabaseContext): McpAccess =>
-		createMcpAccess({
-			database: context.database,
-			databasePath: context.databasePath,
-			endpoint: options.mcpEndpoint ?? "http://127.0.0.1/mcp",
-			serverVersion: "1.0.0",
-			agentNotes: options.mcpAgentNotes,
-			toolRegistrar: options.mcpToolRegistrar ?? phase4ToolRegistrar
-		});
+	type McpTarget = { access: McpAccess; databasePath: string; projectId: string; release: () => void };
+	const createMcpTarget = (context: ProjectDatabaseContext): McpTarget => {
+		manager.acquire(context.projectId);
+		try {
+			const access = createMcpAccess({
+				database: context.database,
+				databasePath: context.databasePath,
+				endpoint: options.mcpEndpoint ?? "http://127.0.0.1/mcp",
+				serverVersion: "1.0.0",
+				agentNotes: options.mcpAgentNotes,
+				toolRegistrar: options.mcpToolRegistrar ?? phase4ToolRegistrar
+			});
+			let released = false;
+			return {
+				access,
+				databasePath: context.databasePath,
+				projectId: context.projectId,
+				release: () => {
+					if (released) return;
+					released = true;
+					manager.release(context.projectId);
+				}
+			};
+		} catch (error) {
+			manager.release(context.projectId);
+			throw error;
+		}
+	};
 	// Agents do not send the routing header, so agent access follows the
 	// most-recently-used project and is recreated when that target changes.
-	let mcpTarget = { access: createMcpAccessForContext(defaultContext), databasePath: defaultContext.databasePath };
+	let mcpTarget = createMcpTarget(defaultContext);
 	let mcpRetargetChain: Promise<void> = Promise.resolve();
 	let mcpClosing = false;
 	const mcpRetargetDebounceMs = Math.max(0, options.mcpRetargetDebounceMs ?? 250);
 	const mcpHandoffGraceMs = Math.max(0, options.mcpHandoffGraceMs ?? 5_000);
 	type RetiredMcpAccess = { timer: NodeJS.Timeout; run: () => Promise<void> };
 	const retiredMcpAccesses: RetiredMcpAccess[] = [];
-	function retireMcpAccess(access: McpAccess): void {
+	function retireMcpAccess(target: McpTarget): void {
 		let settled = false;
 		const run = async (): Promise<void> => {
 			if (settled) return;
 			settled = true;
 			try {
-				await access.close();
+				await target.access.close();
 			} catch (error) {
 				console.error("Bus Lens MCP close failed", error);
+			} finally {
+				target.release();
 			}
 		};
 		// Replaced targets stay servicable for in-flight tool calls during the
@@ -290,9 +311,9 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			} catch {
 				context = defaultContext;
 			}
-			const nextAccess = createMcpAccessForContext(context);
-			const previous = mcpTarget.access;
-			mcpTarget = { access: nextAccess, databasePath: nextPath };
+			const nextTarget = createMcpTarget(context);
+			const previous = mcpTarget;
+			mcpTarget = nextTarget;
 			retireMcpAccess(previous);
 		}).catch(error => {
 			console.error("Bus Lens MCP retargeting failed", error);
@@ -772,6 +793,7 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			await mcpRetargetChain;
 			await flushRetiredMcpAccesses();
 			await mcpTarget.access.close();
+			mcpTarget.release();
 			await new Promise<void>(resolveClose => server.close(() => resolveClose()));
 			manager.closeAll();
 			rootDatabase.close();
