@@ -6,6 +6,11 @@ export type ActiveProjectStorage = {
 	removeItem?(key: string): void;
 };
 
+export type TabProjectSelection = Readonly<{
+	projectId: string | null;
+	storage: ActiveProjectStorage;
+}>;
+
 function defaultStorage(): ActiveProjectStorage | undefined {
 	try {
 		return globalThis.localStorage;
@@ -46,4 +51,26 @@ export function clearActiveProjectId(storage: ActiveProjectStorage | undefined =
 	} catch {
 		// Nothing to recover; reading already treats a failed read as absent.
 	}
+}
+
+export function createTabProjectSelection(
+	tabStorage: ActiveProjectStorage,
+	preferenceStorage: ActiveProjectStorage
+): TabProjectSelection {
+	const projectId = readActiveProjectId(tabStorage) ?? readActiveProjectId(preferenceStorage);
+	if (projectId) writeActiveProjectId(projectId, tabStorage);
+	return {
+		projectId,
+		storage: {
+			getItem: key => tabStorage.getItem(key),
+			setItem: (key, value) => {
+				tabStorage.setItem?.(key, value);
+				preferenceStorage.setItem?.(key, value);
+			},
+			removeItem: key => {
+				tabStorage.removeItem?.(key);
+				preferenceStorage.removeItem?.(key);
+			}
+		}
+	};
 }

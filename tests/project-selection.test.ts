@@ -4,6 +4,7 @@ import { QueryClient } from "@tanstack/react-query";
 import {
 	ACTIVE_PROJECT_STORAGE_KEY,
 	clearActiveProjectId,
+	createTabProjectSelection,
 	readActiveProjectId,
 	writeActiveProjectId
 } from "../src/persistence/active-project.ts";
@@ -40,6 +41,22 @@ test("active project ids persist to and clear from storage", () => {
 	assert.equal(readActiveProjectId(storage), null);
 	clearActiveProjectId(storage);
 	assert.equal(map.size, 0);
+});
+
+test("tab selections stay isolated while new tabs inherit the last preference", () => {
+	const preference = storageOf(memoryStorage());
+	writeActiveProjectId("preferred", preference);
+	const tabAStorage = storageOf(memoryStorage());
+	const tabBStorage = storageOf(memoryStorage());
+	const tabA = createTabProjectSelection(tabAStorage, preference);
+	const tabB = createTabProjectSelection(tabBStorage, preference);
+
+	writeActiveProjectId("tab-b", tabB.storage);
+	assert.equal(readActiveProjectId(tabAStorage), "preferred");
+	assert.equal(readActiveProjectId(tabBStorage), "tab-b");
+	assert.equal(readActiveProjectId(preference), "tab-b");
+	assert.equal(tabA.projectId, "preferred");
+	assert.equal(tabB.projectId, "preferred");
 });
 
 test("storage failures degrade to an absent project id", () => {

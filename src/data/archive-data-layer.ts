@@ -48,6 +48,7 @@ export type ArchiveDataLayerStorage = StateStorage & {
 export type ArchiveDataLayerOptions = Readonly<{
 	/** Injectable for tests; production reloads so every controller starts clean. */
 	reloadWindow?: () => void;
+	activeProjectStorage?: ArchiveDataLayerStorage;
 }>;
 
 export type ArchiveCommandError = Error & {
@@ -567,7 +568,7 @@ export function createArchiveDataLayer(
 			// stored id missing from the registry would poison every routed
 			// request with 404s and render a blank selector, so it heals itself
 			// once back to Default.
-			const stored = readActiveProjectId(legacyStorage);
+			const stored = readActiveProjectId(projectStorage);
 			if (stored && !projects.some(project => project.id === stored)) commands.forgetActiveProject();
 			return projects;
 		},
@@ -578,24 +579,25 @@ export function createArchiveDataLayer(
 			if (openRecordingSessions > 0) {
 				throw commandError("switchActiveProject", new Error("Stop recording before switching projects"));
 			}
-			const current = readActiveProjectId(legacyStorage);
+			const current = readActiveProjectId(projectStorage);
 			if (current === projectId) return;
-			writeActiveProjectId(projectId, legacyStorage);
+			writeActiveProjectId(projectId, projectStorage);
 			// Every archive query is keyed under ["archive"]; dropping the subtree
 			// guarantees the reloaded page refetches from the new project database.
 			queryClient.removeQueries({ queryKey: archiveQueryKeys.all });
 			reloadWindow();
 		},
 		forgetActiveProject: () => {
-			clearActiveProjectId(legacyStorage);
+			clearActiveProjectId(projectStorage);
 			queryClient.removeQueries({ queryKey: archiveQueryKeys.all });
 			reloadWindow();
 		},
-		activeProjectId: () => readActiveProjectId(legacyStorage),
+		activeProjectId: () => readActiveProjectId(projectStorage),
 		recordingWriter
 	};
 
 	const legacyStorage = storage || browserStorage();
+	const projectStorage = options?.activeProjectStorage ?? legacyStorage;
 	const legacyArchive = readLegacyArchive(legacyStorage);
 	const ready = (async () => {
 		await client.health();
