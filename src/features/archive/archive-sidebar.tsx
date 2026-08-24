@@ -9,7 +9,7 @@ import {
 import { getArchiveActions } from "./archive-bridge";
 import { type ArchiveCapture, type ArchiveGroup } from "./archive-list";
 import { captureStorageLabel, captureStorageUiStatus } from "../capture/capture-storage";
-import { ArrowUp, Check, ChevronRight, ChevronsDownUp, ChevronsUpDown, Copy, Download, Folder, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
+import { ArrowUp, Check, ChevronRight, ChevronsDownUp, ChevronsUpDown, Copy, Download, Folder, Pencil, Plus, Search, Trash, Upload, X } from "lucide-react";
 import { useArchiveGroups, useArchiveList, useSelectedCaptureId } from "../../data/archive-react.tsx";
 
 const FOLDER_ICON = (
@@ -423,7 +423,7 @@ function FolderContextMenu({
 					onDelete(state.folderId);
 				}}
 			>
-				<Trash2 aria-hidden="true" />
+				<Trash aria-hidden="true" />
 				<span>Delete</span>
 			</button>
 		</div>
@@ -604,7 +604,7 @@ function CaptureContextMenu({
 					actions.deleteCapture(state.captureId);
 				}}
 			>
-				<Trash2 aria-hidden="true" />
+				<Trash aria-hidden="true" />
 				<span>Delete</span>
 			</button>
 		</div>

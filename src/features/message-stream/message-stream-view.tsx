@@ -42,7 +42,7 @@ import {
 	Plus,
 	RotateCcw,
 	Rows3,
-	Trash2
+	Trash
 } from "lucide-react";
 
 type CSSVariableStyle = CSSProperties & Record<`--${string}`, string | number | undefined>;
@@ -682,7 +682,7 @@ function MessageContextMenu({ state, onClose, mutationsDisabled }: {
 						disabled={mutationsDisabled || !state.canDelete}
 						onClick={() => handleAction("delete-section")}
 					>
-						<Trash2 aria-hidden="true" />
+						<Trash aria-hidden="true" />
 						<span>Delete section</span>
 					</button>
 				</>
@@ -705,7 +705,7 @@ function MessageContextMenu({ state, onClose, mutationsDisabled }: {
 						aria-label={`${deleteLabel} (keep data hidden)`}
 						onClick={() => handleAction("delete")}
 					>
-						<Trash2 aria-hidden="true" />
+						<Trash aria-hidden="true" />
 						<span>{deleteLabel}</span>
 					</button>
 					<button

@@ -13,7 +13,7 @@ import {
 	type ContextDialogDraft,
 	type ExportFormat
 } from "./dialog-model";
-import { AlertTriangle, Check, Plus, Trash2, X } from "lucide-react";
+import { AlertTriangle, Check, Plus, Trash, X } from "lucide-react";
 
 function isCancelSubmit(event: FormEvent<HTMLFormElement>): boolean {
 	return ((event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null)?.value === "cancel";
@@ -124,7 +124,7 @@ export function ConfirmationDialog() {
 					Keep it
 				</button>
 				<button className="btn btn-danger confirmation-confirm" type="button" onClick={confirm}>
-					<Trash2 aria-hidden="true" />
+					<Trash aria-hidden="true" />
 					{confirmationCommand?.confirmLabel || "Continue"}
 				</button>
 			</div>

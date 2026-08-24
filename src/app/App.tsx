@@ -61,7 +61,7 @@ import {
 	Search,
 	Settings,
 	Slash,
-	Trash2,
+	Trash,
 	X
 } from "lucide-react";
 import {
@@ -338,7 +338,7 @@ function CaptureHeader() {
 							}}
 							disabled={locked}
 						>
-							<Trash2 aria-hidden="true" />
+							<Trash aria-hidden="true" />
 							<span>Clear messages</span>
 						</button>
 						<button
@@ -351,7 +351,7 @@ function CaptureHeader() {
 							}}
 							disabled={locked}
 						>
-							<Trash2 aria-hidden="true" />
+							<Trash aria-hidden="true" />
 							<span>Delete capture</span>
 						</button>
 					</div>
