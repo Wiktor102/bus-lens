@@ -171,6 +171,7 @@ export function createDataTransferController(dependencies: DataTransferDependenc
 			let importedSettings = settings();
 			const existingFolders = [...folders()];
 			const existingCaptures = [...captures()];
+			const existingQueue = [...queue()];
 			if (file.name.toLowerCase().endsWith(".json")) {
 				const imported: unknown = JSON.parse(text);
 				const importedArchive = isRecord(imported) ? imported : undefined;
@@ -247,7 +248,7 @@ export function createDataTransferController(dependencies: DataTransferDependenc
 				await Promise.all([
 					...importedCaptures.map(capture => dependencies.archiveCommands!.saveLegacyCapture(capture)),
 					...importedFolders.map(folder => dependencies.archiveCommands!.saveFolder(folder)),
-					...importedQueue.map((item, position) => dependencies.archiveCommands!.saveQueueItem(item, existingCaptures.length + position)),
+					...[...importedQueue, ...existingQueue].flatMap((item, position) => item.id ? [dependencies.archiveCommands!.saveQueueItem(item, position)] : []),
 					...importedHistory.map(item => dependencies.archiveCommands!.saveHistoryItem(item)),
 					...(importedQueue.length || importedHistory.length || file.name.toLowerCase().endsWith(".json") ? [dependencies.archiveCommands.saveSettings(importedSettings)] : []),
 					dependencies.archiveCommands.persistArchiveIndex({

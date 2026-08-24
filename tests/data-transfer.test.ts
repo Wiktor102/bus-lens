@@ -5,7 +5,8 @@ import {
 	parseDump,
 	type DataTransferFile
 } from "../src/features/data-transfer/data-transfer.ts";
-import type { AppState } from "../src/shared/app-state.ts";
+import type { ArchiveCommands } from "../src/data/archive-data-layer.ts";
+import type { AppState, SendQueueEntry } from "../src/shared/app-state.ts";
 import type { Capture } from "../src/features/capture/capture-framing.ts";
 
 const fixedNow = Date.UTC(2024, 0, 2, 12, 0, 0);
@@ -104,6 +105,54 @@ test("imports a text dump through injected file, persistence, rendering, and toa
 	assert.equal(activeId, "generated-2");
 	assert.equal(state.captures[0].name, "Imported · imported 1");
 	assert.deepEqual(state.captures[0].messages?.map(message => message.bytes), [[0xc2, 0x08, 0x5d]]);
+});
+
+test("persists imported queue entries ahead of existing queue entries", async () => {
+	const state = stateWithExistingCapture();
+	state.sendQueue = [{ id: "queued-existing", bytes: [9], createdAt: 1 }];
+	const savedQueue: Array<{ id?: string; position: number }> = [];
+	const archiveCommands = {
+		saveLegacyCapture: async () => {},
+		saveFolder: async () => {},
+		saveHistoryItem: async () => {},
+		saveSettings: async () => {},
+		persistArchiveIndex: async () => {},
+		saveQueueItem: async (item: SendQueueEntry, position: number) => {
+			savedQueue.push({ id: item.id, position });
+		}
+	} as unknown as ArchiveCommands;
+	const controller = createDataTransferController({
+		state,
+		capture: () => state.captures[0],
+		getActiveId: () => state.activeId,
+		setActiveId: () => {},
+		render: () => {},
+		showToast: () => {},
+		download: () => {},
+		archiveCommands,
+		generateId: nextIdFactory(),
+		nowIso: () => "2024-01-02T12:00:00.000Z"
+	});
+
+	const file: DataTransferFile = {
+		name: "archive.json",
+		text: async () => JSON.stringify({
+			app: "Bus Lens",
+			captures: [{ id: "imported-capture", name: "Imported capture", view: "Imported", frameSize: 3, messages: [] }],
+			sendQueue: [
+				{ id: "imported-first", bytes: [170], createdAt: 5 },
+				{ id: "imported-second", bytes: [187] }
+			]
+		})
+	};
+	await controller.importFile(file);
+
+	assert.deepEqual(savedQueue, [
+		{ id: "imported-first", position: 0 },
+		{ id: "imported-second", position: 1 },
+		{ id: "queued-existing", position: 2 }
+	]);
+	assert.deepEqual(state.sendQueue.map(item => item.id), ["imported-first", "imported-second", "queued-existing"]);
 });
 
 test("exports JSON through dependency injection without a browser download", () => {
