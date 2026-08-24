@@ -687,23 +687,10 @@ p {
 .folder-modal {
 	width: min(460px, calc(100vw - 30px));
 }
-.folder-modal .modal-heading {
-	display: grid;
-	grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-	align-items: center;
-}
-.folder-modal .modal-heading > div {
-	grid-column: 2;
-	min-width: 0;
-	text-align: center;
-}
-.folder-modal .modal-heading > .icon-btn {
-	grid-column: 3;
-	justify-self: end;
-}
 .folder-modal .modal-heading h2 {
-	margin-top: 0;
-	text-align: center;
+	margin: 0;
+	text-box-trim: trim-both;
+	text-box-edge: cap alphabetic;
 }
 
 .main-panel {
