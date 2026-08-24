@@ -36,7 +36,7 @@ import {
 	ExportDialog,
 	PatternRemarkDialog
 } from "../features/dialogs/dialogs";
-import { MANAGE_PROJECTS_VALUE, deriveProjectSelectorState } from "../features/projects/projects-model";
+import { deriveProjectSelectorState } from "../features/projects/projects-model";
 import { ProjectsDialog } from "../features/projects/projects-dialog";
 import { MessageStream } from "../features/message-stream/message-stream-view";
 import { useApplicationSelector, useApplicationSend } from "./application-store-provider";
@@ -126,32 +126,39 @@ function TopBar({ onOpenProjects }: { onOpenProjects: () => void }) {
 				</div>
 			</div>
 			<div className="transport">
-				<label
-					id="projectSelectLabel"
-					className="project-select"
-					title={selector.disabledReason ?? "Active project"}
-				>
-					Project
-					<select
-						id="projectSelect"
-						value={selector.activeValue}
-						disabled={selector.disabled}
-						aria-label="Active project"
-						onChange={event => {
-							const value = event.currentTarget.value;
-							if (value === MANAGE_PROJECTS_VALUE) {
-								onOpenProjects();
-								return;
-							}
-							void commands.switchActiveProject(value);
-						}}
+				<div className="status-split-control project-split-control">
+					<label
+						id="projectSelectLabel"
+						className="project-select"
+						title={selector.disabledReason ?? "Active project"}
 					>
-						{selector.options.map(option => (
-							<option key={option.value} value={option.value}>{option.label}</option>
-						))}
-						<option value={MANAGE_PROJECTS_VALUE}>Manage…</option>
-					</select>
-				</label>
+						<span>Project</span>
+						<select
+							id="projectSelect"
+							value={selector.activeValue}
+							disabled={selector.disabled}
+							aria-label="Active project"
+							onChange={event => {
+								const value = event.currentTarget.value;
+								void commands.switchActiveProject(value);
+							}}
+						>
+							{selector.options.map(option => (
+								<option key={option.value} value={option.value}>{option.label}</option>
+							))}
+						</select>
+					</label>
+					<button
+						id="manageProjectsBtn"
+						className="status-split-action status-split-icon-action"
+						type="button"
+						aria-label="Manage projects"
+						title="Manage projects"
+						onClick={() => onOpenProjects()}
+					>
+						<Settings aria-hidden="true" />
+					</button>
+				</div>
 				<span className="transport-divider" aria-hidden="true" />
 				<StatusSplitControl
 					statusId="mcpStatusBadge"
