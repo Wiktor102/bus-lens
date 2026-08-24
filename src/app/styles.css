@@ -3397,7 +3397,7 @@ tr:hover .row-action,
 	height: 16px;
 }
 .project-create .btn span {
-	transform: translateY(-1px);
+	transform: translateY(1px);
 }
 .projects-list {
 	list-style: none;
