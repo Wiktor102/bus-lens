@@ -98,10 +98,19 @@ function entityList(repository: ArchiveRepository, entity: Entity) {
 	return repository.listHistory();
 }
 
+function queuePosition(document: JsonDocument): number | undefined {
+	const value = document.position;
+	if (value === undefined) return undefined;
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+		throw new RepositoryValidationError("Queue position must be a non-negative integer");
+	}
+	return value;
+}
+
 function entityPut(repository: ArchiveRepository, entity: Entity, id: string, document: JsonDocument, version?: number) {
 	if (entity === "captures") return repository.putCapture(id, document, version);
 	if (entity === "folders") return repository.putFolder(id, document, version);
-	if (entity === "queue") return repository.putQueueItem(id, document, version);
+	if (entity === "queue") return repository.putQueueItem(id, document, version, queuePosition(document));
 	return repository.putHistoryItem(id, document, version);
 }
 
