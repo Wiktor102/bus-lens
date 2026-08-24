@@ -2358,7 +2358,10 @@ tr:hover .row-action,
 	width: 14px;
 	height: 14px;
 }
-.modal form {
+.modal > form {
+	padding: 22px;
+}
+.managed-modal-content {
 	padding: 22px;
 }
 .canonicalization-modal {
@@ -3363,10 +3366,11 @@ tr:hover .row-action,
 	width: min(560px, 92vw);
 }
 .project-create {
-	display: flex;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
 	align-items: end;
 	gap: 10px;
-	margin-bottom: 14px;
+	margin: 18px 0;
 }
 .project-create .field {
 	flex: 1;
@@ -3377,13 +3381,13 @@ tr:hover .row-action,
 	margin: 0;
 	padding: 0;
 	display: grid;
-	gap: 8px;
+	gap: 6px;
 	max-height: 320px;
 	overflow: auto;
 }
 .project-row {
 	border: 1px solid var(--line);
-	padding: 10px 12px;
+	padding: 11px 12px;
 }
 .project-row[data-active] {
 	border-color: var(--acid-dim);
@@ -3449,5 +3453,5 @@ tr:hover .row-action,
 .project-switch-hint {
 	color: var(--muted);
 	font: 11px var(--sans);
-	margin: 12px 0 0;
+	margin: 14px 0 0;
 }

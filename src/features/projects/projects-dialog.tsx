@@ -8,6 +8,7 @@ import {
 	projectDeletionBlocker,
 	projectNameIsValid
 } from "./projects-model";
+import { ManagedDialog } from "../dialogs/dialog-components";
 
 type RenameDraft = Readonly<{ projectId: string; name: string }>;
 
@@ -115,7 +116,6 @@ function ProjectRow({
 export function ProjectsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
 	const commands = useArchiveCommands();
 	const projectsQuery = useProjects();
-	const dialogRef = useRef<HTMLDialogElement>(null);
 	const nameRef = useRef<HTMLInputElement>(null);
 	const activeProjectId = commands.activeProjectId();
 	const projects = projectsQuery.data ?? [];
@@ -130,15 +130,13 @@ export function ProjectsDialog({ open, onClose }: { open: boolean; onClose: () =
 	const creatingRef = useRef(false);
 
 	useEffect(() => {
-		const dialog = dialogRef.current;
-		if (!dialog) return;
 		if (!open) {
-			if (dialog.open) dialog.close();
 			setDraft("");
 			setError(null);
 			return;
 		}
-		if (!dialog.open) dialog.showModal();
+		const frame = requestAnimationFrame(() => nameRef.current?.focus());
+		return () => cancelAnimationFrame(frame);
 	}, [open]);
 
 	const create = async () => {
@@ -160,25 +158,19 @@ export function ProjectsDialog({ open, onClose }: { open: boolean; onClose: () =
 	};
 
 	return (
-		<dialog
+		<ManagedDialog
 			id="projectsDialog"
-			className="modal projects-modal"
-			ref={dialogRef}
-			onClose={() => onClose()}
-			onCancel={event => {
-				event.preventDefault();
-				onClose();
-			}}
-		>
-			<div className="modal-heading">
-				<div>
-					<span className="eyebrow">Workspaces</span>
-					<h2>Projects</h2>
-				</div>
-				<button className="icon-btn" type="button" aria-label="Close" onClick={() => onClose()}>
-					<X aria-hidden="true" />
+			className="projects-modal"
+			open={open}
+			eyebrow="Workspaces"
+			title="Projects"
+			onClose={onClose}
+			actions={
+				<button className="btn btn-secondary" type="button" onClick={() => onClose()}>
+					Done
 				</button>
-			</div>
+			}
+		>
 			<p className="modal-lede">
 				Each project is a separate capture database with its own folders, notes, and send queue.
 			</p>
@@ -247,11 +239,6 @@ export function ProjectsDialog({ open, onClose }: { open: boolean; onClose: () =
 			<p className="project-switch-hint">
 				Use the project selector in the toolbar to switch; switching reloads the workbench.
 			</p>
-			<div className="modal-actions">
-				<button className="btn btn-secondary" type="button" onClick={() => onClose()}>
-					Done
-				</button>
-			</div>
-		</dialog>
+		</ManagedDialog>
 	);
 }
