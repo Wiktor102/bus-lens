@@ -670,7 +670,6 @@ export function ArchiveFolderDialog({
 			>
 				<div className="modal-heading">
 					<div>
-						<span className="eyebrow">Archive organization</span>
 						<h2>{title}</h2>
 					</div>
 					<button className="icon-btn" value="cancel" formMethod="dialog" formNoValidate aria-label="Close">
