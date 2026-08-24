@@ -3334,7 +3334,7 @@ tr:hover .row-action,
 	display: inline-flex;
 	align-items: center;
 	gap: 8px;
-	padding-left: 10px;
+	padding: 0 9px 0 10px;
 	white-space: nowrap;
 }
 .project-split-control {
@@ -3375,6 +3375,18 @@ tr:hover .row-action,
 .project-create .field {
 	flex: 1;
 	margin: 0;
+}
+.project-create .btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 7px;
+	height: 36px;
+	padding: 0 14px;
+}
+.project-create .btn svg {
+	width: 16px;
+	height: 16px;
 }
 .projects-list {
 	list-style: none;
