@@ -193,9 +193,9 @@ export function ProjectsDialog({ open, onClose }: { open: boolean; onClose: () =
 						}}
 					/>
 				</label>
-			<button id="createProjectBtn" className="btn btn-primary" type="submit" disabled={creating || !projectNameIsValid(draft)}>
-				<Plus aria-hidden="true" /> Create
-			</button>
+				<button id="createProjectBtn" className="btn btn-primary" type="submit" disabled={creating || !projectNameIsValid(draft)}>
+					<Plus aria-hidden="true" /> <span>Create</span>
+				</button>
 			</form>
 			{error ? <p className="conversion-error" role="alert">{error}</p> : null}
 			<ul id="projectsList" className="projects-list">
