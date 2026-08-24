@@ -657,13 +657,9 @@ export function ArchiveFolderDialog({
 					if (submitter?.value === "cancel") return;
 					event.preventDefault();
 					if (!valid || !draft) return;
-					if (actions.saveFolder(name, editingId)) {
-						if (!editingId) {
-							const createdFolder = archive.folders.find(
-								folder => folder.name.toLowerCase() === name.toLowerCase()
-							);
-							if (createdFolder) onCreated?.(createdFolder.id);
-						}
+					if (actions.saveFolder(name, editingId, folderId => {
+						if (!editingId) onCreated?.(folderId);
+					})) {
 						if (dialogRef.current?.open) dialogRef.current.close();
 						else onClose();
 					}

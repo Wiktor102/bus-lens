@@ -821,14 +821,15 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		if (item?.id) dependencies.openCanonicalization?.(String(item.id));
 	}
 
-	function saveFolder(name: string, editingId: string | null) {
+	function saveFolder(name: string, editingId: string | null, onCreated?: (folderId: string) => void) {
 		const trimmedName = String(name).trim();
 		const duplicate = folders().some(
 			folder => folder.id !== editingId && folder.name.toLowerCase() === trimmedName.toLowerCase()
 		);
 		if (!trimmedName || duplicate) return false;
 		const folder = folders().find(item => item.id === editingId);
-		let savedFolder: typeof folder;
+		const creating = !folder;
+		let savedFolder: StoredFolder;
 		if (folder) {
 			savedFolder = { ...folder, name: trimmedName };
 			dependencies.showToast("Folder renamed");
@@ -843,15 +844,17 @@ export function createCaptureController(dependencies: CaptureControllerDependenc
 		}
 		if (savedFolder && dependencies.archiveCommands) {
 			void dependencies.archiveCommands.saveFolder({ ...savedFolder }).then(() => {
+				if (creating) onCreated?.(savedFolder.id);
 			}).catch(error => {
-				reportFailure(savedFolder!.id, error);
+				reportFailure(savedFolder.id, error);
 				dependencies.render();
 			});
 		} else if (savedFolder && compatibilityState) {
 			compatibilityState.folders = folder
-				? compatibilityState.folders.map(item => item.id === editingId ? savedFolder! : item)
+				? compatibilityState.folders.map(item => item.id === editingId ? savedFolder : item)
 				: [...compatibilityState.folders, savedFolder];
 			persistArchiveIndex();
+			if (creating) onCreated?.(savedFolder.id);
 		}
 		return true;
 	}

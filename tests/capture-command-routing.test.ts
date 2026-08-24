@@ -140,6 +140,45 @@ test("collapsing all archive folders persists folder and unfiled state together"
 	assert.equal(savedIndex?.unfiledCollapsed, true);
 });
 
+test("reports a created folder id after the folder write completes", async () => {
+	const state = {
+		captures: [],
+		folders: [],
+		unfiledCollapsed: false
+	} as unknown as AppState;
+	let savedFolderId = "";
+	let finishSave!: () => void;
+	const save = new Promise<void>(resolve => { finishSave = resolve; });
+	const archiveCommands = {
+		saveFolder: async (folder: { id: string }) => {
+			savedFolderId = folder.id;
+			await save;
+		}
+	} as unknown as ArchiveCommands;
+	let createdFolderId: string | undefined;
+	const controller = createCaptureController({
+		state,
+		capture: () => undefined,
+		getActiveId: () => null,
+		setActiveId: () => {},
+		archiveCommands,
+		render: () => {},
+		renderMessages: () => {},
+		showToast: () => {},
+		transport: { isRecording: () => false, stopRecording: async () => {} },
+		publishDialogCommand: () => {}
+	});
+
+	assert.equal(controller.saveFolder("New folder", null, folderId => { createdFolderId = folderId; }), true);
+	assert.equal(createdFolderId, undefined);
+
+	finishSave();
+	await save;
+	await new Promise(resolve => setTimeout(resolve, 0));
+	assert.equal(createdFolderId, savedFolderId);
+	assert.ok(createdFolderId);
+});
+
 test("canonical storage state wins when the status lookup is stale during rename", async () => {
 	const capture: Capture = {
 		id: "canonical-rename",
