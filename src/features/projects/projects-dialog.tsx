@@ -162,7 +162,6 @@ export function ProjectsDialog({ open, onClose }: { open: boolean; onClose: () =
 			id="projectsDialog"
 			className="projects-modal"
 			open={open}
-			eyebrow="Workspaces"
 			title="Projects"
 			onClose={onClose}
 			actions={

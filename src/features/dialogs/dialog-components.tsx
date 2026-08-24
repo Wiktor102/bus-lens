@@ -51,7 +51,7 @@ export function ManagedDialog({
 	id: string;
 	className?: string;
 	open: boolean;
-	eyebrow: string;
+	eyebrow?: string;
 	title: string;
 	onClose: () => void;
 	children: ReactNode;

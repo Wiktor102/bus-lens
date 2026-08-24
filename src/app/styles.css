@@ -3365,6 +3365,14 @@ tr:hover .row-action,
 .projects-modal {
 	width: min(560px, 92vw);
 }
+.projects-modal .modal-heading {
+	align-items: center;
+}
+.projects-modal .modal-heading h2 {
+	margin: 0;
+	text-box-trim: trim-both;
+	text-box-edge: cap alphabetic;
+}
 .project-create {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) auto;
