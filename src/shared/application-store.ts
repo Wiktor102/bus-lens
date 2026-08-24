@@ -254,7 +254,7 @@ export type ApplicationCommand =
 	| { type: "archive/move-capture"; captureId: string; folderId: string | null }
 	| { type: "archive/open-new-capture" }
 	| { type: "archive/open-export" }
-	| { type: "archive/save-folder"; name: string; editingId: string | null }
+	| { type: "archive/save-folder"; name: string; editingId: string | null; respond?: (folderId: string) => void }
 	| { type: "archive/delete-folder"; folderId: string }
 	| { type: "archive/import-file"; file: File }
 	| { type: "storage/upgrade" }

@@ -10,7 +10,7 @@ export type ArchiveActions = {
 	deleteCapture: (captureId: string) => void;
 	openNewCapture: () => void;
 	openExport: () => void;
-	saveFolder: (name: string, editingId: string | null) => boolean;
+	saveFolder: (name: string, editingId: string | null, onCreated?: (folderId: string) => void) => boolean;
 	deleteFolder: (folderId: string) => void;
 	importFile: (file: File) => void | Promise<void>;
 };
@@ -26,8 +26,8 @@ const actions: ArchiveActions = {
 	deleteCapture: captureId => applicationStore.sendCommand({ type: "capture/delete", captureId }),
 	openNewCapture: () => applicationStore.sendCommand({ type: "archive/open-new-capture" }),
 	openExport: () => applicationStore.sendCommand({ type: "archive/open-export" }),
-	saveFolder: (name, editingId) => {
-		applicationStore.sendCommand({ type: "archive/save-folder", name, editingId });
+	saveFolder: (name, editingId, onCreated) => {
+		applicationStore.sendCommand({ type: "archive/save-folder", name, editingId, respond: onCreated });
 		return Boolean(name.trim());
 	},
 	deleteFolder: folderId => applicationStore.sendCommand({ type: "archive/delete-folder", folderId }),

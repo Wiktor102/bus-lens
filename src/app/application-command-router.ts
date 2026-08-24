@@ -97,7 +97,7 @@ export function subscribeToApplicationCommands(dependencies: ApplicationCommandR
 				dependencies.openExportDialog();
 				break;
 			case "archive/save-folder":
-				dependencies.captureController.saveFolder(command.name, command.editingId);
+				dependencies.captureController.saveFolder(command.name, command.editingId, command.respond);
 				break;
 			case "archive/delete-folder":
 				dependencies.captureController.requestDeleteFolder(command.folderId);
