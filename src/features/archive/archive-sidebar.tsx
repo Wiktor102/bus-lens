@@ -310,6 +310,7 @@ export function ArchiveSidebar() {
 			</aside>
 			<ArchiveFolderDialog
 				folderId={folderDialogId}
+				isMoveDestination={folderMoveCaptureId !== null}
 				onCreated={handleFolderCreated}
 				onClose={() => {
 					setFolderDialogId(undefined);
@@ -612,10 +613,12 @@ function CaptureContextMenu({
 
 export function ArchiveFolderDialog({
 	folderId,
+	isMoveDestination = false,
 	onCreated,
 	onClose
 }: {
 	folderId: string | null | undefined;
+	isMoveDestination?: boolean;
 	onCreated?: (folderId: string) => void;
 	onClose: () => void;
 }) {
@@ -645,7 +648,7 @@ export function ArchiveFolderDialog({
 		folder => folder.id !== editingId && folder.name.toLowerCase() === name.toLowerCase()
 	);
 	const valid = Boolean(name && !duplicate);
-	const title = folderId ? "Rename folder" : "Create folder";
+	const title = folderId ? "Rename folder" : isMoveDestination ? "Move to new folder" : "Create folder";
 
 	return (
 		<dialog id="folderDialog" className="modal folder-modal" ref={dialogRef} onClose={onClose}>
