@@ -687,6 +687,9 @@ p {
 .folder-modal {
 	width: min(460px, calc(100vw - 30px));
 }
+.folder-modal .modal-heading {
+	align-items: center;
+}
 .folder-modal .modal-heading h2 {
 	margin: 0;
 	text-box-trim: trim-both;
