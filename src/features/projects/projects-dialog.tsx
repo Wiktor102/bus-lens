@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Check, Pencil, Plus, Trash2, X } from "lucide-react";
 import type { ProjectSummary } from "../../persistence/archive-client.ts";
 import { useArchiveCommands, useProjects } from "../../data/archive-react";
+import { useMcpStatus } from "../../data/mcp-react";
 import {
 	DEFAULT_PROJECT_ID,
 	normalizeProjectName,
@@ -15,19 +16,21 @@ type RenameDraft = Readonly<{ projectId: string; name: string }>;
 function ProjectRow({
 	project,
 	activeProjectId,
+	mcpProjectId,
 	busy,
 	onRename,
 	onDelete
 }: {
 	project: ProjectSummary;
 	activeProjectId: string | null;
+	mcpProjectId: string | null;
 	busy: boolean;
 	onRename: (projectId: string, name: string) => void;
 	onDelete: (projectId: string) => void;
 }) {
 	const [renaming, setRenaming] = useState<RenameDraft | null>(null);
 	const [confirmingDelete, setConfirmingDelete] = useState(false);
-	const blocker = projectDeletionBlocker(project, activeProjectId);
+	const blocker = projectDeletionBlocker(project, activeProjectId, mcpProjectId);
 	const isActive = project.id === activeProjectId;
 
 	useEffect(() => {
@@ -116,8 +119,10 @@ function ProjectRow({
 export function ProjectsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
 	const commands = useArchiveCommands();
 	const projectsQuery = useProjects();
+	const mcpStatusQuery = useMcpStatus();
 	const nameRef = useRef<HTMLInputElement>(null);
 	const activeProjectId = commands.activeProjectId();
+	const mcpProjectId = mcpStatusQuery.data?.project.id ?? null;
 	const projects = projectsQuery.data ?? [];
 	const [draft, setDraft] = useState("");
 	const [error, setError] = useState<string | null>(null);
@@ -204,6 +209,7 @@ export function ProjectsDialog({ open, onClose }: { open: boolean; onClose: () =
 						key={project.id}
 						project={project}
 						activeProjectId={activeProjectId}
+						mcpProjectId={mcpProjectId}
 						busy={pendingProjectIds.has(project.id)}
 						onRename={(projectId, name) => {
 							setPendingProjectIds(current => new Set(current).add(projectId));

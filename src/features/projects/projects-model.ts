@@ -77,10 +77,12 @@ export function deriveProjectSelectorState(input: ProjectSelectorInput): Project
 /** Server-mirrored guard text; null means the delete request may proceed. */
 export function projectDeletionBlocker(
 	project: Pick<ProjectSummary, "id">,
-	activeProjectId: string | null
+	activeProjectId: string | null,
+	mcpProjectId: string | null
 ): string | null {
 	if (project.id === DEFAULT_PROJECT_ID) return "The Default project cannot be deleted.";
 	if (project.id === activeProjectId) return "Switch away from this project before deleting it.";
+	if (project.id === mcpProjectId) return "Move MCP to another project before deleting it.";
 	return null;
 }
 

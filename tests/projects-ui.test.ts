@@ -75,10 +75,11 @@ test("a dangling stored project id renders as an explicit unknown entry", () => 
 	assert.equal(loading.options.some(option => option.label === "Unknown project"), false);
 });
 
-test("deletion guards mirror the server contract for Default and active projects", () => {
-	assert.match(projectDeletionBlocker({ id: "default" }, null) ?? "", /Default project cannot be deleted/);
-	assert.match(projectDeletionBlocker({ id: "p-1" }, "p-1") ?? "", /Switch away/);
-	assert.equal(projectDeletionBlocker({ id: "p-1" }, "p-2"), null);
+test("deletion guards mirror the server contract for Default, active, and MCP projects", () => {
+	assert.match(projectDeletionBlocker({ id: "default" }, null, null) ?? "", /Default project cannot be deleted/);
+	assert.match(projectDeletionBlocker({ id: "p-1" }, "p-1", null) ?? "", /Switch away/);
+	assert.match(projectDeletionBlocker({ id: "p-1" }, "p-2", "p-1") ?? "", /Move MCP/);
+	assert.equal(projectDeletionBlocker({ id: "p-1" }, "p-2", "p-3"), null);
 });
 
 test("project names are trimmed and bounded before validation", () => {
