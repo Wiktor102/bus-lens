@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { rename, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { DatabaseManager } from "./database-manager.ts";
+import { DatabaseManager, ProjectNotFoundError } from "./database-manager.ts";
 import { DEFAULT_PROJECT_ID, ProjectRegistryError, type ProjectRecord, type ProjectRegistry } from "./project-registry.ts";
 
 export type ProjectsServiceOptions = Readonly<{
@@ -70,14 +70,27 @@ export class ProjectsService {
 			throw new ProjectRegistryError("conflict", "Switch away from a project before deleting it");
 		}
 		const record = this.registry.require(projectId);
-		await this.manager.close(projectId);
-		const removedPath = `${record.dbPath}.removed`;
-		if (existsSync(record.dbPath)) {
-			// Rename before removing the registry row. A failed soft-delete must
-			// leave the project reachable so the user can retry or recover it.
-			await rename(record.dbPath, removedPath);
+		let releaseDeletion: () => void;
+		try {
+			releaseDeletion = this.manager.reserveDeletion(projectId);
+		} catch (error) {
+			if (error instanceof ProjectNotFoundError) {
+				throw new ProjectRegistryError("conflict", `Project ${projectId} is already being deleted`);
+			}
+			throw error;
 		}
-		this.registry.remove(projectId);
+		try {
+			await this.manager.close(projectId);
+			const removedPath = `${record.dbPath}.removed`;
+			if (existsSync(record.dbPath)) {
+				// Rename before removing the registry row. A failed soft-delete must
+				// leave the project reachable so the user can retry or recover it.
+				await rename(record.dbPath, removedPath);
+			}
+			this.registry.remove(projectId);
+		} finally {
+			releaseDeletion();
+		}
 	}
 
 	private async removeDatabaseFiles(dbPath: string): Promise<void> {

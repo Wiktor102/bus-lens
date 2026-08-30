@@ -481,7 +481,38 @@ test("a failed soft-delete keeps the project registered", async () => {
 		await assert.rejects(projects.delete(project.id));
 		assert.equal(registry.get(project.id)?.dbPath, project.dbPath);
 		assert.equal(existsSync(project.dbPath), true);
+		assert.equal(manager.forProject(project.id).projectId, project.id);
 
+		manager.closeAll();
+		rootDatabase.close();
+	});
+});
+
+test("deletion refuses new project contexts while draining active users", async () => {
+	await withTemporaryDirectory(async directory => {
+		const rootPath = join(directory, "bus-lens.sqlite");
+		const rootDatabase = openDatabase(rootPath);
+		const registry = new ProjectRegistry(rootDatabase);
+		ensureDefaultProject(registry, rootPath);
+		const manager = new DatabaseManager({ rootDatabase, rootDatabasePath: rootPath, registry });
+		const projects = new ProjectsService({ registry, manager, projectsDirectory: join(directory, "projects") });
+		const project = await projects.create("Draining");
+		manager.acquire(project.id);
+
+		const deletion = projects.delete(project.id);
+		assert.throws(() => manager.forProject(project.id), ProjectNotFoundError);
+		await assert.rejects(
+			projects.delete(project.id),
+			(error: unknown) => error instanceof ProjectRegistryError && error.code === "conflict"
+		);
+
+		manager.release(project.id);
+		await deletion;
+		assert.equal(existsSync(project.dbPath), false);
+		assert.equal(existsSync(`${project.dbPath}.removed`), true);
+		assert.throws(() => manager.forProject(project.id), ProjectNotFoundError);
+
+		manager.closeAll();
 		rootDatabase.close();
 	});
 });
