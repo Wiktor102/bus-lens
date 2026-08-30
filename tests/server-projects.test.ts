@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -358,37 +357,92 @@ test("unknown project headers return 404 without touching storage", async () => 
 	});
 });
 
-test("restore refuses destinations that collide with live project databases", async () => {
+test("restore replaces only the project selected by the request header", async () => {
 	await withTemporaryDirectory(async directory => {
 		await withHttpService(async ({ service, baseUrl }) => {
-			const backupPath = join(directory, "seed-backup.sqlite");
-			openDatabase(backupPath).close();
+			const labPath = join(directory, "projects", "lab.sqlite");
+			const otherPath = join(directory, "projects", "other.sqlite");
+			service.registry.ensureProject({ id: "lab", name: "Lab", dbPath: labPath });
+			service.registry.ensureProject({ id: "other", name: "Other", dbPath: otherPath });
 
-			const defaultPath = service.registry.require(DEFAULT_PROJECT_ID).dbPath;
-			const refusedRoot = await requestJson(baseUrl, "/api/restore", {
-				method: "POST",
-				body: { backupPath, destinationPath: defaultPath }
+			const putCapture = (projectId: string, id: string) => requestJson(baseUrl, `/api/captures/${id}`, {
+				method: "PUT",
+				projectId,
+				body: { id, name: id, messages: [], byteStream: [] }
 			});
-			assert.equal(refusedRoot.status, 409);
+			assert.equal((await putCapture(DEFAULT_PROJECT_ID, "default-capture")).status, 200);
+			assert.equal((await putCapture("lab", "old-lab-capture")).status, 200);
+			assert.equal((await putCapture("other", "other-capture")).status, 200);
+			const previousLabDatabase = service.manager.forProject("lab").database;
 
-			const managedPath = join(directory, "projects", "managed.sqlite");
-			service.registry.ensureProject({ id: "managed", name: "Managed", dbPath: managedPath });
-			const refusedManaged = await requestJson(baseUrl, "/api/restore", {
+			const backupPath = join(directory, "lab-backup.sqlite");
+			const backup = new ArchiveRepository(openDatabase(backupPath));
+			backup.putCapture("restored-lab-capture", { id: "restored-lab-capture", name: "Restored", messages: [] });
+			backup.close();
+
+			const refusedDestination = await requestJson(baseUrl, "/api/restore", {
 				method: "POST",
-				body: { backupPath, destinationPath: managedPath }
+				projectId: "lab",
+				body: { backupPath, destinationPath: join(directory, "arbitrary.sqlite") }
 			});
-			assert.equal(refusedManaged.status, 409);
+			assert.equal(refusedDestination.status, 400);
 
-			// The service stays healthy after refusals and unrelated paths still restore.
-			const healthy = await requestJson(baseUrl, "/api/archive");
-			assert.equal(healthy.status, 200);
 			const restored = await requestJson(baseUrl, "/api/restore", {
 				method: "POST",
-				body: { backupPath, destinationPath: join(directory, "restored.sqlite") }
+				projectId: "lab",
+				body: { backupPath }
 			});
 			assert.equal(restored.status, 204);
-			assert.equal(existsSync(join(directory, "restored.sqlite")), true);
-			assert.equal(service.manager.forProject("managed").database.open, true);
+
+			const captureIds = async (projectId: string) => {
+				const archive = await requestJson(baseUrl, "/api/archive", { projectId });
+				assert.equal(archive.status, 200);
+				return (archive.body as { captures: Array<{ id: string }> }).captures.map(capture => capture.id);
+			};
+			assert.deepEqual(await captureIds("lab"), ["restored-lab-capture"]);
+			assert.deepEqual(await captureIds(DEFAULT_PROJECT_ID), ["default-capture"]);
+			assert.deepEqual(await captureIds("other"), ["other-capture"]);
+			assert.equal(previousLabDatabase.open, false);
+			assert.equal(service.manager.forProject("lab").database.open, true);
+		}, directory);
+	});
+});
+
+test("restoring Default preserves the live project registry", async () => {
+	await withTemporaryDirectory(async directory => {
+		await withHttpService(async ({ service, baseUrl }) => {
+			const labPath = join(directory, "projects", "lab.sqlite");
+			service.registry.ensureProject({ id: "lab", name: "Lab", dbPath: labPath });
+			const labPut = await requestJson(baseUrl, "/api/captures/lab-capture", {
+				method: "PUT",
+				projectId: "lab",
+				body: { id: "lab-capture", name: "Lab", messages: [], byteStream: [] }
+			});
+			assert.equal(labPut.status, 200);
+
+			const backupPath = join(directory, "default-backup.sqlite");
+			const backup = new ArchiveRepository(openDatabase(backupPath));
+			backup.putCapture("restored-default", { id: "restored-default", name: "Restored default", messages: [] });
+			backup.close();
+
+			const restored = await requestJson(baseUrl, "/api/restore", {
+				method: "POST",
+				projectId: DEFAULT_PROJECT_ID,
+				body: { backupPath }
+			});
+			assert.equal(restored.status, 204);
+			assert.equal(service.registry.require("lab").dbPath, resolve(labPath));
+
+			const defaultArchive = await requestJson(baseUrl, "/api/archive", { projectId: DEFAULT_PROJECT_ID });
+			assert.deepEqual(
+				(defaultArchive.body as { captures: Array<{ id: string }> }).captures.map(capture => capture.id),
+				["restored-default"]
+			);
+			const labArchive = await requestJson(baseUrl, "/api/archive", { projectId: "lab" });
+			assert.deepEqual(
+				(labArchive.body as { captures: Array<{ id: string }> }).captures.map(capture => capture.id),
+				["lab-capture"]
+			);
 		}, directory);
 	});
 });

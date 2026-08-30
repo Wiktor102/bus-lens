@@ -146,18 +146,6 @@ function requestedProjectId(request: IncomingMessage): string | undefined {
 	return trimmed || undefined;
 }
 
-/**
- * A restore overwrites the destination file through the SQLite backup API.
- * Doing that to the live root database would drop the projects registry out
- * from under the running service, and doing it to any registered project file
- * strands the cached open handles in replaced or unlinked inodes. The
- * endpoint therefore refuses destinations that collide with live storage.
- */
-function isLiveDatabasePath(candidate: string, livePaths: readonly string[]): boolean {
-	const resolved = resolve(candidate);
-	return livePaths.some(path => resolve(path) === resolved);
-}
-
 export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpService {
 	const rootDatabase = openDatabase(options.databasePath);
 	const rootDatabasePath = resolve(options.databasePath);
@@ -182,19 +170,47 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 		agentNotes: options.mcpAgentNotes,
 		toolRegistrar: options.mcpToolRegistrar ?? phase4ToolRegistrar
 	});
+	let activeRequests = 0;
+	let maintenance = false;
+	let resolveMaintenanceDrain: (() => void) | undefined;
+	const leaveRequest = () => {
+		activeRequests -= 1;
+		if (maintenance && activeRequests <= 1) {
+			resolveMaintenanceDrain?.();
+			resolveMaintenanceDrain = undefined;
+		}
+	};
+	const beginMaintenance = async (): Promise<(() => void) | undefined> => {
+		if (maintenance) return undefined;
+		maintenance = true;
+		if (activeRequests > 1) {
+			await new Promise<void>(resolveDrain => {
+				resolveMaintenanceDrain = resolveDrain;
+			});
+		}
+		return () => {
+			maintenance = false;
+		};
+	};
 	const server = createServer(async (request, response) => {
 		// Released in finally so every await below keeps its project handle
 		// pinned against eviction and explicit closes.
 		let releaseProject: (() => void) | undefined;
+		let requestActive = false;
 		try {
 			const url = new URL(request.url ?? "/", "http://127.0.0.1");
+			if (request.method === "GET" && url.pathname === "/api/health") {
+				return send(response, 200, maintenance ? { ok: true, maintenance: true } : { ok: true });
+			}
+			if (maintenance) return send(response, 503, { error: "Database restore in progress" });
+			activeRequests += 1;
+			requestActive = true;
 			const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
 			if (url.pathname === "/mcp") return await mcpAccess.handle(request, response);
 			if (segments[0] !== "api") {
 				if (staticDirectory && await serveStatic(response, staticDirectory, url.pathname)) return;
 				return send(response, 404, { error: "Not found" });
 			}
-			if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { ok: true });
 			if (request.method === "GET" && url.pathname === "/api/agent-access") return send(response, 200, mcpAccess.getStatus());
 			let projectContext: ProjectDatabaseContext;
 			try {
@@ -202,6 +218,32 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			} catch (error) {
 				if (error instanceof ProjectNotFoundError) return send(response, 404, { error: error.message });
 				throw error;
+			}
+			if (segments[1] === "restore" && request.method === "POST") {
+				const body = documentFrom(await jsonBody(request, maxBodyBytes));
+				const { backupPath } = body;
+				const source = resolve(String(backupPath ?? ""));
+				if (!String(backupPath ?? "").trim()) return send(response, 400, { error: "backupPath is required" });
+				if (body.destinationPath !== undefined) return send(response, 400, { error: "destinationPath is not accepted; restore targets the selected project" });
+				if (!existsSync(source)) return send(response, 400, { error: "backupPath does not exist" });
+				if (source === projectContext.databasePath) return send(response, 400, { error: "backupPath must differ from the selected project database" });
+				const endMaintenance = await beginMaintenance();
+				if (!endMaintenance) return send(response, 409, { error: "Another database restore is already in progress" });
+				const restoresRootDatabase = projectContext.databasePath === rootDatabasePath;
+				const projectRecords = restoresRootDatabase ? registry.list() : [];
+				try {
+					await manager.close(projectContext.projectId);
+					try {
+						await restoreDatabase(source, projectContext.databasePath);
+						if (restoresRootDatabase) registry.replaceAll(projectRecords);
+					} finally {
+						manager.forProject(projectContext.projectId);
+					}
+					registry.touch(projectContext.projectId);
+					return send(response, 204, {});
+				} finally {
+					endMaintenance();
+				}
 			}
 			manager.acquire(projectContext.projectId);
 			releaseProject = () => manager.release(projectContext.projectId);
@@ -510,15 +552,6 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 				const { destinationPath } = documentFrom(await jsonBody(request, maxBodyBytes));
 				return send(response, 201, await backupDatabase(projectContext.database, String(destinationPath)));
 			}
-			if (segments[1] === "restore" && request.method === "POST") {
-				const { backupPath, destinationPath } = documentFrom(await jsonBody(request, maxBodyBytes));
-				const destination = String(destinationPath ?? "");
-				if (isLiveDatabasePath(destination, [rootDatabasePath, ...registry.list().map(record => record.dbPath)])) {
-					return send(response, 409, { error: "Restore destination would overwrite a live project database; stop the service or choose another path" });
-				}
-				await restoreDatabase(String(backupPath), destination);
-				return send(response, 204, {});
-			}
 			const entity = segments[1] as Entity;
 			if (!["captures", "folders", "queue", "history"].includes(entity)) return send(response, 404, { error: "Not found" });
 			const id = segments[2];
@@ -550,6 +583,7 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			return send(response, 500, { error: "Internal server error" });
 		} finally {
 			releaseProject?.();
+			if (requestActive) leaveRequest();
 		}
 	});
 	return {

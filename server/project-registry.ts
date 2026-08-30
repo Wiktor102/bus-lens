@@ -71,7 +71,11 @@ export class ProjectRegistry {
 	constructor(database: SqliteDatabase, nowIso: () => string = () => new Date().toISOString()) {
 		this.database = database;
 		this.nowIso = nowIso;
-		database.exec(`
+		this.ensureSchema();
+	}
+
+	private ensureSchema(): void {
+		this.database.exec(`
 			CREATE TABLE IF NOT EXISTS projects (
 				id TEXT PRIMARY KEY NOT NULL,
 				name TEXT NOT NULL,
@@ -80,6 +84,19 @@ export class ProjectRegistry {
 				last_used_at TEXT NOT NULL
 			);
 		`);
+	}
+
+	/** Restores the control-plane rows after replacing the shared Default database. */
+	replaceAll(records: readonly ProjectRecord[]): void {
+		this.ensureSchema();
+		const replace = this.database.transaction(() => {
+			this.database.prepare("DELETE FROM projects").run();
+			const insert = this.database.prepare(
+				"INSERT INTO projects (id, name, db_path, created_at, last_used_at) VALUES (@id, @name, @dbPath, @createdAt, @lastUsedAt)"
+			);
+			for (const record of records) insert.run(record);
+		});
+		replace();
 	}
 
 	list(): ProjectRecord[] {
