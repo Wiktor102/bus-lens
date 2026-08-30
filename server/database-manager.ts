@@ -59,6 +59,7 @@ export class DatabaseManager {
 	private readonly capacity: number;
 	private readonly open: DatabaseOpener;
 	private readonly cache = new Map<string, CacheEntry>();
+	private readonly deleting = new Set<string>();
 	/** In-flight request counts; handles are only closed at zero. */
 	private readonly inFlight = new Map<string, number>();
 	private readonly pendingCloses = new Map<string, PendingClose>();
@@ -72,7 +73,9 @@ export class DatabaseManager {
 	}
 
 	forProject(projectId?: string): ProjectDatabaseContext {
-		const record = this.resolveRecord(projectId);
+		const id = projectId?.trim() || DEFAULT_PROJECT_ID;
+		if (this.deleting.has(id)) throw new ProjectNotFoundError(id);
+		const record = this.resolveRecord(id);
 		const existing = this.cache.get(record.id);
 		if (existing) {
 			this.cache.delete(record.id);
@@ -83,6 +86,23 @@ export class DatabaseManager {
 		this.cache.set(record.id, entry);
 		this.evictBeyondCapacity(record.id);
 		return entry.context;
+	}
+
+	/**
+	 * Prevents new contexts from being admitted while a project is deleted.
+	 * Callers must reserve synchronously before their first await, then release
+	 * the reservation after success or rollback.
+	 */
+	reserveDeletion(projectId: string): () => void {
+		const id = projectId.trim() || DEFAULT_PROJECT_ID;
+		if (this.deleting.has(id)) throw new ProjectNotFoundError(id);
+		this.deleting.add(id);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.deleting.delete(id);
+		};
 	}
 
 	/**

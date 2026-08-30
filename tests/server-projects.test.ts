@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -262,6 +263,79 @@ test("close waits for in-flight requests before closing the handle", async () =>
 		manager.forProject("a");
 		await manager.close("a");
 		assert.equal(opened.get(databasePath)?.open, false);
+		rootDatabase.close();
+	});
+});
+
+test("deletion reservations refuse cached project contexts", async () => {
+	await withTemporaryDirectory(async directory => {
+		const rootPath = join(directory, "root.sqlite");
+		const rootDatabase = openDatabase(rootPath);
+		const registry = new ProjectRegistry(rootDatabase);
+		const projectPath = join(directory, "project.sqlite");
+		registry.ensureProject({ id: "project", name: "Project", dbPath: projectPath });
+		const manager = new DatabaseManager({ rootDatabase, rootDatabasePath: rootPath, registry });
+		const cached = manager.forProject("project");
+
+		manager.reserveDeletion("project");
+		assert.throws(() => manager.forProject("project"), ProjectNotFoundError);
+		assert.equal(cached.database.open, true);
+
+		manager.closeAll();
+		rootDatabase.close();
+	});
+});
+
+test("deletion reservations refuse uncached contexts without creating their database", async () => {
+	await withTemporaryDirectory(async directory => {
+		const rootPath = join(directory, "root.sqlite");
+		const rootDatabase = openDatabase(rootPath);
+		const registry = new ProjectRegistry(rootDatabase);
+		const projectPath = join(directory, "project.sqlite");
+		registry.ensureProject({ id: "project", name: "Project", dbPath: projectPath });
+		const manager = new DatabaseManager({ rootDatabase, rootDatabasePath: rootPath, registry });
+
+		manager.reserveDeletion("project");
+		assert.throws(() => manager.forProject("project"), ProjectNotFoundError);
+		assert.equal(existsSync(projectPath), false);
+
+		rootDatabase.close();
+	});
+});
+
+test("releasing a deletion reservation lets the project reopen", async () => {
+	await withTemporaryDirectory(async directory => {
+		const rootPath = join(directory, "root.sqlite");
+		const rootDatabase = openDatabase(rootPath);
+		const registry = new ProjectRegistry(rootDatabase);
+		registry.ensureProject({ id: "project", name: "Project", dbPath: join(directory, "project.sqlite") });
+		const manager = new DatabaseManager({ rootDatabase, rootDatabasePath: rootPath, registry });
+		const release = manager.reserveDeletion("project");
+
+		release();
+		release();
+		assert.equal(manager.forProject("project").projectId, "project");
+
+		manager.closeAll();
+		rootDatabase.close();
+	});
+});
+
+test("a duplicate deletion reservation cannot clear the first reservation", async () => {
+	await withTemporaryDirectory(async directory => {
+		const rootPath = join(directory, "root.sqlite");
+		const rootDatabase = openDatabase(rootPath);
+		const registry = new ProjectRegistry(rootDatabase);
+		registry.ensureProject({ id: "project", name: "Project", dbPath: join(directory, "project.sqlite") });
+		const manager = new DatabaseManager({ rootDatabase, rootDatabasePath: rootPath, registry });
+		const release = manager.reserveDeletion("project");
+
+		assert.throws(() => manager.reserveDeletion("project"), ProjectNotFoundError);
+		assert.throws(() => manager.forProject("project"), ProjectNotFoundError);
+		release();
+		assert.equal(manager.forProject("project").projectId, "project");
+
+		manager.closeAll();
 		rootDatabase.close();
 	});
 });
