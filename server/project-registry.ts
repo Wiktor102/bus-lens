@@ -197,6 +197,14 @@ export class ProjectRegistry {
 		return this.require(projectId);
 	}
 
+	touch(projectId: string): void {
+		this.require(projectId);
+		this.database.prepare("UPDATE projects SET last_used_at = @lastUsedAt WHERE id = @id").run({
+			id: projectId,
+			lastUsedAt: this.nowIso()
+		});
+	}
+
 	remove(projectId: string): void {
 		this.require(projectId);
 		this.database.prepare("DELETE FROM projects WHERE id = @id").run({ id: projectId });

@@ -132,9 +132,12 @@ test("the service migrates legacy control tables into the dedicated registry dat
 test("the registry stores one explicit MCP project", async () => {
 	await withTemporaryDirectory(async directory => {
 		const database = openDatabase(join(directory, "root.sqlite"));
-		const registry = new ProjectRegistry(database);
+		let clock = 0;
+		const registry = new ProjectRegistry(database, () => new Date(++clock * 1000).toISOString());
 		ensureDefaultProject(registry, join(directory, "root.sqlite"));
-		registry.ensureProject({ id: "a", name: "A", dbPath: join(directory, "a.sqlite") });
+		const created = registry.ensureProject({ id: "a", name: "A", dbPath: join(directory, "a.sqlite") });
+		registry.touch("a");
+		assert.notEqual(registry.require("a").lastUsedAt, created.lastUsedAt);
 		assert.equal(registry.mcpProjectId(), DEFAULT_PROJECT_ID);
 		registry.setMcpProjectId("a");
 		assert.equal(registry.mcpProjectId(), "a");
@@ -143,17 +146,21 @@ test("the registry stores one explicit MCP project", async () => {
 	});
 });
 
-test("ordinary project traffic does not change the explicit MCP project", async () => {
+test("project writes update last use without changing the explicit MCP project", async () => {
 	await withTemporaryDirectory(async directory => {
 		await withHttpService(async ({ service, baseUrl }) => {
 			const labPath = join(directory, "projects", "lab.sqlite");
 			service.registry.ensureProject({ id: "lab", name: "Lab", dbPath: labPath });
+			service.database.prepare("UPDATE projects SET last_used_at = '2000-01-01T00:00:00.000Z' WHERE id = 'lab'").run();
+			await requestJson(baseUrl, "/api/archive", { projectId: "lab" });
+			assert.equal(service.registry.require("lab").lastUsedAt, "2000-01-01T00:00:00.000Z");
 			const put = await requestJson(baseUrl, "/api/captures/lab-capture", {
 				method: "PUT",
 				projectId: "lab",
 				body: { id: "lab-capture", name: "Lab capture", messages: [], byteStream: [] }
 			});
 			assert.equal(put.status, 200);
+			assert.notEqual(service.registry.require("lab").lastUsedAt, "2000-01-01T00:00:00.000Z");
 			assert.equal(service.registry.mcpProjectId(), DEFAULT_PROJECT_ID);
 		}, directory);
 	});

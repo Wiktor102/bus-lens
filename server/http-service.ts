@@ -372,6 +372,7 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 						const reopenedContext = manager.forProject(projectContext.projectId);
 						if (restoresMcpTarget) mcpTarget = createMcpTarget(reopenedContext);
 					}
+					registry.touch(projectContext.projectId);
 					return send(response, 204, {});
 				} finally {
 					endMaintenance();
@@ -379,6 +380,9 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			}
 			manager.acquire(projectContext.projectId);
 			releaseProject = () => manager.release(projectContext.projectId);
+			// Writes are an explicit use of a project. Keep that activity timestamp
+			// without using it to choose the separately configured MCP target.
+			if (request.method !== "GET") registry.touch(projectContext.projectId);
 			const { repository } = projectContext;
 			const canonicalQueries = projectContext.queryService;
 			const commandService = projectContext.commandService;
