@@ -1,13 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import Database from "better-sqlite3";
 import type { SqliteDatabase } from "./database.ts";
 
 /**
- * The registry lives in the always-open root database and is the only
- * multi-project state it holds. Everything else belongs to a project database.
+ * Project routing is control-plane state. The service stores it separately so
+ * replacing any project database, including Default, cannot rewrite routing.
  */
 export const DEFAULT_PROJECT_ID = "default";
 export const DEFAULT_PROJECT_NAME = "Default";
+export const PROJECT_REGISTRY_FILENAME = "bus-lens-registry.sqlite";
 
 export type ProjectRecord = Readonly<{
 	id: string;
@@ -40,6 +43,11 @@ type ProjectRow = {
 	db_path: string;
 	created_at: string;
 	last_used_at: string;
+};
+
+type ProjectRoutingRow = {
+	key: string;
+	project_id: string;
 };
 
 function recordFrom(row: ProjectRow): ProjectRecord {
@@ -83,20 +91,26 @@ export class ProjectRegistry {
 				created_at TEXT NOT NULL,
 				last_used_at TEXT NOT NULL
 			);
+			CREATE TABLE IF NOT EXISTS project_routing (
+				key TEXT PRIMARY KEY NOT NULL,
+				project_id TEXT NOT NULL
+			);
 		`);
 	}
 
-	/** Restores the control-plane rows after replacing the shared Default database. */
-	replaceAll(records: readonly ProjectRecord[]): void {
-		this.ensureSchema();
-		const replace = this.database.transaction(() => {
-			this.database.prepare("DELETE FROM projects").run();
+	/** Imports control-plane rows written by builds that stored them in Default. */
+	importLegacy(records: readonly ProjectRecord[], routing: readonly ProjectRoutingRow[]): void {
+		const importRows = this.database.transaction(() => {
 			const insert = this.database.prepare(
-				"INSERT INTO projects (id, name, db_path, created_at, last_used_at) VALUES (@id, @name, @dbPath, @createdAt, @lastUsedAt)"
+				"INSERT OR IGNORE INTO projects (id, name, db_path, created_at, last_used_at) VALUES (@id, @name, @dbPath, @createdAt, @lastUsedAt)"
 			);
 			for (const record of records) insert.run(record);
+			const insertRouting = this.database.prepare(
+				"INSERT OR IGNORE INTO project_routing (key, project_id) VALUES (@key, @projectId)"
+			);
+			for (const route of routing) insertRouting.run({ key: route.key, projectId: route.project_id });
 		});
-		replace();
+		importRows();
 	}
 
 	list(): ProjectRecord[] {
@@ -178,6 +192,42 @@ export class ProjectRegistry {
 			.get() as ProjectRow | undefined;
 		return row ? recordFrom(row) : undefined;
 	}
+}
+
+export function openProjectRegistryDatabase(databasePath: string): SqliteDatabase {
+	const resolvedPath = resolve(databasePath);
+	mkdirSync(dirname(resolvedPath), { recursive: true });
+	const database = new Database(resolvedPath, { timeout: 5_000 });
+	try {
+		database.pragma("journal_mode = WAL");
+		database.pragma("foreign_keys = ON");
+		database.pragma("busy_timeout = 5000");
+		return database;
+	} catch (error) {
+		database.close();
+		throw error;
+	}
+}
+
+function tableExists(database: SqliteDatabase, table: string): boolean {
+	return Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @table").get({ table }));
+}
+
+/** Moves control-plane rows out of the legacy Default archive on first boot. */
+export function migrateLegacyProjectRegistry(registry: ProjectRegistry, legacyDatabase: SqliteDatabase): void {
+	const hasProjects = tableExists(legacyDatabase, "projects");
+	const hasRouting = tableExists(legacyDatabase, "project_routing");
+	if (!hasProjects && !hasRouting) return;
+	const projects = hasProjects
+		? (legacyDatabase.prepare("SELECT id, name, db_path, created_at, last_used_at FROM projects ORDER BY created_at, id").all() as ProjectRow[]).map(recordFrom)
+		: [];
+	const routing = hasRouting
+		? legacyDatabase.prepare("SELECT key, project_id FROM project_routing").all() as ProjectRoutingRow[]
+		: [];
+	registry.importLegacy(projects, routing);
+	legacyDatabase.transaction(() => {
+		legacyDatabase.exec("DROP TABLE IF EXISTS project_routing; DROP TABLE IF EXISTS projects;");
+	})();
 }
 
 /**

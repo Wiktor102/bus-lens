@@ -1,7 +1,7 @@
 import { createReadStream, existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { extname, join, resolve } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 import { backupDatabase, restoreDatabase } from "./backup.ts";
 import {
 	RepositoryConflictError,
@@ -13,7 +13,13 @@ import {
 } from "./archive-repository.ts";
 import { openDatabase, type SqliteDatabase } from "./database.ts";
 import { DatabaseManager, ProjectNotFoundError, type ProjectDatabaseContext } from "./database-manager.ts";
-import { ensureDefaultProject, ProjectRegistry } from "./project-registry.ts";
+import {
+	ensureDefaultProject,
+	migrateLegacyProjectRegistry,
+	openProjectRegistryDatabase,
+	PROJECT_REGISTRY_FILENAME,
+	ProjectRegistry
+} from "./project-registry.ts";
 import {
 	CanonicalCaptureCommandError,
 	type CanonicalCaptureCommandService,
@@ -39,6 +45,7 @@ const MIME_TYPES: Record<string, string> = {
 type Entity = "captures" | "folders" | "queue" | "history";
 type ServiceOptions = {
 	databasePath: string;
+	registryPath?: string;
 	staticDirectory?: string;
 	maxBodyBytes?: number;
 	mcpEndpoint?: string;
@@ -52,6 +59,8 @@ export type ArchiveHttpService = {
 	repository: ArchiveRepository;
 	commandService: CanonicalCaptureCommandService;
 	database: SqliteDatabase;
+	registryDatabase: SqliteDatabase;
+	registryDatabasePath: string;
 	registry: ProjectRegistry;
 	manager: DatabaseManager;
 	mcpAccess: McpAccess;
@@ -146,11 +155,30 @@ function requestedProjectId(request: IncomingMessage): string | undefined {
 	return trimmed || undefined;
 }
 
+function isLiveDatabasePath(candidate: string, registryDatabasePath: string, registry: ProjectRegistry): boolean {
+	const resolved = resolve(candidate);
+	return resolved === registryDatabasePath || registry.list().some(project => resolve(project.dbPath) === resolved);
+}
+
 export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpService {
 	const rootDatabase = openDatabase(options.databasePath);
 	const rootDatabasePath = resolve(options.databasePath);
-	const registry = new ProjectRegistry(rootDatabase);
-	ensureDefaultProject(registry, rootDatabasePath);
+	const registryDatabasePath = resolve(options.registryPath ?? join(dirname(rootDatabasePath), PROJECT_REGISTRY_FILENAME));
+	if (registryDatabasePath === rootDatabasePath) {
+		rootDatabase.close();
+		throw new Error("Project registry database must differ from the Default project database");
+	}
+	const registryDatabase = openProjectRegistryDatabase(registryDatabasePath);
+	let registry: ProjectRegistry;
+	try {
+		registry = new ProjectRegistry(registryDatabase);
+		migrateLegacyProjectRegistry(registry, rootDatabase);
+		ensureDefaultProject(registry, rootDatabasePath);
+	} catch (error) {
+		registryDatabase.close();
+		rootDatabase.close();
+		throw error;
+	}
 	const manager = new DatabaseManager({ rootDatabase, rootDatabasePath: options.databasePath, registry });
 	// Embedders that read service.repository directly keep observing the Default
 	// project; routed requests below resolve their own context per request.
@@ -226,16 +254,13 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 				if (!String(backupPath ?? "").trim()) return send(response, 400, { error: "backupPath is required" });
 				if (body.destinationPath !== undefined) return send(response, 400, { error: "destinationPath is not accepted; restore targets the selected project" });
 				if (!existsSync(source)) return send(response, 400, { error: "backupPath does not exist" });
-				if (source === projectContext.databasePath) return send(response, 400, { error: "backupPath must differ from the selected project database" });
+				if (isLiveDatabasePath(source, registryDatabasePath, registry)) return send(response, 409, { error: "backupPath must not be a live project or registry database" });
 				const endMaintenance = await beginMaintenance();
 				if (!endMaintenance) return send(response, 409, { error: "Another database restore is already in progress" });
-				const restoresRootDatabase = projectContext.databasePath === rootDatabasePath;
-				const projectRecords = restoresRootDatabase ? registry.list() : [];
 				try {
 					await manager.close(projectContext.projectId);
 					try {
 						await restoreDatabase(source, projectContext.databasePath);
-						if (restoresRootDatabase) registry.replaceAll(projectRecords);
 					} finally {
 						manager.forProject(projectContext.projectId);
 					}
@@ -550,7 +575,12 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			}
 			if (segments[1] === "backup" && request.method === "POST") {
 				const { destinationPath } = documentFrom(await jsonBody(request, maxBodyBytes));
-				return send(response, 201, await backupDatabase(projectContext.database, String(destinationPath)));
+				const destination = String(destinationPath ?? "");
+				if (!destination.trim()) return send(response, 400, { error: "destinationPath is required" });
+				if (isLiveDatabasePath(destination, registryDatabasePath, registry)) {
+					return send(response, 409, { error: "Backup destination would overwrite a live project or registry database" });
+				}
+				return send(response, 201, await backupDatabase(projectContext.database, destination));
 			}
 			const entity = segments[1] as Entity;
 			if (!["captures", "folders", "queue", "history"].includes(entity)) return send(response, 404, { error: "Not found" });
@@ -591,6 +621,8 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 		repository: defaultContext.repository,
 		commandService: defaultContext.commandService,
 		database: rootDatabase,
+		registryDatabase,
+		registryDatabasePath,
 		registry,
 		manager,
 		mcpAccess,
@@ -599,6 +631,7 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			await new Promise<void>(resolveClose => server.close(() => resolveClose()));
 			manager.closeAll();
 			rootDatabase.close();
+			registryDatabase.close();
 		}
 	};
 }

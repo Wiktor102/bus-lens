@@ -47,6 +47,38 @@ test("the registry keeps one row per database file and defaults are registered o
 	});
 });
 
+test("the service migrates legacy control tables into the dedicated registry database", async () => {
+	await withTemporaryDirectory(async directory => {
+		const defaultPath = join(directory, "bus-lens.sqlite");
+		const registryPath = join(directory, "bus-lens-registry.sqlite");
+		const legacyDatabase = openDatabase(defaultPath);
+		const legacyRegistry = new ProjectRegistry(legacyDatabase);
+		ensureDefaultProject(legacyRegistry, defaultPath);
+		legacyRegistry.ensureProject({ id: "lab", name: "Lab", dbPath: join(directory, "lab.sqlite") });
+		legacyDatabase.prepare("INSERT INTO project_routing (key, project_id) VALUES ('mcp', 'lab')").run();
+		legacyDatabase.close();
+
+		const service = createArchiveHttpService({ databasePath: defaultPath, registryPath });
+		try {
+			assert.equal(service.registry.require("lab").name, "Lab");
+			assert.deepEqual(
+				service.registryDatabase.prepare("SELECT key, project_id FROM project_routing").all(),
+				[{ key: "mcp", project_id: "lab" }]
+			);
+			assert.deepEqual(
+				service.registryDatabase.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all(),
+				[{ name: "project_routing" }, { name: "projects" }]
+			);
+			assert.deepEqual(
+				service.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('projects', 'project_routing')").all(),
+				[]
+			);
+		} finally {
+			await service.close();
+		}
+	});
+});
+
 test("registry touch orders most-recently-used projects", async () => {
 	await withTemporaryDirectory(async directory => {
 		const database = openDatabase(join(directory, "root.sqlite"));
@@ -460,6 +492,18 @@ test("restore replaces only the project selected by the request header", async (
 				body: { backupPath, destinationPath: join(directory, "arbitrary.sqlite") }
 			});
 			assert.equal(refusedDestination.status, 400);
+			const refusedRegistryBackup = await requestJson(baseUrl, "/api/backup", {
+				method: "POST",
+				projectId: "lab",
+				body: { destinationPath: service.registryDatabasePath }
+			});
+			assert.equal(refusedRegistryBackup.status, 409);
+			const refusedRegistryRestore = await requestJson(baseUrl, "/api/restore", {
+				method: "POST",
+				projectId: "lab",
+				body: { backupPath: service.registryDatabasePath }
+			});
+			assert.equal(refusedRegistryRestore.status, 409);
 
 			const restored = await requestJson(baseUrl, "/api/restore", {
 				method: "POST",
@@ -482,11 +526,14 @@ test("restore replaces only the project selected by the request header", async (
 	});
 });
 
-test("restoring Default preserves the live project registry", async () => {
+test("restoring Default preserves project and routing control state", async () => {
 	await withTemporaryDirectory(async directory => {
 		await withHttpService(async ({ service, baseUrl }) => {
 			const labPath = join(directory, "projects", "lab.sqlite");
 			service.registry.ensureProject({ id: "lab", name: "Lab", dbPath: labPath });
+			service.registryDatabase.prepare("INSERT INTO project_routing (key, project_id) VALUES ('mcp', 'lab')").run();
+			assert.equal(service.registryDatabasePath, resolve(join(directory, "bus-lens-registry.sqlite")));
+			assert.notEqual(service.registryDatabase, service.database);
 			const labPut = await requestJson(baseUrl, "/api/captures/lab-capture", {
 				method: "PUT",
 				projectId: "lab",
@@ -506,6 +553,14 @@ test("restoring Default preserves the live project registry", async () => {
 			});
 			assert.equal(restored.status, 204);
 			assert.equal(service.registry.require("lab").dbPath, resolve(labPath));
+			assert.deepEqual(
+				service.registryDatabase.prepare("SELECT key, project_id FROM project_routing WHERE key = 'mcp'").get(),
+				{ key: "mcp", project_id: "lab" }
+			);
+			assert.deepEqual(
+				service.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('projects', 'project_routing')").all(),
+				[]
+			);
 
 			const defaultArchive = await requestJson(baseUrl, "/api/archive", { projectId: DEFAULT_PROJECT_ID });
 			assert.deepEqual(

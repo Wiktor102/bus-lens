@@ -18,6 +18,7 @@ export type DatabasePathOptions = {
 
 export type DatabaseConfig = {
 	databasePath: string;
+	registryPath: string;
 	dataDirectory: string;
 };
 
@@ -47,8 +48,11 @@ export function resolveDatabaseConfig(options: DatabasePathOptions = {}): Databa
 	const dataDirectory = resolveAppDataDirectory(options);
 	const configuredPath = environment.BUS_LENS_DB_PATH ?? environment.BUS_LENS_DATABASE_PATH;
 	const databasePath = configuredPath ? resolve(configuredPath) : join(dataDirectory, "bus-lens.sqlite");
+	const configuredRegistryPath = environment.BUS_LENS_REGISTRY_PATH;
+	const registryPath = configuredRegistryPath ? resolve(configuredRegistryPath) : join(dirname(databasePath), "bus-lens-registry.sqlite");
 	return {
 		databasePath,
+		registryPath,
 		dataDirectory: dirname(databasePath)
 	};
 }

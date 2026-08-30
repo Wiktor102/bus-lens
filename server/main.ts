@@ -12,10 +12,11 @@ const port = production ? resolveAppPort() : resolveServicePort();
 const mcpBindHost = resolveMcpBindHost();
 assertLoopbackHost(mcpBindHost);
 const endpointHost = mcpBindHost.includes(":") ? `[${mcpBindHost}]` : mcpBindHost;
-const service = createArchiveHttpService({ databasePath: databaseConfig.databasePath, staticDirectory: production ? staticDirectory : undefined, maxBodyBytes: resolveMaxBodyBytes(), mcpEndpoint: `http://${endpointHost}:${port}/mcp` });
+const service = createArchiveHttpService({ databasePath: databaseConfig.databasePath, registryPath: databaseConfig.registryPath, staticDirectory: production ? staticDirectory : undefined, maxBodyBytes: resolveMaxBodyBytes(), mcpEndpoint: `http://${endpointHost}:${port}/mcp` });
 
 service.server.listen(port, mcpBindHost, () => {
 	console.info(`Bus Lens archive database: ${databaseConfig.databasePath}`);
+	console.info(`Bus Lens project registry: ${databaseConfig.registryPath}`);
 	console.info(`Bus Lens service listening at http://${endpointHost}:${port}`);
 });
 
