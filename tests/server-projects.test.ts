@@ -151,7 +151,7 @@ test("project writes update last use without changing the explicit MCP project",
 		await withHttpService(async ({ service, baseUrl }) => {
 			const labPath = join(directory, "projects", "lab.sqlite");
 			service.registry.ensureProject({ id: "lab", name: "Lab", dbPath: labPath });
-			service.database.prepare("UPDATE projects SET last_used_at = '2000-01-01T00:00:00.000Z' WHERE id = 'lab'").run();
+			service.registryDatabase.prepare("UPDATE projects SET last_used_at = '2000-01-01T00:00:00.000Z' WHERE id = 'lab'").run();
 			await requestJson(baseUrl, "/api/archive", { projectId: "lab" });
 			assert.equal(service.registry.require("lab").lastUsedAt, "2000-01-01T00:00:00.000Z");
 			const put = await requestJson(baseUrl, "/api/captures/lab-capture", {
@@ -699,7 +699,11 @@ test("restoring Default preserves project and routing control state", async () =
 		await withHttpService(async ({ service, baseUrl }) => {
 			const labPath = join(directory, "projects", "lab.sqlite");
 			service.registry.ensureProject({ id: "lab", name: "Lab", dbPath: labPath });
-			service.registryDatabase.prepare("INSERT INTO project_routing (key, project_id) VALUES ('mcp', 'lab')").run();
+			const routed = await requestJson(baseUrl, "/api/agent-access", {
+				method: "PUT",
+				body: { projectId: "lab", force: true }
+			});
+			assert.equal(routed.status, 200);
 			assert.equal(service.registryDatabasePath, resolve(join(directory, "bus-lens-registry.sqlite")));
 			assert.notEqual(service.registryDatabase, service.database);
 			const labPut = await requestJson(baseUrl, "/api/captures/lab-capture", {
@@ -725,6 +729,8 @@ test("restoring Default preserves project and routing control state", async () =
 				service.registryDatabase.prepare("SELECT key, project_id FROM project_routing WHERE key = 'mcp'").get(),
 				{ key: "mcp", project_id: "lab" }
 			);
+			const agentAccess = await requestJson(baseUrl, "/api/agent-access");
+			assert.equal((agentAccess.body as { project: { id: string } }).project.id, "lab");
 			assert.deepEqual(
 				service.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('projects', 'project_routing')").all(),
 				[]
