@@ -140,13 +140,37 @@ export class ProjectRegistry {
 		return record;
 	}
 
-	/** Idempotent registration used by boot-time Default registration. */
+	/** Idempotent registration; an explicit id keeps the supplied path authoritative. */
 	ensureProject(input: EnsureProjectInput): ProjectRecord {
 		const name = assertValidName(input.name);
 		const dbPath = resolve(input.dbPath);
 		const id = input.id ?? randomUUID();
 		const existingById = this.get(id);
-		if (existingById) return existingById;
+		if (existingById) {
+			if (existingById.dbPath === dbPath) return existingById;
+			const conflicting = this.getByDbPath(dbPath);
+			if (conflicting) {
+				if (conflicting.id === id) return conflicting;
+				throw new ProjectRegistryError(
+					"conflict",
+					`Database path ${dbPath} is already registered to project ${conflicting.id}`
+				);
+			}
+			try {
+				this.database.prepare("UPDATE projects SET db_path = @dbPath WHERE id = @id").run({ id, dbPath });
+			} catch (error) {
+				// Convert a concurrent path registration into the same useful error.
+				const raced = this.getByDbPath(dbPath);
+				if (raced && raced.id !== id) {
+					throw new ProjectRegistryError(
+						"conflict",
+						`Database path ${dbPath} is already registered to project ${raced.id}`
+					);
+				}
+				throw error;
+			}
+			return this.require(id);
+		}
 		const existingByPath = this.getByDbPath(dbPath);
 		if (existingByPath) return existingByPath;
 		const timestamp = this.nowIso();
@@ -236,5 +260,12 @@ export function migrateLegacyProjectRegistry(registry: ProjectRegistry, legacyDa
  * pointing at the same root file the service has always opened.
  */
 export function ensureDefaultProject(registry: ProjectRegistry, rootDatabasePath: string): ProjectRecord {
-	return registry.ensureProject({ id: DEFAULT_PROJECT_ID, name: DEFAULT_PROJECT_NAME, dbPath: rootDatabasePath });
+	const record = registry.ensureProject({ id: DEFAULT_PROJECT_ID, name: DEFAULT_PROJECT_NAME, dbPath: rootDatabasePath });
+	if (record.id !== DEFAULT_PROJECT_ID) {
+		throw new ProjectRegistryError(
+			"conflict",
+			`Default database path ${resolve(rootDatabasePath)} is already registered to project ${record.id}`
+		);
+	}
+	return record;
 }

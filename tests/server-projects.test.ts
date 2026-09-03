@@ -13,7 +13,8 @@ import {
 	DEFAULT_PROJECT_ID,
 	DEFAULT_PROJECT_NAME,
 	ensureDefaultProject,
-	ProjectRegistry
+	ProjectRegistry,
+	ProjectRegistryError
 } from "../server/project-registry.ts";
 
 async function withTemporaryDirectory(run: (directory: string) => Promise<void>): Promise<void> {
@@ -43,6 +44,54 @@ test("the registry keeps one row per database file and defaults are registered o
 		const raced = registry.ensureProject({ id: "other", name: "Other", dbPath: rootPath });
 		assert.equal(raced.id, DEFAULT_PROJECT_ID);
 		assert.equal(registry.list().length, 1);
+		database.close();
+	});
+});
+
+test("Default follows a changed configured database path", async () => {
+	await withTemporaryDirectory(async directory => {
+		const registryPath = join(directory, "bus-lens-registry.sqlite");
+		const originalPath = join(directory, "original.sqlite");
+		const replacementPath = join(directory, "replacement.sqlite");
+		const originalService = createArchiveHttpService({ databasePath: originalPath, registryPath });
+		originalService.repository.putCapture("original", { id: "original", name: "Original", messages: [] });
+		await originalService.close();
+
+		const replacement = new ArchiveRepository(openDatabase(replacementPath));
+		replacement.putCapture("replacement", { id: "replacement", name: "Replacement", messages: [] });
+		replacement.close();
+
+		const replacementService = createArchiveHttpService({ databasePath: replacementPath, registryPath });
+		try {
+			assert.equal(replacementService.registry.require(DEFAULT_PROJECT_ID).dbPath, resolve(replacementPath));
+			assert.equal(replacementService.manager.forProject().database, replacementService.database);
+			const baseUrl = await listen(replacementService);
+			const archive = await requestJson(baseUrl, "/api/archive");
+			assert.equal(archive.status, 200);
+			assert.deepEqual(
+				(archive.body as { captures: Array<{ id: string }> }).captures.map(capture => capture.id),
+				["replacement"]
+			);
+		} finally {
+			await replacementService.close();
+		}
+	});
+});
+
+test("Default rejects a configured path owned by another project", async () => {
+	await withTemporaryDirectory(async directory => {
+		const database = openDatabase(join(directory, "registry.sqlite"));
+		const registry = new ProjectRegistry(database);
+		const originalPath = join(directory, "original.sqlite");
+		const conflictingPath = join(directory, "lab.sqlite");
+		ensureDefaultProject(registry, originalPath);
+		registry.ensureProject({ id: "lab", name: "Lab", dbPath: conflictingPath });
+
+		assert.throws(
+			() => ensureDefaultProject(registry, conflictingPath),
+			(error: unknown) => error instanceof ProjectRegistryError && error.code === "conflict" && error.message.includes("project lab")
+		);
+		assert.equal(registry.require(DEFAULT_PROJECT_ID).dbPath, resolve(originalPath));
 		database.close();
 	});
 });
