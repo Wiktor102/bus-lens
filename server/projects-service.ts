@@ -82,12 +82,28 @@ export class ProjectsService {
 		try {
 			await this.manager.close(projectId);
 			const removedPath = `${record.dbPath}.removed`;
+			let renamed = false;
 			if (existsSync(record.dbPath)) {
 				// Rename before removing the registry row. A failed soft-delete must
 				// leave the project reachable so the user can retry or recover it.
 				await rename(record.dbPath, removedPath);
+				renamed = true;
 			}
-			this.registry.remove(projectId);
+			try {
+				this.registry.remove(projectId);
+			} catch (error) {
+				if (renamed) {
+					try {
+						await rename(removedPath, record.dbPath);
+					} catch (rollbackError) {
+						throw new AggregateError(
+							[error, rollbackError],
+							`Failed to remove project ${projectId} from the registry and restore its database`
+						);
+					}
+				}
+				throw error;
+			}
 		} finally {
 			releaseDeletion();
 		}

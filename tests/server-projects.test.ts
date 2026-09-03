@@ -488,6 +488,38 @@ test("a failed soft-delete keeps the project registered", async () => {
 	});
 });
 
+test("a failed registry removal restores the soft-deleted database", async () => {
+	await withTemporaryDirectory(async directory => {
+		class FailingRemoveRegistry extends ProjectRegistry {
+			override remove(_projectId: string): void {
+				throw new Error("simulated registry removal failure");
+			}
+		}
+
+		const rootPath = join(directory, "bus-lens.sqlite");
+		const rootDatabase = openDatabase(rootPath);
+		const registry = new FailingRemoveRegistry(rootDatabase);
+		ensureDefaultProject(registry, rootPath);
+		const manager = new DatabaseManager({ rootDatabase, rootDatabasePath: rootPath, registry });
+		const projects = new ProjectsService({ registry, manager, projectsDirectory: join(directory, "projects") });
+		const project = await projects.create("Recoverable");
+		manager.forProject(project.id).repository.putCapture("kept-capture", {
+			id: "kept-capture",
+			name: "Kept capture",
+			messages: []
+		});
+
+		await assert.rejects(projects.delete(project.id), /simulated registry removal failure/);
+		assert.equal(registry.get(project.id)?.dbPath, project.dbPath);
+		assert.equal(existsSync(project.dbPath), true);
+		assert.equal(existsSync(`${project.dbPath}.removed`), false);
+		assert.equal(manager.forProject(project.id).repository.getCapture("kept-capture")?.document.name, "Kept capture");
+
+		manager.closeAll();
+		rootDatabase.close();
+	});
+});
+
 test("deletion refuses new project contexts while draining active users", async () => {
 	await withTemporaryDirectory(async directory => {
 		const rootPath = join(directory, "bus-lens.sqlite");
