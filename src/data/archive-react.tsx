@@ -66,6 +66,11 @@ export function useArchiveSettings() {
 	return useQuery(layer.queries.settings());
 }
 
+export function useProjects() {
+	const layer = useArchiveDataLayer();
+	return useQuery(layer.queries.projects());
+}
+
 export function useArchiveCapture(captureId: string | null | undefined) {
 	const layer = useArchiveDataLayer();
 	const captureQuery = useQuery({ ...layer.queries.capture(captureId || ""), enabled: Boolean(captureId) });

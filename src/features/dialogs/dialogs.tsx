@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type CSSProperties } from "react";
 import { useApplicationSelector, useApplicationStore } from "../../app/application-store-provider.tsx";
 import { selectCanonicalization, selectDialog } from "../../shared/application-store.ts";
 import { getDialogActions } from "./dialog-bridge";
@@ -14,6 +14,7 @@ import {
 	type ExportFormat
 } from "./dialog-model";
 import { AlertTriangle, Check, Plus, Trash2, X } from "lucide-react";
+import { DialogHeading } from "./dialog-components";
 
 function isCancelSubmit(event: FormEvent<HTMLFormElement>): boolean {
 	return ((event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null)?.value === "cancel";
@@ -21,43 +22,6 @@ function isCancelSubmit(event: FormEvent<HTMLFormElement>): boolean {
 
 function useDialogCommand() {
 	return useApplicationSelector(selectDialog);
-}
-
-function DialogHeading({
-	eyebrow,
-	title,
-	titleId,
-	className,
-	leading,
-	onClose
-}: {
-	eyebrow?: string;
-	title: string;
-	titleId?: string;
-	className?: string;
-	leading?: ReactNode;
-	onClose?: () => void;
-}) {
-	return (
-		<div className={`modal-heading ${className || ""}`.trim()}>
-			{leading}
-			<div className="modal-heading-copy">
-				{eyebrow ? <span className="eyebrow">{eyebrow}</span> : null}
-				<h2 id={titleId}>{title}</h2>
-			</div>
-			<button
-				className="icon-btn"
-				type={onClose ? "button" : undefined}
-				value={onClose ? undefined : "cancel"}
-				formMethod={onClose ? undefined : "dialog"}
-				formNoValidate={onClose ? undefined : true}
-				aria-label="Close"
-				onClick={onClose ? () => onClose() : undefined}
-			>
-				<X aria-hidden="true" />
-			</button>
-		</div>
-	);
 }
 
 export function ConfirmationDialog() {

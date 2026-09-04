@@ -20,8 +20,14 @@ import {
 	type LegacyBackupResponse,
 	type CanonicalizationJob,
 	type CanonicalizationPreflight,
-	type PatchMetadataRequest
+	type PatchMetadataRequest,
+	type ProjectSummary
 } from "../persistence/archive-client.ts";
+import {
+	clearActiveProjectId,
+	readActiveProjectId,
+	writeActiveProjectId
+} from "../persistence/active-project.ts";
 import type { Capture } from "../features/capture/capture-framing.ts";
 import {
 	loadState,
@@ -38,6 +44,12 @@ import {
 export type ArchiveDataLayerStorage = StateStorage & {
 	removeItem?: (key: string) => void;
 };
+
+export type ArchiveDataLayerOptions = Readonly<{
+	/** Injectable for tests; production reloads so every controller starts clean. */
+	reloadWindow?: () => void;
+	activeProjectStorage?: ArchiveDataLayerStorage;
+}>;
 
 export type ArchiveCommandError = Error & {
 	command?: string;
@@ -73,6 +85,18 @@ export type ArchiveCommands = {
 	getCanonicalizationPreflight: (captureId: string) => Promise<CanonicalizationPreflight>;
 	getCanonicalizationJob: (captureId: string, jobId: string) => Promise<CanonicalizationJob>;
 	getLegacyBackup: (captureId: string) => Promise<LegacyBackupResponse>;
+	listProjects: () => Promise<ProjectSummary[]>;
+	createProject: (name: string) => Promise<ProjectSummary>;
+	renameProject: (projectId: string, name: string) => Promise<ProjectSummary>;
+	deleteProject: (projectId: string) => Promise<void>;
+	/**
+	 * Switches the active project for this browser profile. The cache clear plus
+	 * full reload is deliberate: the xstate store, the loaded capture, and the
+	 * append pipeline all start clean instead of mixing two project worlds.
+	 */
+	switchActiveProject: (projectId: string) => Promise<void>;
+	forgetActiveProject: () => void;
+	activeProjectId: () => string | null;
 	/** Recording is deliberately exposed as an append command, outside Query cache updates. */
 	recordingWriter: ArchiveClient;
 };
@@ -163,9 +187,36 @@ function commandError(name: string, error: unknown): ArchiveCommandError {
 export function createArchiveDataLayer(
 	queryClient: QueryClient,
 	client = new ArchiveClient(),
-	storage?: ArchiveDataLayerStorage
+	storage?: ArchiveDataLayerStorage,
+	options?: ArchiveDataLayerOptions
 ): ArchiveDataLayer {
-	const queries = createArchiveQueryOptions(client);
+	const reloadWindow = options?.reloadWindow ?? (typeof window === "undefined" ? () => undefined : () => window.location.reload());
+	const baseQueries = createArchiveQueryOptions(client);
+	let selectionRecoveryStarted = false;
+	const reconcileProjectSelection = (projects: ProjectSummary[]): void => {
+		const stored = readActiveProjectId(projectStorage);
+		if (!stored || projects.some(project => project.id === stored) || selectionRecoveryStarted) return;
+		selectionRecoveryStarted = true;
+		clearActiveProjectId(projectStorage);
+		queryClient.removeQueries({
+			predicate: query => query.queryKey[0] === archiveQueryKeys.all[0] && query.queryKey[1] !== "projects"
+		});
+		reloadWindow();
+	};
+	const queries = {
+		...baseQueries,
+		projects: () => {
+			const options = baseQueries.projects();
+			return {
+				...options,
+				queryFn: async () => {
+					const projects = await client.listProjects();
+					reconcileProjectSelection(projects);
+					return projects;
+				}
+			};
+		}
+	};
 	let settingsWriteChain: Promise<void> = Promise.resolve();
 	const mutationSuccess = <Name extends ArchiveMutationName>(
 		name: Name,
@@ -436,6 +487,33 @@ export function createArchiveDataLayer(
 		);
 	}
 
+	// Every recording write flows through this writer, so the switch fence
+	// lives right beside it: switching projects while a session could still
+	// append would silently route later chunks into the other project's
+	// database, and that invariant must not depend on view-layer guards.
+	let openRecordingSessions = 0;
+	const recordingWriter: ArchiveClient = new Proxy(client, {
+		get: (target, property) => {
+			if (property === "startSession") {
+				return async (request: Parameters<ArchiveClient["startSession"]>[0]) => {
+					// Count only sessions the server actually opened.
+					const response = await target.startSession(request);
+					openRecordingSessions += 1;
+					return response;
+				};
+			}
+			if (property === "finalizeSession") {
+				return async (request: Parameters<ArchiveClient["finalizeSession"]>[0]) => {
+					const response = await target.finalizeSession(request);
+					openRecordingSessions = Math.max(0, openRecordingSessions - 1);
+					return response;
+				};
+			}
+			const value = Reflect.get(target, property, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		}
+	});
+
 	const commands: ArchiveCommands = {
 		hydrate: async () => {
 			const [index, folders, queue, history, settings, summaries, fullState] = await Promise.all([
@@ -507,13 +585,43 @@ export function createArchiveDataLayer(
 		getCanonicalizationPreflight: captureId => queryClient.fetchQuery({ ...queries.canonicalizationPreflight(captureId), staleTime: 0 }),
 		getCanonicalizationJob: (captureId, jobId) => queryClient.fetchQuery({ ...queries.canonicalizationJob(captureId, jobId), staleTime: 0 }),
 		getLegacyBackup: captureId => queryClient.fetchQuery(queries.legacyBackup(captureId)),
-		recordingWriter: client
+		listProjects: async () => {
+			return queryClient.ensureQueryData(queries.projects());
+		},
+		createProject: name => run("createProject", name, () => client.createProject(name)),
+		renameProject: (projectId, name) => run("renameProject", { projectId, name }, () => client.renameProject(projectId, name)),
+		deleteProject: projectId => run("deleteProject", projectId, () => client.deleteProject(projectId)),
+		switchActiveProject: async projectId => {
+			if (openRecordingSessions > 0) {
+				throw commandError("switchActiveProject", new Error("Stop recording before switching projects"));
+			}
+			const current = readActiveProjectId(projectStorage);
+			if (current === projectId) return;
+			writeActiveProjectId(projectId, projectStorage);
+			// Every archive query is keyed under ["archive"]; dropping the subtree
+			// guarantees the reloaded page refetches from the new project database.
+			queryClient.removeQueries({ queryKey: archiveQueryKeys.all });
+			reloadWindow();
+		},
+		forgetActiveProject: () => {
+			clearActiveProjectId(projectStorage);
+			queryClient.removeQueries({ queryKey: archiveQueryKeys.all });
+			reloadWindow();
+		},
+		activeProjectId: () => readActiveProjectId(projectStorage),
+		recordingWriter
 	};
 
 	const legacyStorage = storage || browserStorage();
+	const projectStorage = options?.activeProjectStorage ?? legacyStorage;
 	const legacyArchive = readLegacyArchive(legacyStorage);
 	const ready = (async () => {
 		await client.health();
+		// Reconcile the tab-local route before the first routed archive read.
+		// A reload has already been requested when recovery starts, so this
+		// instance must not issue a request with the stale captured project id.
+		if (readActiveProjectId(projectStorage)) await queryClient.ensureQueryData(queries.projects());
+		if (selectionRecoveryStarted) return;
 		const serverState = await client.load();
 		if (legacyArchive && !hasStoredState(serverState)) {
 			await client.migrate(legacyArchive);

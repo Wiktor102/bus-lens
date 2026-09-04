@@ -1,30 +1,24 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { Check, ChevronDown, ChevronRight, Copy, Radio, ShieldCheck } from "lucide-react";
+import { useArchiveCommands, useProjects } from "../data/archive-react";
+import { useMcpProjectMutationPending, useMcpStatus, useSetMcpAgentNotes, useSetMcpProject } from "../data/mcp-react";
+import { orderedProjectOptions } from "../features/projects/projects-model";
+import type { ProjectSummary } from "../persistence/archive-client";
 import { createClaudeMcpConfig, createCodexMcpConfig, resolveMcpEndpoint } from "./agent-config";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { McpRecentlyUsedError, type AgentAccessStatus } from "./mcp-access";
+import { McpRetargetDialog } from "./mcp-retarget-dialog";
 
 export const MCP_SETTINGS_PATH = "/settings/mcp";
+export type { AgentAccessStatus } from "./mcp-access";
 type ConfigName = "codex" | "claude";
-
-export type AgentAccessStatus = {
-	endpoint: string;
-	serverName: string;
-	serverVersion: string;
-	status: "running" | "stopped";
-	supportedProtocolEras: string[];
-	readAccess: string;
-	agentNotes: string;
-	recentClients: Array<{
-		reportedClientName: string;
-		reportedClientVersion?: string;
-		protocolVersion: string;
-		lastSeenAt: string;
-	}>;
-};
 
 function AgentConfigCard({ codexConfig, claudeConfig }: { codexConfig: string; claudeConfig: string }) {
 	const [copied, setCopied] = useState<ConfigName | null>(null);
-	const [expanded, setExpanded] = useState(true);
-
+	const [expanded, setExpanded] = useState(false);
+	const configs = [
+		{ name: "codex" as const, label: "Codex", value: codexConfig },
+		{ name: "claude" as const, label: "Claude Code", value: claudeConfig }
+	];
 	const copyConfig = async (name: ConfigName, value: string): Promise<void> => {
 		try {
 			await navigator.clipboard.writeText(value);
@@ -34,124 +28,103 @@ function AgentConfigCard({ codexConfig, claudeConfig }: { codexConfig: string; c
 			setCopied(null);
 		}
 	};
-
 	return (
-		<section className="agent-config-card" aria-labelledby="agentConfigTitle">
-			<header className="agent-config-card-heading">
-				<button
-					className="agent-config-toggle"
-					type="button"
-					aria-expanded={expanded}
-					aria-controls="agentConfigContent"
-					onClick={() => setExpanded(current => !current)}
-				>
-					<span>
-						<span className="eyebrow">Configuration</span>
-						<strong id="agentConfigTitle">Copy agent config</strong>
-					</span>
-					<span className="agent-config-chevron" aria-hidden="true">{expanded ? <ChevronDown /> : <ChevronRight />}</span>
-				</button>
-				<span className="muted">Use one of these in your local agent settings.</span>
-			</header>
-			{expanded ? (
-				<div id="agentConfigContent" className="agent-config-content">
-					<div className="agent-config-option">
-						<header>
-							<strong>Codex</strong>
-							<button className="btn btn-secondary" type="button" onClick={() => void copyConfig("codex", codexConfig)}>{copied === "codex" ? "Copied" : "Copy config"}</button>
-						</header>
-						<pre>{codexConfig}</pre>
-					</div>
-					<div className="agent-config-option">
-						<header>
-							<strong>Claude</strong>
-							<button className="btn btn-secondary" type="button" onClick={() => void copyConfig("claude", claudeConfig)}>{copied === "claude" ? "Copied" : "Copy config"}</button>
-						</header>
-						<pre>{claudeConfig}</pre>
-					</div>
-				</div>
-			) : null}
+		<section className="mcp-settings-section agent-config-card" aria-labelledby="agentConfigTitle">
+			<button className="agent-config-toggle" type="button" aria-expanded={expanded} aria-controls="agentConfigContent" onClick={() => setExpanded(current => !current)}>
+				<span className="mcp-section-heading"><span className="mcp-section-icon" aria-hidden="true"><Copy /></span><span><strong id="agentConfigTitle">Connect an agent</strong><small>Copy the endpoint config once. Project changes happen here in Bus Lens.</small></span></span>
+				<span className="agent-config-chevron" aria-hidden="true">{expanded ? <ChevronDown /> : <ChevronRight />}</span>
+			</button>
+			{expanded ? <div id="agentConfigContent" className="agent-config-content">
+				{configs.map(config => <div className="agent-config-option" key={config.name}>
+					<header><strong>{config.label}</strong><button className="btn btn-secondary" type="button" onClick={() => { void copyConfig(config.name, config.value); }}>{copied === config.name ? <><Check aria-hidden="true" /> Copied</> : <><Copy aria-hidden="true" /> Copy</>}</button></header>
+					<pre>{config.value}</pre>
+				</div>)}
+			</div> : null}
+		</section>
+	);
+}
+
+function relativeTime(value: string): string {
+	const seconds = Math.max(0, Math.round((Date.now() - Date.parse(value)) / 1000));
+	if (seconds < 5) return "just now";
+	if (seconds < 60) return `${seconds}s ago`;
+	return `${Math.round(seconds / 60)}m ago`;
+}
+
+function ProjectRouting({ projects, status, busy, onSelect }: { projects: readonly ProjectSummary[]; status: AgentAccessStatus; busy: boolean; onSelect: (project: ProjectSummary) => void }) {
+	const projectsById = new Map(projects.map(project => [project.id, project]));
+	return (
+		<section className="mcp-settings-section" aria-labelledby="mcpProjectTitle">
+			<div className="mcp-section-heading"><span className="mcp-section-icon" aria-hidden="true"><Radio /></span><span><strong id="mcpProjectTitle">MCP project</strong><small>The endpoint reads one project until you move it.</small></span></div>
+			<div className="mcp-project-list">{orderedProjectOptions(projects).map(option => {
+				const project = projectsById.get(option.value)!;
+				const selected = project.id === status.project.id;
+				return <div className="mcp-project-row" data-selected={selected || undefined} key={project.id}>
+					<span className="mcp-project-indicator" aria-hidden="true" /><span><strong>{option.label}</strong><small>{selected ? "Serving MCP now" : "Available"}</small></span>
+					{selected ? <span className="mcp-project-current"><Check aria-hidden="true" /> Current</span> : <button className="btn btn-secondary" type="button" disabled={busy} onClick={() => onSelect(project)}>Use for MCP</button>}
+				</div>;
+			})}</div>
 		</section>
 	);
 }
 
 function AgentAccessPanel() {
-	const [status, setStatus] = useState<AgentAccessStatus | null>(null);
-	const [savingNotes, setSavingNotes] = useState(false);
-
-	useEffect(() => {
-		let disposed = false;
-		void fetch("/api/agent-access", { headers: { accept: "application/json" } })
-			.then(response => response.ok ? response.json() as Promise<AgentAccessStatus> : Promise.reject(new Error("Agent access status unavailable")))
-			.then(value => {
-				if (!disposed) setStatus(value);
-			})
-			.catch(() => {
-				if (!disposed) setStatus(null);
-			});
-		return () => { disposed = true; };
-	}, []);
-
+	const commands = useArchiveCommands();
+	const projectsQuery = useProjects();
+	const statusQuery = useMcpStatus();
+	const setProjectMutation = useSetMcpProject();
+	const setNotesMutation = useSetMcpAgentNotes();
+	const busy = useMcpProjectMutationPending();
+	const [error, setError] = useState<string | null>(null);
+	const [confirmation, setConfirmation] = useState<Readonly<{ status: AgentAccessStatus; target: ProjectSummary }> | null>(null);
+	const status = statusQuery.data ?? null;
+	const visibleError = error ?? (statusQuery.isError && !status ? "The local MCP service did not respond." : null);
+	const projects = projectsQuery.data ?? [];
+	const activeProjectId = commands.activeProjectId() ?? "default";
+	const activeProject = projects.find(project => project.id === activeProjectId);
 	const endpoint = resolveMcpEndpoint(status?.endpoint, window.location.origin);
-	const codexConfig = createCodexMcpConfig(endpoint);
-	const claudeConfig = createClaudeMcpConfig(endpoint);
-	const setAgentNotes = async (enabled: boolean): Promise<void> => {
-		setSavingNotes(true);
+	const changeProject = async (project: ProjectSummary, force: boolean): Promise<void> => {
+		setError(null);
 		try {
-			const response = await fetch("/api/settings/allow_agent_authored_notes", {
-				method: "PUT",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify(enabled)
-			});
-			if (!response.ok) throw new Error("Could not update agent-note setting");
-			setStatus(current => current ? { ...current, agentNotes: enabled ? "enabled" : "disabled" } : current);
-		} catch {
-			// The read-only status remains authoritative when the setting write fails.
-		} finally {
-			setSavingNotes(false);
+			await setProjectMutation.mutateAsync({ projectId: project.id, force });
+			setConfirmation(null);
+		} catch (changeError) {
+			if (changeError instanceof McpRecentlyUsedError) setConfirmation({ status: changeError.status, target: project });
+			else setError(changeError instanceof Error ? changeError.message : "Could not change the MCP project.");
 		}
 	};
-
-	return (
-		<>
-			<section id="agentAccessPanel" className="agent-access-panel" aria-labelledby="agentAccessTitle">
-				<div className="agent-access-heading">
-					<div>
-						<span className="eyebrow">Local agent access</span>
-						<h2 id="agentAccessTitle">MCP orientation</h2>
-					</div>
-				</div>
-				<div className="agent-access-grid">
-					<div><span>Endpoint</span><code>{endpoint}</code></div>
-					<div><span>Server</span><strong>{status ? `${status.serverName} ${status.serverVersion}` : "Bus Lens Agent Access"}</strong></div>
-					<div><span>Protocol eras</span><strong>{status?.supportedProtocolEras.join(", ") ?? "2026-07-28, 2025-11-25"}</strong></div>
-					<div><span>Read access</span><strong>{status?.readAccess ?? "available"}</strong></div>
-					<div><span>Agent notes</span><strong>{status?.agentNotes ?? "not available in this phase"}</strong></div>
-					<div><span>Recent clients</span><strong>{status?.recentClients.length ? status.recentClients.map(client => `${client.reportedClientName}${client.reportedClientVersion ? ` ${client.reportedClientVersion}` : ""}`).join(", ") : "None reported yet"}</strong></div>
-				</div>
-				<label className="agent-notes-toggle">
-					<input type="checkbox" checked={status?.agentNotes === "enabled"} disabled={savingNotes || !status} onChange={event => { const enabled = event.currentTarget.checked; void setAgentNotes(enabled); }} />
-					<span>Allow agent-authored notes</span>
-				</label>
-				<p className="muted">MCP is stateless; “recent clients” are self-reported observations, not authenticated connections.</p>
-			</section>
-			<AgentConfigCard codexConfig={codexConfig} claudeConfig={claudeConfig} />
-		</>
-	);
+	const updateNotes = async (enabled: boolean): Promise<void> => {
+		if (!status) return;
+		const projectId = status.project.id;
+		setError(null);
+		try {
+			await setNotesMutation.mutateAsync({ projectId, enabled });
+		} catch (notesError) {
+			setError(notesError instanceof Error ? notesError.message : "Could not update agent note access.");
+		}
+	};
+	return <>
+		<section className={`mcp-state-card ${status ? "running" : "offline"}`.trim()}>
+			<div className="mcp-state-signal"><span aria-hidden="true" /><small>{status ? "Running" : "Unavailable"}</small></div>
+			<div><span className="eyebrow">Global MCP endpoint</span><h2>{status?.project.name ?? "No project status"}</h2><p>{status ? "All MCP requests are routed to this project." : "Bus Lens could not read the MCP service status."}</p></div>
+			{status && activeProject && activeProject.id !== status.project.id ? <button className="btn btn-warning" type="button" disabled={busy} onClick={() => { void changeProject(activeProject, false); }}>Use this project</button> : null}
+		</section>
+		{visibleError ? <p className="conversion-error mcp-error" role="alert">{visibleError}</p> : null}
+		{status ? <ProjectRouting projects={projects} status={status} busy={busy} onSelect={project => { void changeProject(project, false); }} /> : null}
+		{status ? <section className="mcp-settings-section" aria-labelledby="mcpAccessTitle">
+			<div className="mcp-section-heading"><span className="mcp-section-icon" aria-hidden="true"><ShieldCheck /></span><span><strong id="mcpAccessTitle">Access</strong><small>Analysis is read-only. Agent notes are the only optional write.</small></span></div>
+			<label className="agent-notes-toggle"><span><strong>Allow agent-authored notes</strong><small>Agents can append evidence-linked notes in {status.project.name}.</small></span><input type="checkbox" checked={status.agentNotes === "enabled"} disabled={setNotesMutation.isPending} onChange={event => { const enabled = event.currentTarget.checked; void updateNotes(enabled); }} /></label>
+		</section> : null}
+		{status ? <section className="mcp-settings-section" aria-labelledby="mcpClientsTitle">
+			<div className="mcp-section-heading"><span className="mcp-section-icon mcp-client-count" aria-hidden="true">{status.recentClients.length}</span><span><strong id="mcpClientsTitle">Recent clients</strong><small>Self-reported MCP activity for the current target.</small></span></div>
+			{status.recentClients.length ? <ul className="mcp-client-list">{status.recentClients.map(client => <li key={`${client.reportedClientName}-${client.reportedClientVersion ?? ""}`}><span><strong>{client.reportedClientName}{client.reportedClientVersion ? ` ${client.reportedClientVersion}` : ""}</strong><small>{client.protocolVersion}</small></span><time dateTime={client.lastSeenAt}>{relativeTime(client.lastSeenAt)}</time></li>)}</ul> : <p className="mcp-empty">No client has used MCP since this project was selected.</p>}
+		</section> : null}
+		<AgentConfigCard codexConfig={createCodexMcpConfig(endpoint)} claudeConfig={createClaudeMcpConfig(endpoint)} />
+		{status ? <details className="mcp-technical"><summary>Technical details</summary><dl><div><dt>Endpoint</dt><dd><code>{endpoint}</code></dd></div><div><dt>Server</dt><dd>{status.serverName} {status.serverVersion}</dd></div><div><dt>Protocol versions</dt><dd>{status.supportedProtocolEras.join(", ")}</dd></div></dl></details> : null}
+		<McpRetargetDialog status={confirmation?.status ?? null} targetName={confirmation?.target.name ?? "project"} busy={busy} onCancel={() => setConfirmation(null)} onConfirm={() => { if (confirmation) void changeProject(confirmation.target, true); }} />
+	</>;
 }
 
 export function McpSettingsPage() {
-	return (
-		<main className="mcp-page">
-			<div className="mcp-page-heading">
-				<div>
-					<span className="eyebrow">Settings</span>
-					<h1>MCP agent access</h1>
-					<p className="muted">Connect a local coding agent to Bus Lens for read-only capture analysis.</p>
-				</div>
-				<a className="btn btn-secondary" href="/">Back to workbench</a>
-			</div>
-			<AgentAccessPanel />
-		</main>
-	);
+	return <main className="mcp-page"><div className="mcp-page-heading"><div><span className="eyebrow">Settings / MCP</span><h1>Agent access</h1><p>Choose the project exposed at the local MCP endpoint.</p></div><a className="btn btn-secondary" href="/">Back to workbench</a></div><AgentAccessPanel /></main>;
 }

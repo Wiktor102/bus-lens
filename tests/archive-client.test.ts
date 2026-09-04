@@ -52,6 +52,26 @@ test("new capture creation is POST /api/captures and the legacy document path is
 	}
 });
 
+test("application settings use the project-aware archive request path", async () => {
+	const originalFetch = globalThis.fetch;
+	const calls: Call[] = [];
+	globalThis.fetch = async (input, init) => {
+		calls.push({ path: String(input), method: init?.method ?? "GET", body: bodyOf(init) });
+		return new Response(null, { status: 204 });
+	};
+
+	try {
+		await new ArchiveClient().setApplicationSetting("allow_agent_authored_notes", true);
+		assert.deepEqual(calls, [{
+			path: "/api/settings/allow_agent_authored_notes",
+			method: "PUT",
+			body: true
+		}]);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
 test("canonical CaptureWriter commands use dedicated HTTP endpoints", async () => {
 	const originalFetch = globalThis.fetch;
 	const calls: Call[] = [];

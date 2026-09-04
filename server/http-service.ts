@@ -1,21 +1,30 @@
 import { createReadStream, existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { basename, extname, join, resolve } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 import { backupDatabase, restoreDatabase } from "./backup.ts";
 import {
-	ArchiveRepository,
 	RepositoryConflictError,
 	RepositoryValidationError,
+	type ArchiveRepository,
 	type LegacyArchive,
 	type ArchiveIndex,
 	type JsonDocument
 } from "./archive-repository.ts";
 import { openDatabase, type SqliteDatabase } from "./database.ts";
-import { CanonicalQueryService } from "./canonical-query.ts";
+import { DatabaseManager, ProjectNotFoundError, type ProjectDatabaseContext } from "./database-manager.ts";
+import {
+	ensureDefaultProject,
+	migrateLegacyProjectRegistry,
+	openProjectRegistryDatabase,
+	PROJECT_REGISTRY_FILENAME,
+	ProjectRegistry,
+	ProjectRegistryError
+} from "./project-registry.ts";
+import { ProjectsService } from "./projects-service.ts";
 import {
 	CanonicalCaptureCommandError,
-	CanonicalCaptureCommandService,
+	type CanonicalCaptureCommandService,
 	type CaptureMetadataPatch,
 	type CreateCaptureRequest,
 	type FramingSectionRequest
@@ -38,6 +47,9 @@ const MIME_TYPES: Record<string, string> = {
 type Entity = "captures" | "folders" | "queue" | "history";
 type ServiceOptions = {
 	databasePath: string;
+	registryPath?: string;
+	/** Managed project files live here; defaults to <database directory>/projects. */
+	projectsDirectory?: string;
 	staticDirectory?: string;
 	maxBodyBytes?: number;
 	mcpEndpoint?: string;
@@ -45,11 +57,19 @@ type ServiceOptions = {
 	mcpToolRegistrar?: McpToolRegistrar;
 };
 
+export const MCP_RECENT_USE_WINDOW_MS = 30_000;
+
 export type ArchiveHttpService = {
 	server: Server;
+	/** Default-project services, retained for embedders that bypass routing. */
 	repository: ArchiveRepository;
 	commandService: CanonicalCaptureCommandService;
 	database: SqliteDatabase;
+	registryDatabase: SqliteDatabase;
+	registryDatabasePath: string;
+	registry: ProjectRegistry;
+	manager: DatabaseManager;
+	projects: ProjectsService;
 	mcpAccess: McpAccess;
 	close: () => Promise<void>;
 };
@@ -75,6 +95,13 @@ async function jsonBody(request: IncomingMessage, maxBytes: number): Promise<unk
 function documentFrom(value: unknown): JsonDocument {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new RepositoryValidationError("Document must be an object");
 	return value as JsonDocument;
+}
+
+function projectNameFromBody(body: JsonDocument): string {
+	const value = body.name;
+	// String() coercion would accept objects as "[object Object]"; names must be strings.
+	if (typeof value !== "string") throw new RepositoryValidationError("Project name must be a string");
+	return value;
 }
 
 function expectedVersion(request: IncomingMessage): number | undefined {
@@ -133,11 +160,45 @@ async function serveStatic(response: ServerResponse, staticDirectory: string, pa
 	return true;
 }
 
+const PROJECT_HEADER = "x-bus-lens-project";
+
+function requestedProjectId(request: IncomingMessage): string | undefined {
+	const value = request.headers[PROJECT_HEADER];
+	if (!value || Array.isArray(value)) return undefined;
+	const trimmed = value.trim();
+	return trimmed || undefined;
+}
+
+function isLiveDatabasePath(candidate: string, registryDatabasePath: string, registry: ProjectRegistry): boolean {
+	const resolved = resolve(candidate);
+	return resolved === registryDatabasePath || registry.list().some(project => resolve(project.dbPath) === resolved);
+}
+
 export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpService {
-	const database = openDatabase(options.databasePath);
-	const repository = new ArchiveRepository(database);
-	const canonicalQueries = new CanonicalQueryService(database);
-	const commandService = new CanonicalCaptureCommandService(database);
+	const rootDatabase = openDatabase(options.databasePath);
+	const rootDatabasePath = resolve(options.databasePath);
+	const registryDatabasePath = resolve(options.registryPath ?? join(dirname(rootDatabasePath), PROJECT_REGISTRY_FILENAME));
+	if (registryDatabasePath === rootDatabasePath) {
+		rootDatabase.close();
+		throw new Error("Project registry database must differ from the Default project database");
+	}
+	const registryDatabase = openProjectRegistryDatabase(registryDatabasePath);
+	let registry: ProjectRegistry;
+	try {
+		registry = new ProjectRegistry(registryDatabase);
+		migrateLegacyProjectRegistry(registry, rootDatabase);
+		ensureDefaultProject(registry, rootDatabasePath);
+	} catch (error) {
+		registryDatabase.close();
+		rootDatabase.close();
+		throw error;
+	}
+	const manager = new DatabaseManager({ rootDatabase, rootDatabasePath: options.databasePath, registry });
+	// Embedders that read service.repository directly keep observing the Default
+	// project; routed requests below resolve their own context per request.
+	const defaultContext = manager.forProject();
+	const projectsDirectory = resolve(options.projectsDirectory ?? join(dirname(rootDatabasePath), "projects"));
+	const projects = new ProjectsService({ registry, manager, projectsDirectory });
 	const staticDirectory = options.staticDirectory ? resolve(options.staticDirectory) : undefined;
 	const maxBodyBytes = options.maxBodyBytes ?? 128 * 1024 * 1024;
 	const phase4ToolRegistrar: McpToolRegistrar = (server, queries, recordClient, commands) => {
@@ -145,25 +206,191 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 		registerComparisonTools(server, queries, recordClient);
 		registerAgentNoteTools(server, queries, recordClient, commands);
 	};
-	const mcpAccess = createMcpAccess({
-		database,
-		databasePath: options.databasePath,
-		endpoint: options.mcpEndpoint ?? "http://127.0.0.1/mcp",
-		serverVersion: "1.0.0",
-		agentNotes: options.mcpAgentNotes,
-		toolRegistrar: options.mcpToolRegistrar ?? phase4ToolRegistrar
-	});
+	type McpTarget = { access: McpAccess; databasePath: string; projectId: string; release: () => void };
+	const createMcpTarget = (context: ProjectDatabaseContext): McpTarget => {
+		manager.acquire(context.projectId);
+		try {
+			const access = createMcpAccess({
+				database: context.database,
+				databasePath: context.databasePath,
+				endpoint: options.mcpEndpoint ?? "http://127.0.0.1/mcp",
+				serverVersion: "1.0.0",
+				agentNotes: options.mcpAgentNotes,
+				toolRegistrar: options.mcpToolRegistrar ?? phase4ToolRegistrar
+			});
+			let released = false;
+			return {
+				access,
+				databasePath: context.databasePath,
+				projectId: context.projectId,
+				release: () => {
+					if (released) return;
+					released = true;
+					manager.release(context.projectId);
+				}
+			};
+		} catch (error) {
+			manager.release(context.projectId);
+			throw error;
+		}
+	};
+	const destroyMcpTarget = async (target: McpTarget): Promise<void> => {
+		try {
+			await target.access.close();
+		} finally {
+			target.release();
+		}
+	};
+	const closeMcpTarget = async (target: McpTarget): Promise<void> => {
+		try {
+			await destroyMcpTarget(target);
+		} catch (error) {
+			console.error("Bus Lens MCP close failed", error);
+		}
+	};
+	let mcpTarget = createMcpTarget(manager.forProject(registry.mcpProjectId()));
+	const mcpStatus = () => {
+		const project = registry.require(mcpTarget.projectId);
+		return {
+			...mcpTarget.access.getStatus(),
+			project: { id: project.id, name: project.name },
+			recentUseWindowMs: MCP_RECENT_USE_WINDOW_MS
+		};
+	};
+	const mcpRecentlyUsed = (): boolean => {
+		const status = mcpTarget.access.getStatus();
+		if (status.activeRequests > 0) return true;
+		if (!status.lastRequestAt) return false;
+		return Date.now() - Date.parse(status.lastRequestAt) < MCP_RECENT_USE_WINDOW_MS;
+	};
+	async function setMcpProject(projectId: string): Promise<void> {
+		if (projectId === mcpTarget.projectId) return;
+		const nextTarget = createMcpTarget(manager.forProject(projectId));
+		try {
+			registry.setMcpProjectId(projectId);
+		} catch (error) {
+			await closeMcpTarget(nextTarget);
+			throw error;
+		}
+		const previous = mcpTarget;
+		mcpTarget = nextTarget;
+		await closeMcpTarget(previous);
+	}
+	let activeRequests = 0;
+	let maintenance = false;
+	let resolveMaintenanceDrain: (() => void) | undefined;
+	const leaveRequest = () => {
+		activeRequests -= 1;
+		if (maintenance && activeRequests <= 1) {
+			resolveMaintenanceDrain?.();
+			resolveMaintenanceDrain = undefined;
+		}
+	};
+	const beginMaintenance = async (): Promise<(() => void) | undefined> => {
+		if (maintenance) return undefined;
+		maintenance = true;
+		if (activeRequests > 1) {
+			await new Promise<void>(resolveDrain => {
+				resolveMaintenanceDrain = resolveDrain;
+			});
+		}
+		return () => {
+			maintenance = false;
+		};
+	};
 	const server = createServer(async (request, response) => {
+		// Released in finally so every await below keeps its project handle
+		// pinned against eviction and explicit closes.
+		let releaseProject: (() => void) | undefined;
+		let requestActive = false;
 		try {
 			const url = new URL(request.url ?? "/", "http://127.0.0.1");
+			if (request.method === "GET" && url.pathname === "/api/health") {
+				return send(response, 200, maintenance ? { ok: true, maintenance: true } : { ok: true });
+			}
+			if (maintenance) return send(response, 503, { error: "Database restore in progress" });
+			activeRequests += 1;
+			requestActive = true;
 			const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
-			if (url.pathname === "/mcp") return await mcpAccess.handle(request, response);
+			if (url.pathname === "/mcp") return await mcpTarget.access.handle(request, response);
 			if (segments[0] !== "api") {
 				if (staticDirectory && await serveStatic(response, staticDirectory, url.pathname)) return;
 				return send(response, 404, { error: "Not found" });
 			}
-			if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { ok: true });
-			if (request.method === "GET" && url.pathname === "/api/agent-access") return send(response, 200, mcpAccess.getStatus());
+			if (url.pathname === "/api/agent-access") {
+				if (request.method === "GET") return send(response, 200, mcpStatus());
+				if (request.method === "PUT") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					if (typeof body.projectId !== "string" || !body.projectId) throw new RepositoryValidationError("projectId must be a non-empty string");
+					registry.require(body.projectId);
+					if (body.projectId !== mcpTarget.projectId && mcpRecentlyUsed() && body.force !== true) {
+						return send(response, 409, { error: "MCP was used recently", code: "MCP_RECENTLY_USED", status: mcpStatus() });
+					}
+					await setMcpProject(body.projectId);
+					return send(response, 200, mcpStatus());
+				}
+				return send(response, 405, { error: "Method not allowed" });
+			}
+			if (segments[1] === "projects") {
+				const projectId = segments[2];
+				// CRUD only matches the exact collection/item shape; deeper paths
+				// must not silently rename or delete the addressed project.
+				if (!projectId && request.method === "GET") return send(response, 200, { projects: projects.list() });
+				if (!projectId && request.method === "POST") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					return send(response, 201, await projects.create(projectNameFromBody(body)));
+				}
+				if (projectId && segments.length === 3 && request.method === "PATCH") {
+					const body = documentFrom(await jsonBody(request, maxBodyBytes));
+					return send(response, 200, projects.rename(projectId, projectNameFromBody(body)));
+				}
+				if (projectId && segments.length === 3 && request.method === "DELETE") {
+					await projects.delete(projectId, requestedProjectId(request));
+					return send(response, 204, {});
+				}
+				return send(response, 405, { error: "Method not allowed" });
+			}
+			let projectContext: ProjectDatabaseContext;
+			try {
+				projectContext = manager.forProject(requestedProjectId(request));
+			} catch (error) {
+				if (error instanceof ProjectNotFoundError) return send(response, 404, { error: error.message });
+				throw error;
+			}
+			if (segments[1] === "restore" && request.method === "POST") {
+				const body = documentFrom(await jsonBody(request, maxBodyBytes));
+				const { backupPath } = body;
+				const source = resolve(String(backupPath ?? ""));
+				if (!String(backupPath ?? "").trim()) return send(response, 400, { error: "backupPath is required" });
+				if (body.destinationPath !== undefined) return send(response, 400, { error: "destinationPath is not accepted; restore targets the selected project" });
+				if (!existsSync(source)) return send(response, 400, { error: "backupPath does not exist" });
+				if (isLiveDatabasePath(source, registryDatabasePath, registry)) return send(response, 409, { error: "backupPath must not be a live project or registry database" });
+				const endMaintenance = await beginMaintenance();
+				if (!endMaintenance) return send(response, 409, { error: "Another database restore is already in progress" });
+				const restoresMcpTarget = mcpTarget.projectId === projectContext.projectId;
+				try {
+					try {
+						if (restoresMcpTarget) await destroyMcpTarget(mcpTarget);
+						await manager.close(projectContext.projectId);
+						await restoreDatabase(source, projectContext.databasePath);
+					} finally {
+						const reopenedContext = manager.forProject(projectContext.projectId);
+						if (restoresMcpTarget) mcpTarget = createMcpTarget(reopenedContext);
+					}
+					registry.touch(projectContext.projectId);
+					return send(response, 204, {});
+				} finally {
+					endMaintenance();
+				}
+			}
+			manager.acquire(projectContext.projectId);
+			releaseProject = () => manager.release(projectContext.projectId);
+			// Writes are an explicit use of a project. Keep that activity timestamp
+			// without using it to choose the separately configured MCP target.
+			if (request.method !== "GET") registry.touch(projectContext.projectId);
+			const { repository } = projectContext;
+			const canonicalQueries = projectContext.queryService;
+			const commandService = projectContext.commandService;
 			if (request.method === "GET" && url.pathname === "/api/archive") {
 				return send(response, 200, { captures: repository.listCaptures(), folders: repository.listFolders(), index: repository.getArchiveIndex(), queue: repository.listQueue(), history: repository.listHistory(), settings: repository.getSettings() });
 			}
@@ -460,12 +687,12 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			}
 			if (segments[1] === "backup" && request.method === "POST") {
 				const { destinationPath } = documentFrom(await jsonBody(request, maxBodyBytes));
-				return send(response, 201, await backupDatabase(database, String(destinationPath)));
-			}
-			if (segments[1] === "restore" && request.method === "POST") {
-				const { backupPath, destinationPath } = documentFrom(await jsonBody(request, maxBodyBytes));
-				await restoreDatabase(String(backupPath), String(destinationPath));
-				return send(response, 204, {});
+				const destination = String(destinationPath ?? "");
+				if (!destination.trim()) return send(response, 400, { error: "destinationPath is required" });
+				if (isLiveDatabasePath(destination, registryDatabasePath, registry)) {
+					return send(response, 409, { error: "Backup destination would overwrite a live project or registry database" });
+				}
+				return send(response, 201, await backupDatabase(projectContext.database, destination));
 			}
 			const entity = segments[1] as Entity;
 			if (!["captures", "folders", "queue", "history"].includes(entity)) return send(response, 404, { error: "Not found" });
@@ -493,21 +720,54 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 				return send(response, status, { error: error.message, code: error.code, details: error.details });
 			}
 			if (error instanceof RepositoryConflictError) return send(response, 409, { error: error.message, code: error.code });
+			if (error instanceof ProjectRegistryError) {
+				return send(response, error.code === "not-found" ? 404 : error.code === "conflict" ? 409 : 400, { error: error.message, code: error.code });
+			}
 			if (error instanceof RepositoryValidationError || error instanceof SyntaxError) return send(response, 400, { error: error.message });
 			console.error("Archive service request failed", error);
 			return send(response, 500, { error: "Internal server error" });
+		} finally {
+			releaseProject?.();
+			if (requestActive) leaveRequest();
 		}
 	});
 	return {
 		server,
-		repository,
-		commandService,
-		database,
-		mcpAccess,
+		repository: defaultContext.repository,
+		commandService: defaultContext.commandService,
+		database: rootDatabase,
+		registryDatabase,
+		registryDatabasePath,
+		registry,
+		manager,
+		projects,
+		// Live view: explicit UI routing swaps the underlying access.
+		get mcpAccess() {
+			return mcpTarget.access;
+		},
 		close: async () => {
-			await mcpAccess.close();
-			await new Promise<void>(resolveClose => server.close(() => resolveClose()));
-			database.close();
+			let firstError: unknown;
+			const attempt = async (operation: () => void | Promise<void>): Promise<void> => {
+				try {
+					await operation();
+				} catch (error) {
+					firstError ??= error;
+				}
+			};
+			// Stop accepting requests now, but do not wait for long-lived MCP
+			// subscriptions until closing their handler has ended the streams.
+			const httpClose = attempt(() => new Promise<void>((resolveClose, rejectClose) => {
+				server.close(error => {
+					if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") rejectClose(error);
+					else resolveClose();
+				});
+			}));
+			await attempt(() => destroyMcpTarget(mcpTarget));
+			await httpClose;
+			await attempt(() => manager.closeAll());
+			await attempt(() => { rootDatabase.close(); });
+			await attempt(() => { registryDatabase.close(); });
+			if (firstError !== undefined) throw firstError;
 		}
 	};
 }
