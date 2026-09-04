@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	countDistinctMessageSignatures,
-	countReceivedRawBytes,
+	countCapturedRawBytes,
 	normalizeCaptureSummaryData,
 	signatureForMessage,
 	sumRecordingSessionDurations
@@ -18,14 +18,14 @@ test("sums discrete recording sessions instead of their timestamp span", () => {
 	);
 });
 
-test("empty, TX-only, and open sessions contribute no duration", () => {
+test("empty and open sessions contribute no duration, while TX-only captures do", () => {
 	assert.equal(sumRecordingSessionDurations([{ id: "empty" }, { id: "tx-only", firstReceivedAt: 200 }]), 0);
 	assert.deepEqual(
 		normalizeCaptureSummaryData(
 			{ byteStream: [{ value: 1, timestamp: 100, direction: "tx" }], notes: [] },
 			() => "legacy"
 		).captureSessions,
-		[]
+		[{ id: "legacy", firstReceivedAt: 100, lastReceivedAt: 100 }]
 	);
 });
 
@@ -51,14 +51,14 @@ test("ignores hidden bytes when counting message signatures", () => {
 	);
 });
 
-test("counts only received raw bytes", () => {
+test("counts captured raw bytes in both directions", () => {
 	assert.equal(
-		countReceivedRawBytes([
+		countCapturedRawBytes([
 			{ value: 1, timestamp: 1, direction: "rx" },
 			{ value: 2, timestamp: 2, direction: "tx" },
 			{ value: 3, timestamp: 3 }
 		]),
-		2
+		3
 	);
 });
 
@@ -71,7 +71,7 @@ test("preserves stored session duration after raw rolling-buffer trimming", () =
 	assert.equal(sumRecordingSessionDurations(capture.captureSessions), 600);
 });
 
-test("normalizes a legacy received stream into one session", () => {
+test("normalizes a legacy captured stream into one session", () => {
 	const capture = normalizeCaptureSummaryData(
 		{
 			byteStream: [
@@ -84,7 +84,7 @@ test("normalizes a legacy received stream into one session", () => {
 		() => "legacy-session"
 	);
 	assert.deepEqual(capture.captureSessions, [
-		{ id: "legacy-session", firstReceivedAt: 150, lastReceivedAt: 450 }
+		{ id: "legacy-session", firstReceivedAt: 100, lastReceivedAt: 450 }
 	]);
 });
 

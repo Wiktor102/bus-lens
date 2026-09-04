@@ -124,6 +124,86 @@ test("publishes updated live header stats after a byte flush", async () => {
 	await controller.stopRecording();
 });
 
+test("counts captured TX bytes in live statistics and session bounds", async () => {
+	const capture: Capture = { id: "live-tx-header", byteStream: [], frameSections: [], messages: [], notes: [], annotations: {} };
+	const capturedByteCounts: string[] = [];
+	const controller = createSerialController({
+		capture: () => capture,
+		state: { captures: [capture] } as AppState,
+		showToast: () => {},
+		publishCaptureHeaderState: current => {
+			capturedByteCounts.push(deriveCaptureHeaderSnapshot(current, true).summary.capturedBytes);
+		},
+		publishFramingToolbarState: () => {},
+		renderMessages: () => {},
+		stopSendQueue: () => {}
+	});
+
+	await controller.toggleRecording();
+	controller.queueLiveBytes([0xaa], "rx");
+	controller.flushLiveBytes();
+	controller.queueLiveBytes([0xbb], "tx");
+	controller.flushLiveBytes();
+
+	assert.equal(capturedByteCounts.at(-1), "2 B");
+	assert.deepEqual(capture.byteStream?.map(record => record.direction), ["rx", "tx"]);
+	assert.ok((capture.captureSessions?.[0]?.firstReceivedAt ?? 0) <= (capture.captureSessions?.[0]?.lastReceivedAt ?? 0));
+	await controller.stopRecording();
+});
+
+test("opens a directional sniffer capture at its selected baud and parses split records", async () => {
+	const capture: Capture = {
+		id: "sniffer-transport",
+		baudRate: 9600,
+		inputFormat: "sniffer",
+		byteStream: [],
+		frameSections: [],
+		messages: [],
+		notes: [],
+		annotations: {}
+	};
+	let enqueue!: (chunk: Uint8Array) => void;
+	let closeStream!: () => void;
+	let openedBaudRate: number | undefined;
+	const readable = new ReadableStream<Uint8Array>({
+		start(streamController) {
+			enqueue = chunk => streamController.enqueue(chunk);
+			closeStream = () => streamController.close();
+		}
+	});
+	const port = {
+		readable,
+		writable: null,
+		open: async (options: { baudRate: number }) => { openedBaudRate = options.baudRate; },
+		close: async () => { closeStream(); }
+	};
+	const controller = createSerialController({
+		capture: () => capture,
+		state: { captures: [capture] } as AppState,
+		showToast: () => {},
+		publishFramingToolbarState: () => {},
+		renderMessages: () => {},
+		stopSendQueue: () => {},
+		serial: { requestPort: async () => port }
+	});
+
+	await controller.connect();
+	assert.equal(openedBaudRate, 9600);
+	await controller.toggleRecording();
+	enqueue(Uint8Array.from([0xa5, 0x00]));
+	await new Promise<void>(resolve => setTimeout(resolve, 0));
+	enqueue(Uint8Array.from([0x12, 0xa5, 0x01, 0x34]));
+	await new Promise<void>(resolve => setTimeout(resolve, 0));
+	controller.flushLiveBytes();
+
+	assert.deepEqual(capture.byteStream?.map(record => ({ value: record.value, direction: record.direction })), [
+		{ value: 0x12, direction: "rx" },
+		{ value: 0x34, direction: "tx" }
+	]);
+	await controller.stopRecording();
+	await controller.disconnect();
+});
+
 test("retaining a rolling capture preserves the framing active at the rollover boundary", () => {
 	const capture: Capture = {
 		byteStream: Array.from({ length: MAX_CAPTURE_BYTES }, (_, rawOffset) => ({

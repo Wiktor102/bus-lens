@@ -1,6 +1,6 @@
 import {
 	countDistinctMessageSignatures,
-	countReceivedRawBytes,
+	countCapturedRawBytes,
 	normalizeDescription,
 	sumRecordingSessionDurations
 } from "./capture-summary.ts";
@@ -107,7 +107,7 @@ export function deriveCaptureHeaderSnapshot(
 			messages: messages.length.toLocaleString(),
 			unique: countDistinctMessageSignatures(messages).toLocaleString(),
 			captureLength: formatCaptureDuration(sumRecordingSessionDurations(capture.captureSessions)),
-			capturedBytes: `${countReceivedRawBytes(capture.byteStream).toLocaleString()} B`
+			capturedBytes: `${countCapturedRawBytes(capture.byteStream).toLocaleString()} B`
 		}
 	};
 }

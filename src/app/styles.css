@@ -12,6 +12,9 @@
 	--amber: #f2b84b;
 	--red: #f1695f;
 	--blue: #6fc5d6;
+	--violet: #b99af7;
+	--direction-rx: #68d391;
+	--direction-tx: #f0a15a;
 	--mono: "Cascadia Code", "Cascadia Mono", Consolas, monospace;
 	--sans: Bahnschrift, "Aptos Narrow", "Segoe UI", sans-serif;
 }
@@ -1780,6 +1783,12 @@ tr:hover .row-action,
 .message-table tr.sent-message td:first-child {
 	border-left: 2px solid var(--blue);
 }
+.message-table tr.monitored-tx-message td {
+	background: linear-gradient(90deg, color-mix(in srgb, var(--violet) 5%, transparent), transparent 75%);
+}
+.message-table tr.monitored-tx-message td:first-child {
+	border-left: 2px solid color-mix(in srgb, var(--violet) 48%, transparent);
+}
 .direction-tag {
 	display: inline-block;
 	margin-left: 7px;
@@ -1836,6 +1845,21 @@ tr:hover .row-action,
 .byte-value {
 	position: relative;
 	z-index: 3;
+}
+.byte-direction-underline {
+	position: absolute;
+	left: 1px;
+	right: 1px;
+	bottom: -4px;
+	height: 2px;
+	pointer-events: none;
+	z-index: 4;
+}
+.byte-direction-underline.rx {
+	background: var(--direction-rx);
+}
+.byte-direction-underline.tx {
+	background: var(--direction-tx);
 }
 .byte.binary {
 	min-width: 94px;

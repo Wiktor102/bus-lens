@@ -32,6 +32,7 @@ import {
 	type SectionMoveMetadata,
 	type SectionMoveAvailability
 } from "../capture/section-repositioning.ts";
+import { isSnifferInputFormat } from "../capture/capture-format.ts";
 import { getSectionViewPreference, type DisplayMode, type ViewStateSnapshot } from "../../shared/view-state.ts";
 
 export const VIRTUAL_ROW_HEIGHT = 41;
@@ -43,6 +44,8 @@ export type MessageStreamSequenceNote = {
 	start: number;
 	end: number;
 };
+
+export type MessageStreamTxOrigin = "buslens" | "monitored-device";
 
 export type MessageStreamAnnotation = {
 	text: string;
@@ -107,6 +110,7 @@ export type MessageStreamEntry =
 
 export type MessageStreamSnapshot = {
 	captureId: string | null;
+	txOrigin: MessageStreamTxOrigin;
 	filterQuery: string;
 	mode: DisplayMode;
 	highlight: boolean;
@@ -135,6 +139,7 @@ export type MessageStreamSnapshot = {
 function emptyMessageStreamSnapshot(): MessageStreamSnapshot {
 	return {
 		captureId: null,
+		txOrigin: "buslens",
 		filterQuery: "",
 		mode: "hex",
 		highlight: true,
@@ -830,6 +835,7 @@ function snapshotFromParts({
 	const hasMatchingRows = matchingRows.length > 0;
 	return {
 		captureId: String(capture.id ?? ""),
+		txOrigin: isSnifferInputFormat(capture.inputFormat) ? "monitored-device" : "buslens",
 		filterQuery: viewState.filterQuery,
 		mode: viewState.displayMode,
 		highlight: viewState.showFrameChanges,

@@ -13,6 +13,7 @@ import {
 	type ContextDialogDraft,
 	type ExportFormat
 } from "./dialog-model";
+import { CAPTURE_INPUT_FORMATS, type CaptureInputFormat } from "../capture/capture-format.ts";
 import { AlertTriangle, Check, Plus, Trash2, X } from "lucide-react";
 import { DialogHeading } from "./dialog-components";
 
@@ -120,6 +121,7 @@ export function ContextDialog() {
 
 	const updateDraft = (update: Partial<ContextDialogDraft>) =>
 		setDraft(current => (current ? { ...current, ...update } : current));
+	const snifferFormat = draft?.inputFormat === CAPTURE_INPUT_FORMATS.SNIFFER;
 
 	return (
 		<dialog
@@ -252,7 +254,10 @@ export function ContextDialog() {
 						<select
 							id="baudRate"
 							value={draft?.baudRate || "115200"}
-							onChange={event => updateDraft({ baudRate: event.currentTarget.value })}
+							onChange={event => {
+								const baudRate = event.currentTarget.value;
+								updateDraft({ baudRate });
+							}}
 						>
 							<option>9600</option>
 							<option>19200</option>
@@ -261,9 +266,19 @@ export function ContextDialog() {
 						</select>
 					</label>
 					<div className="field serial-format">
-						<span>Input format</span>
-						<strong>Raw binary bytes</strong>
-						<small>Designed for ESP32 Serial.write()</small>
+						<label htmlFor="inputFormat">Input format</label>
+						<select
+							id="inputFormat"
+							value={draft?.inputFormat || CAPTURE_INPUT_FORMATS.BINARY}
+							onChange={event => {
+								const inputFormat = event.currentTarget.value as CaptureInputFormat;
+								updateDraft({ inputFormat });
+							}}
+						>
+							<option value={CAPTURE_INPUT_FORMATS.BINARY}>Raw binary bytes</option>
+							<option value={CAPTURE_INPUT_FORMATS.SNIFFER}>Directional sniffer records</option>
+						</select>
+						<small>{snifferFormat ? "A5 direction/value records." : "Designed for ESP32 Serial.write()"}</small>
 					</div>
 				</div>
 				<div className="modal-actions">

@@ -6,6 +6,7 @@ import type {
 	StoredFolder
 } from "../shared/app-state.ts";
 import type { Capture } from "../features/capture/capture-framing.ts";
+import type { CaptureInputFormat } from "../features/capture/capture-format.ts";
 
 export type CanonicalStorageStatus = "canonical" | "converting" | "canonicalization-failed" | (string & {});
 
@@ -96,7 +97,7 @@ export type CreateCaptureRequest = Readonly<{
 	controllerView?: string;
 	view?: string;
 	baudRate?: number;
-	inputFormat: "binary";
+	inputFormat: CaptureInputFormat;
 	folderId?: string | null;
 	parameters?: readonly OrderedCaptureParameter[];
 }>;
@@ -107,7 +108,7 @@ export type CaptureMetadataPatch = Readonly<{
 	controllerView?: string;
 	view?: string;
 	baudRate?: number;
-	inputFormat?: "binary";
+	inputFormat?: CaptureInputFormat;
 	folderId?: string | null;
 	parameters?: readonly OrderedCaptureParameter[];
 }>;

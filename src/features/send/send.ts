@@ -95,7 +95,7 @@ export function deriveSendViewModel(snapshot: SendSnapshot): SendViewModel {
 			.join(" "),
 		connectionHint: snapshot.connected
 			? snapshot.recording
-				? "Sent bytes are recorded as TX in the active capture and in local send history."
+				? "Manual sends are retained in the active capture and in local send history."
 				: "Capture is inactive. Sends are kept in the separate local history."
 			: "Connect a serial port to send. Drafts and queue stay saved locally.",
 		parsedDraft,

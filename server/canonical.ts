@@ -485,12 +485,10 @@ function normalizeSessionData(
 		const sessionId = sessionIdForRecord(record);
 		if (!sessionId) return record;
 		const session = ensureSession(sessionId);
-		if (record.direction !== "tx") {
-			const timestamp = finiteTimestamp(record.timestamp);
-			if (timestamp !== undefined) {
-				if (session.firstReceivedAt === undefined || timestamp < session.firstReceivedAt) session.firstReceivedAt = timestamp;
-				if (session.lastReceivedAt === undefined || timestamp > session.lastReceivedAt) session.lastReceivedAt = timestamp;
-			}
+		const timestamp = finiteTimestamp(record.timestamp);
+		if (timestamp !== undefined) {
+			if (session.firstReceivedAt === undefined || timestamp < session.firstReceivedAt) session.firstReceivedAt = timestamp;
+			if (session.lastReceivedAt === undefined || timestamp > session.lastReceivedAt) session.lastReceivedAt = timestamp;
 		}
 		return record.sessionId === sessionId ? record : { ...record, sessionId };
 	});

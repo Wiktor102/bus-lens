@@ -22,6 +22,7 @@ test("builds context drafts without mutating the open command", () => {
 		view: "Temperature",
 		folderId: "folder-1",
 		baudRate: 115200,
+		inputFormat: "binary",
 		params: [],
 		folders: []
 	};
@@ -37,9 +38,29 @@ test("builds context drafts without mutating the open command", () => {
 		folderId: "folder-1",
 		params: [{ key: "Mode", value: "safe" }],
 		baudRate: 115200,
-		inputFormat: "raw"
+		inputFormat: "binary"
 	});
 	assert.deepEqual(command.params, []);
+});
+
+test("preserves the selected sniffer connection baud rate", () => {
+	const draft = createContextDraft({
+		type: "context",
+		requestId: 2,
+		mode: "new",
+		captureId: null,
+		name: "Sniffer",
+		view: "",
+		folderId: null,
+		baudRate: 9600,
+		inputFormat: "sniffer",
+		params: [],
+		folders: []
+	});
+
+	assert.equal(draft.inputFormat, "sniffer");
+	assert.equal(draft.baudRate, "9600");
+	assert.equal(contextDraftToValues({ ...draft, baudRate: "19200" }).baudRate, 19200);
 });
 
 test("normalizes annotation drafts and labels a raw byte by its visible position", () => {

@@ -88,6 +88,8 @@ export type OrderedCaptureParameter = Readonly<{
 	value: string;
 }>;
 
+export type CaptureInputFormat = "binary" | "sniffer";
+
 export type CreateCaptureRequest = Readonly<{
 	captureId?: string;
 	id?: string;
@@ -98,7 +100,7 @@ export type CreateCaptureRequest = Readonly<{
 	controllerView?: string;
 	view?: string;
 	baudRate?: number;
-	inputFormat: "binary";
+	inputFormat: CaptureInputFormat;
 	folderId?: string | null;
 	parameters?: readonly OrderedCaptureParameter[];
 	}>;
@@ -109,7 +111,7 @@ export type CaptureMetadataPatch = Readonly<{
 	controllerView?: string;
 	view?: string;
 	baudRate?: number;
-	inputFormat?: "binary";
+	inputFormat?: CaptureInputFormat;
 	folderId?: string | null;
 	parameters?: readonly OrderedCaptureParameter[];
 }>;
@@ -716,6 +718,13 @@ function normalizedDirection(value: unknown, field: string): "rx" | "tx" {
 	return value;
 }
 
+function normalizedInputFormat(value: unknown): CaptureInputFormat {
+	if (value !== "binary" && value !== "sniffer") {
+		throw new CanonicalCaptureValidationError("inputFormat must be binary or sniffer", { inputFormat: value });
+	}
+	return value;
+}
+
 function segmentFrom(value: unknown, index: number): RawChunkSegment {
 	if (!isRecord(value) || value.bytes === undefined) {
 		throw new CanonicalCaptureValidationError(`segments[${index}] must contain bytes`, { index });
@@ -990,16 +999,13 @@ export class CanonicalCaptureCommandService {
 
 	createCapture(request: CreateCaptureRequest): CaptureState {
 		const captureId = normalizedCaptureId(request, this.generateId);
-		if (request.inputFormat !== "binary") {
-			throw new CanonicalCaptureValidationError("inputFormat must be exactly binary", { inputFormat: request.inputFormat });
-		}
+		const inputFormat = normalizedInputFormat(request.inputFormat);
 		const framingSections = normalizeFramingSections(request.framing, this.generateId);
 		const requestHash = captureCreationHash(request, captureId);
 		const name = String(request.name ?? "Untitled capture");
 		const description = String(request.description ?? "");
 		const controllerView = String(request.controllerView ?? request.view ?? "");
 		const baudRate = request.baudRate === undefined ? 115200 : optionalPositiveNumber(request.baudRate, "baudRate");
-		const inputFormat = request.inputFormat;
 		const folderId = request.folderId === undefined ? null : optionalString(request.folderId);
 		const parameters = normalizedParameters(request.parameters);
 		const now = this.nowIso();
@@ -1530,12 +1536,7 @@ export class CanonicalCaptureCommandService {
 			values.controllerView = String(patch.controllerView ?? patch.view ?? "");
 		}
 		if (Object.prototype.hasOwnProperty.call(patch, "baudRate")) values.baudRate = optionalPositiveNumber(patch.baudRate, "baudRate");
-		if (Object.prototype.hasOwnProperty.call(patch, "inputFormat")) {
-			if (patch.inputFormat !== "binary") {
-				throw new CanonicalCaptureValidationError("inputFormat must be exactly binary", { inputFormat: patch.inputFormat });
-			}
-			values.inputFormat = patch.inputFormat;
-		}
+		if (Object.prototype.hasOwnProperty.call(patch, "inputFormat")) values.inputFormat = normalizedInputFormat(patch.inputFormat);
 		if (Object.prototype.hasOwnProperty.call(patch, "folderId")) values.folderId = optionalString(patch.folderId);
 
 		this.database
@@ -1781,12 +1782,12 @@ export class CanonicalCaptureCommandService {
 			if (retainedStartOffset > capture.retained_start_offset) {
 				clearedRetainedNotes = this.pruneStableNotesOutsideRetainedWindow(captureId, retainedStartOffset);
 			}
-			const receivedTimestamps = flattened.timestamps.filter((_, index) => flattened.directions[index] !== "tx");
-			const firstReceivedAt = receivedTimestamps.length
-				? Math.min(session.first_received_at ?? Number.POSITIVE_INFINITY, ...receivedTimestamps)
+			const capturedTimestamps = flattened.timestamps;
+			const firstReceivedAt = capturedTimestamps.length
+				? Math.min(session.first_received_at ?? Number.POSITIVE_INFINITY, ...capturedTimestamps)
 				: session.first_received_at;
-			const lastReceivedAt = receivedTimestamps.length
-				? Math.max(session.last_received_at ?? Number.NEGATIVE_INFINITY, ...receivedTimestamps)
+			const lastReceivedAt = capturedTimestamps.length
+				? Math.max(session.last_received_at ?? Number.NEGATIVE_INFINITY, ...capturedTimestamps)
 				: session.last_received_at;
 			this.database
 				.prepare(

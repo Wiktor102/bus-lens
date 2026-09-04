@@ -2,7 +2,8 @@ import type { SendSettings, StoredFolder } from "../../shared/app-state.ts";
 import type { ArchiveIndex } from "../../persistence/archive-client.ts";
 import type { ArchiveCommands } from "../../data/archive-data-layer.ts";
 import type { ApplicationEvent, RecordingWorkflowState, TransportViewState } from "../../shared/application-store.ts";
-import { recordReceivedByte } from "../capture/capture-summary.ts";
+import { isSnifferInputFormat } from "../capture/capture-format.ts";
+import { recordCapturedByte } from "../capture/capture-summary.ts";
 import {
 	appendLivePreview,
 	bumpCaptureProjectionGeneration,
@@ -16,6 +17,7 @@ import {
 	type AppendCaptureChunkResponse,
 	type CaptureAppendBoundary
 } from "./capture-append-queue.ts";
+import { SnifferParser } from "./sniffer-parser.ts";
 
 // A capture remains useful at this size while still fitting comfortably in browser storage.
 export const MAX_CAPTURE_BYTES = 50_000;
@@ -125,6 +127,19 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	let stopPromise: Promise<void> | null = null;
 	let startPromise: Promise<void> | null = null;
 	let recordingWorkflow: RecordingWorkflowState["status"] = "idle";
+	const snifferParser = new SnifferParser(
+		({ value, direction }) => queueLiveBytes([value], direction),
+		({ status, detail }) => {
+			const reason = status === 1
+				? "DE timing history overflowed"
+				: status === 2
+					? "RMT capture overflowed or failed"
+					: status === 3
+						? "an invalid UART waveform was rejected"
+						: `firmware diagnostic ${status}`;
+			dependencies.showToast(`Sniffer warning: ${reason}${detail ? ` (${detail})` : ""}; this capture may be incomplete`);
+		}
+	);
 	const appendQueue = dependencies.recordingWriter
 		? new CaptureAppendQueue(
 				{ appendChunk: request => dependencies.recordingWriter!.appendChunk(request) },
@@ -320,9 +335,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 					sessionId: segment.sessionId,
 					rawOffset: nextRawOffset++
 				});
-				if (segment.direction !== "tx") {
-					recordReceivedByte(segment.sessionId ? sessionsById.get(segment.sessionId) : undefined, segment.timestamp);
-				}
+				recordCapturedByte(segment.sessionId ? sessionsById.get(segment.sessionId) : undefined, segment.timestamp);
 			}
 		}
 		capture.nextRawOffset = nextRawOffset;
@@ -363,6 +376,12 @@ export function createSerialController(dependencies: SerialControllerDependencie
 	}
 
 	function ingestChunk(bytes: Uint8Array) {
+		const capture = captureById(recordingCaptureId ?? undefined);
+		if (isSnifferInputFormat(capture?.inputFormat)) {
+			snifferParser.push(bytes);
+			return;
+		}
+		snifferParser.reset();
 		queueLiveBytes(bytes, "rx");
 	}
 
@@ -411,7 +430,8 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		publishTransportWorkflow({ type: "transport/connection-started", startedAt: Date.now() });
 		try {
 			port = await serial.requestPort();
-			const baudRate = dependencies.capture()?.baudRate || dependencies.getSettings?.()?.baudRate || dependencies.state?.sendSettings?.baudRate || 115200;
+			const selectedCapture = dependencies.capture();
+			const baudRate = selectedCapture?.baudRate || dependencies.getSettings?.()?.baudRate || dependencies.state?.sendSettings?.baudRate || 115200;
 			await port.open({ baudRate });
 			const settings = dependencies.getSettings?.() || dependencies.state?.sendSettings || {};
 			persistSettings({ ...settings, baudRate });
@@ -452,6 +472,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 			persistSettings();
 		}
 		readAbort = true;
+		snifferParser.reset();
 		dependencies.stopSendQueue();
 		try {
 			await reader?.cancel();
@@ -471,6 +492,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		const sessionId = recordingSessionId;
 		publishTransportWorkflow({ type: "transport/recording-finalizing", startedAt: Date.now() });
 		recording = false;
+		snifferParser.reset();
 		flushLiveBytes();
 		const stopping = (async () => {
 			if (captureId) await dependencies.waitForCaptureWrite?.(captureId);
@@ -530,6 +552,7 @@ export function createSerialController(dependencies: SerialControllerDependencie
 		if (startPromise) return startPromise;
 		const captureId = String(capture.id ?? "");
 		const sessionId = crypto.randomUUID();
+		snifferParser.reset();
 		recordingCaptureId = captureId;
 		publishTransportWorkflow({ type: "transport/recording-starting", startedAt: Date.now() });
 		publishState();

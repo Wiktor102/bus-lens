@@ -24,7 +24,7 @@ export const MCP_SERVER_NAME = "Bus Lens Agent Access";
 export const MCP_REQUEST_LIMIT_BYTES = 256 * 1024;
 export const MCP_RESPONSE_LIMIT_BYTES = 96 * 1024;
 
-const SERVER_INSTRUCTIONS = `Bus Lens is a local-first RS-485 capture analysis workbench. Use an overview-first workflow: list_captures, list_framing_profiles, get_capture_overview, then choose a bounded analytical drill-down. Raw bytes are source data; interpreted frames are a versioned framing-profile view. Select raw data explicitly with read_raw_bytes, or pass the exact profileId, profileVersion, and sourceDataRevision returned by list_framing_profiles to analyze current or historical framing. Hidden bytes/frames remain retained evidence and can be included or excluded; deleted or cleared data is unavailable. Use query_notes for bounded note text and exact anchors, and use get_message_context with includeNoteSummaries when IDs alone are insufficient. MCP exposes read-only analysis and append-only evidence-linked notes when enabled; it never exposes framing mutation, capture control, replay, queue, serial, or ESP32 operations. Analytical reads run in a disposable read-only worker and are cancelled if they exceed ${MCP_TOOL_TIMEOUT_MS / 1000} seconds.`;
+const SERVER_INSTRUCTIONS = `Bus Lens is a local-first RS-485 capture analysis workbench. Use an overview-first workflow: list_captures, list_framing_profiles, get_capture_overview, then choose a bounded analytical drill-down. Raw bytes are source data; interpreted frames are a versioned framing-profile view. Select raw data explicitly with read_raw_bytes, or pass the exact profileId, profileVersion, and sourceDataRevision returned by list_framing_profiles to analyze current or historical framing. RX and TX directions are relative to the monitored device: sniffer DE low is RX and DE high is TX. Hidden bytes/frames remain retained evidence and can be included or excluded; deleted or cleared data is unavailable. Use query_notes for bounded note text and exact anchors, and use get_message_context with includeNoteSummaries when IDs alone are insufficient. MCP exposes read-only analysis and append-only evidence-linked notes when enabled; it never exposes framing mutation, capture control, replay, queue, serial, or ESP32 operations. Analytical reads run in a disposable read-only worker and are cancelled if they exceed ${MCP_TOOL_TIMEOUT_MS / 1000} seconds.`;
 
 export const BUS_LENS_GUIDE = `# Bus Lens agent guide
 
@@ -39,6 +39,10 @@ Sequence groups describe repeated signature sequences. Occurrences are the indiv
 Raw data is the retained byte stream with absolute offsets, timestamps, directions, and visibility state. It is the source evidence and does not depend on a framing interpretation. Interpreted data is the set of materialized frames, sections, signatures, transitions, and sequence groups produced by one framing profile. The same raw bytes can therefore have different interpreted frames under different profiles.
 
 Call list_framing_profiles before choosing an interpretation. Its selectionOptions.raw reference is for read_raw_bytes; selectionOptions.current is the active framing snapshot; selectionOptions.historical contains explicit historical profile snapshots. For analytical tools, copy captureId, profileId, profileVersion, and sourceDataRevision from the chosen framing reference. Do not infer a historical profile from its version alone: profileId, profileVersion, and sourceDataRevision together identify the evidence.
+
+## Byte directions
+
+RX and TX are relative to the monitored device. For directional sniffer captures, RX means the device's DE line was low (the device was receiving) and TX means DE was high (the device was transmitting). Direction filters and message direction summaries use these labels; they do not describe a local Bus Lens send.
 
 ## Hidden versus deleted data
 
