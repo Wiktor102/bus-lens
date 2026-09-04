@@ -1061,6 +1061,69 @@ test("shutdown drains a pending retarget instead of leaking the recreated access
 	});
 });
 
+test("shutdown closes an active MCP subscription before waiting for HTTP requests", async () => {
+	await withTemporaryDirectory(async directory => {
+		const service = createArchiveHttpService({ databasePath: join(directory, "bus-lens.sqlite") });
+		const baseUrl = await listen(service);
+		const controller = new AbortController();
+		let shutdown: Promise<void> | undefined;
+		let timeout: NodeJS.Timeout | undefined;
+		let shutdownResult: "closed" | "timed-out" | undefined;
+		let subscription: Promise<Response> | undefined;
+		try {
+			subscription = fetch(`${baseUrl}/mcp`, {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					accept: "text/event-stream",
+					connection: "close",
+					"MCP-Protocol-Version": "2026-07-28",
+					"Mcp-Method": "subscriptions/listen"
+				},
+				body: JSON.stringify({
+					jsonrpc: "2.0",
+					id: 1,
+					method: "subscriptions/listen",
+					params: {
+						notifications: { toolsListChanged: true },
+						_meta: {
+							"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+							"io.modelcontextprotocol/clientInfo": { name: "shutdown-test", version: "1.0" },
+							"io.modelcontextprotocol/clientCapabilities": {}
+						}
+					}
+				}),
+				signal: controller.signal
+			});
+			const eventBus = service.mcpAccess.handler.bus as typeof service.mcpAccess.handler.bus & { listenerCount: number };
+			await new Promise<void>((resolveSubscription, rejectSubscription) => {
+				const deadline = Date.now() + 1_000;
+				const checkSubscription = () => {
+					if (eventBus.listenerCount === 1) return resolveSubscription();
+					if (Date.now() >= deadline) return rejectSubscription(new Error("MCP subscription did not open"));
+					setTimeout(checkSubscription, 10);
+				};
+				checkSubscription();
+			});
+
+			shutdown = service.close();
+			shutdownResult = await Promise.race([
+				shutdown.then(() => "closed" as const),
+				new Promise<"timed-out">(resolveTimeout => {
+					timeout = setTimeout(() => resolveTimeout("timed-out"), 750);
+				})
+			]);
+		} finally {
+			if (timeout) clearTimeout(timeout);
+			controller.abort();
+			await (shutdown ?? service.close());
+			await subscription?.catch(() => undefined);
+		}
+		assert.equal(shutdownResult, "closed");
+		assert.equal(service.mcpAccess.getStatus().status, "stopped");
+	});
+});
+
 test("shutdown releases the MCP lease and closes databases after MCP close fails", async () => {
 	await withTemporaryDirectory(async directory => {
 		const service = createArchiveHttpService({ databasePath: join(directory, "bus-lens.sqlite") });

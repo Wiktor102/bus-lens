@@ -798,8 +798,9 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			};
 			mcpClosing = true;
 			wakeMcpQuietWindow?.();
-			// Stop accepting requests before tearing down the access they use.
-			await attempt(() => new Promise<void>((resolveClose, rejectClose) => {
+			// Stop accepting requests now, but do not wait for long-lived MCP
+			// subscriptions until closing their handler has ended the streams.
+			const httpClose = attempt(() => new Promise<void>((resolveClose, rejectClose) => {
 				server.close(error => {
 					if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") rejectClose(error);
 					else resolveClose();
@@ -810,6 +811,7 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			await attempt(() => mcpRetargetChain);
 			await attempt(flushRetiredMcpAccesses);
 			await attempt(() => closeMcpTarget(mcpTarget));
+			await httpClose;
 			await attempt(() => manager.closeAll());
 			await attempt(() => { rootDatabase.close(); });
 			await attempt(() => { registryDatabase.close(); });
