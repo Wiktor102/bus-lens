@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	createClaudeCliCommand,
 	createClaudeMcpConfig,
 	createCodexMcpConfig,
+	createCursorMcpConfig,
 	resolveMcpEndpoint
 } from "../src/app/agent-config.ts";
 
@@ -20,6 +22,26 @@ test("generates an importable Claude Code .mcp.json document", () => {
   "mcpServers": {
     "bus-lens": {
       "type": "http",
+      "url": "http://127.0.0.1:4174/mcp"
+    }
+  }
+}`
+	);
+});
+
+test("generates Claude Code CLI command", () => {
+	assert.equal(
+		createClaudeCliCommand("http://127.0.0.1:4174/mcp"),
+		'claude mcp add --transport http bus-lens "http://127.0.0.1:4174/mcp"'
+	);
+});
+
+test("generates Cursor / Windsurf MCP config", () => {
+	assert.equal(
+		createCursorMcpConfig("http://127.0.0.1:4174/mcp"),
+		`{
+  "mcpServers": {
+    "bus-lens": {
       "url": "http://127.0.0.1:4174/mcp"
     }
   }
