@@ -260,6 +260,7 @@ test("the manager evicts the least-recently-used project beyond its capacity", a
 		assert.equal(opened.get(join(directory, "a.sqlite"))?.open, true);
 		assert.equal(opened.get(join(directory, "c.sqlite"))?.open, true);
 		manager.closeAll();
+		rootDatabase.close();
 	});
 });
 
@@ -299,6 +300,7 @@ test("eviction skips in-flight projects and resumes once released", async () => 
 		assert.equal(opened.get(pathOf("b"))?.open, false);
 		assert.equal(opened.get(pathOf("c"))?.open, true);
 		manager.closeAll();
+		rootDatabase.close();
 	});
 });
 

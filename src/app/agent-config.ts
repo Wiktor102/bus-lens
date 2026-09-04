@@ -21,3 +21,17 @@ export function createClaudeMcpConfig(endpoint: string): string {
 		}
 	}, null, 2);
 }
+
+export function createClaudeCliCommand(endpoint: string): string {
+	return `claude mcp add --transport http ${MCP_CONFIG_SERVER_NAME} "${endpoint}"`;
+}
+
+export function createCursorMcpConfig(endpoint: string): string {
+	return JSON.stringify({
+		mcpServers: {
+			[MCP_CONFIG_SERVER_NAME]: {
+				url: endpoint
+			}
+		}
+	}, null, 2);
+}
