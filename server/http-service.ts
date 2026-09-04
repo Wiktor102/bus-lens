@@ -234,13 +234,18 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			throw error;
 		}
 	};
-	const closeMcpTarget = async (target: McpTarget): Promise<void> => {
+	const destroyMcpTarget = async (target: McpTarget): Promise<void> => {
 		try {
 			await target.access.close();
-		} catch (error) {
-			console.error("Bus Lens MCP close failed", error);
 		} finally {
 			target.release();
+		}
+	};
+	const closeMcpTarget = async (target: McpTarget): Promise<void> => {
+		try {
+			await destroyMcpTarget(target);
+		} catch (error) {
+			console.error("Bus Lens MCP close failed", error);
 		}
 	};
 	let mcpTarget = createMcpTarget(manager.forProject(registry.mcpProjectId()));
@@ -365,7 +370,7 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 				const restoresMcpTarget = mcpTarget.projectId === projectContext.projectId;
 				try {
 					try {
-						if (restoresMcpTarget) await closeMcpTarget(mcpTarget);
+						if (restoresMcpTarget) await destroyMcpTarget(mcpTarget);
 						await manager.close(projectContext.projectId);
 						await restoreDatabase(source, projectContext.databasePath);
 					} finally {
@@ -757,7 +762,7 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 					else resolveClose();
 				});
 			}));
-			await attempt(() => closeMcpTarget(mcpTarget));
+			await attempt(() => destroyMcpTarget(mcpTarget));
 			await httpClose;
 			await attempt(() => manager.closeAll());
 			await attempt(() => { rootDatabase.close(); });
