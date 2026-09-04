@@ -746,6 +746,43 @@ test("restoring Default preserves project and routing control state", async () =
 	});
 });
 
+test("a failed MCP close aborts restore and replaces the stopped target", async () => {
+	await withTemporaryDirectory(async directory => {
+		await withHttpService(async ({ service, baseUrl }) => {
+			await requestJson(baseUrl, "/api/captures/original", {
+				method: "PUT",
+				body: { id: "original", name: "Original", messages: [], byteStream: [] }
+			});
+			const backupPath = join(directory, "replacement.sqlite");
+			const backup = new ArchiveRepository(openDatabase(backupPath));
+			backup.putCapture("replacement", { id: "replacement", name: "Replacement", messages: [] });
+			backup.close();
+
+			const stoppedAccess = service.mcpAccess;
+			const mutableAccess = stoppedAccess as { close: () => Promise<void> };
+			const originalClose = mutableAccess.close;
+			const originalConsoleError = console.error;
+			console.error = () => {};
+			mutableAccess.close = async () => {
+				await originalClose();
+				throw new Error("test close failure");
+			};
+			try {
+				const restored = await requestJson(baseUrl, "/api/restore", { method: "POST", body: { backupPath } });
+				assert.equal(restored.status, 500);
+				assert.equal(stoppedAccess.getStatus().status, "stopped");
+				assert.notEqual(service.mcpAccess, stoppedAccess);
+				assert.equal(service.mcpAccess.getStatus().status, "running");
+				assert.deepEqual(await callListCaptures(baseUrl), ["original"]);
+				const leases = (service.manager as unknown as { inFlight: Map<string, number> }).inFlight;
+				assert.equal(leases.get(DEFAULT_PROJECT_ID), 1);
+			} finally {
+				console.error = originalConsoleError;
+			}
+		}, directory);
+	});
+});
+
 test("project CRUD creates managed databases and guards removal", async () => {
 	await withHttpService(async ({ service, baseUrl }) => {
 		const created = await requestJson(baseUrl, "/api/projects", { method: "POST", body: { name: "Field log" } });
@@ -1021,5 +1058,24 @@ test("shutdown drains a pending retarget instead of leaking the recreated access
 		} finally {
 			await rm(target, { recursive: true, force: true });
 		}
+	});
+});
+
+test("shutdown releases the MCP lease and closes databases after MCP close fails", async () => {
+	await withTemporaryDirectory(async directory => {
+		const service = createArchiveHttpService({ databasePath: join(directory, "bus-lens.sqlite") });
+		await listen(service);
+		const mutableAccess = service.mcpAccess as { close: () => Promise<void> };
+		const originalClose = mutableAccess.close;
+		mutableAccess.close = async () => {
+			await originalClose();
+			throw new Error("test shutdown close failure");
+		};
+
+		await assert.rejects(service.close(), /test shutdown close failure/);
+		const leases = (service.manager as unknown as { inFlight: Map<string, number> }).inFlight;
+		assert.equal(leases.size, 0);
+		assert.equal(service.database.open, false);
+		assert.equal(service.registryDatabase.open, false);
 	});
 });

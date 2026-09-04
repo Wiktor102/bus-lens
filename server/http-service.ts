@@ -236,6 +236,13 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			throw error;
 		}
 	};
+	const closeMcpTarget = async (target: McpTarget): Promise<void> => {
+		try {
+			await target.access.close();
+		} finally {
+			target.release();
+		}
+	};
 	// Agents do not send the routing header, so agent access follows the
 	// most-recently-used project and is recreated when that target changes.
 	let mcpTarget = createMcpTarget(defaultContext);
@@ -251,11 +258,9 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			if (settled) return;
 			settled = true;
 			try {
-				await target.access.close();
+				await closeMcpTarget(target);
 			} catch (error) {
 				console.error("Bus Lens MCP close failed", error);
-			} finally {
-				target.release();
 			}
 		};
 		// Replaced targets stay servicable for in-flight tool calls during the
@@ -404,12 +409,9 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 				try {
 					await mcpRetargetChain;
 					await flushRetiredMcpAccesses();
-					if (restoresMcpTarget) {
-						await mcpTarget.access.close();
-						mcpTarget.release();
-					}
-					await manager.close(projectContext.projectId);
 					try {
+						if (restoresMcpTarget) await closeMcpTarget(mcpTarget);
+						await manager.close(projectContext.projectId);
 						await restoreDatabase(source, projectContext.databasePath);
 					} finally {
 						const reopenedContext = manager.forProject(projectContext.projectId);
@@ -786,18 +788,32 @@ export function createArchiveHttpService(options: ServiceOptions): ArchiveHttpSe
 			return mcpTarget.access;
 		},
 		close: async () => {
+			let firstError: unknown;
+			const attempt = async (operation: () => void | Promise<void>): Promise<void> => {
+				try {
+					await operation();
+				} catch (error) {
+					firstError ??= error;
+				}
+			};
 			mcpClosing = true;
+			wakeMcpQuietWindow?.();
+			// Stop accepting requests before tearing down the access they use.
+			await attempt(() => new Promise<void>((resolveClose, rejectClose) => {
+				server.close(error => {
+					if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") rejectClose(error);
+					else resolveClose();
+				});
+			}));
 			// A retarget already chained behind the quiet window must finish (or
 			// be skipped) before the handles it would touch are gone.
-			wakeMcpQuietWindow?.();
-			await mcpRetargetChain;
-			await flushRetiredMcpAccesses();
-			await mcpTarget.access.close();
-			mcpTarget.release();
-			await new Promise<void>(resolveClose => server.close(() => resolveClose()));
-			manager.closeAll();
-			rootDatabase.close();
-			registryDatabase.close();
+			await attempt(() => mcpRetargetChain);
+			await attempt(flushRetiredMcpAccesses);
+			await attempt(() => closeMcpTarget(mcpTarget));
+			await attempt(() => manager.closeAll());
+			await attempt(() => { rootDatabase.close(); });
+			await attempt(() => { registryDatabase.close(); });
+			if (firstError !== undefined) throw firstError;
 		}
 	};
 }
