@@ -11,6 +11,7 @@ import type { ArchiveDataLayer } from "../data/archive-data-layer.ts";
 
 export type AppRuntimeDependencies = {
 	archive?: ArchiveDataLayer;
+	scheduleToastDismissal?: (callback: () => void, delayMs: number) => () => void;
 };
 
 /**
@@ -45,6 +46,10 @@ export type AppRuntime = {
 
 export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): AppRuntime {
 	const archive = dependencies.archive;
+	const scheduleToastDismissal = dependencies.scheduleToastDismissal || ((callback: () => void, delayMs: number) => {
+		const timer = setTimeout(callback, delayMs);
+		return () => clearTimeout(timer);
+	});
 	let activeId: string | null | undefined = applicationStore.select(selectSelectedCaptureId);
 	let activeCapture: Capture | undefined;
 	// Query owns durable snapshots; this map owns the mutable projections used by
@@ -55,6 +60,13 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 	const captureStatuses = new Map<string, CanonicalCaptureSummary["status"]>();
 	const activeCaptureWrites = new Map<string, Promise<unknown>>();
 	const writer = archive?.commands.recordingWriter;
+	let cancelToastDismissal: (() => void) | undefined;
+	let toastRevision = 0;
+
+	function cancelScheduledToastDismissal(): void {
+		cancelToastDismissal?.();
+		cancelToastDismissal = undefined;
+	}
 
 	function cachedCapture(captureId: string | null | undefined): Capture | undefined {
 		if (!captureId) return undefined;
@@ -163,10 +175,21 @@ export function createAppRuntime(dependencies: AppRuntimeDependencies = {}): App
 			return loadCapture(id);
 		},
 		setActiveCapture,
-		beginUnload: () => { unloading = true; },
+		beginUnload: () => {
+			unloading = true;
+			toastRevision += 1;
+			cancelScheduledToastDismissal();
+		},
 		showToast: (message: string) => {
+			if (unloading) return;
+			const revision = ++toastRevision;
+			cancelScheduledToastDismissal();
 			applicationStore.send({ type: "toast/changed", state: { message, visible: true } });
-			setTimeout(() => applicationStore.send({ type: "toast/changed", state: { message: "", visible: false } }), 2_600);
+			cancelToastDismissal = scheduleToastDismissal(() => {
+				if (revision !== toastRevision) return;
+				cancelToastDismissal = undefined;
+				applicationStore.send({ type: "toast/changed", state: { message: "", visible: false } });
+			}, 2_600);
 		},
 		captureWriter: writer,
 		isCanonicalCapture: captureId => getCaptureStorageStatus(captureId) === "canonical",

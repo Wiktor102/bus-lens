@@ -4,7 +4,7 @@ import { createAppRuntime } from "../src/app/app-runtime.ts";
 import { createCaptureController } from "../src/features/capture/capture-controller.ts";
 import type { ArchiveDataLayer } from "../src/data/archive-data-layer.ts";
 import type { Capture } from "../src/features/capture/capture-framing.ts";
-import { applicationStore } from "../src/shared/application-store.ts";
+import { applicationStore, selectToast } from "../src/shared/application-store.ts";
 
 function capture(id: string): Capture {
 	return {
@@ -31,6 +31,48 @@ test("does not expose a mutable archive-wide state or generic persistence API", 
 	assert.equal("persistState" in runtime, false);
 	await runtime.ready;
 	assert.equal(runtime.capture(), undefined);
+});
+
+test("keeps a newer toast visible until its own dismissal timer fires", () => {
+	applicationStore.send({ type: "toast/changed", state: { message: "", visible: false } });
+	const timers: Array<{ callback: () => void; delayMs: number; cancelled: boolean }> = [];
+	const runtime = createAppRuntime({
+		scheduleToastDismissal: (callback, delayMs) => {
+			const timer = { callback, delayMs, cancelled: false };
+			timers.push(timer);
+			return () => { timer.cancelled = true; };
+		}
+	});
+
+	runtime.showToast("first message");
+	runtime.showToast("newer message");
+
+	assert.equal(timers.length, 2);
+	assert.equal(timers[0].delayMs, 2_600);
+	assert.equal(timers[1].delayMs, 2_600);
+	assert.equal(timers[0].cancelled, true);
+	assert.deepEqual(applicationStore.select(selectToast), { message: "newer message", visible: true });
+
+	// A cancelled timer can still have a callback already queued by the browser.
+	timers[0].callback();
+	assert.deepEqual(applicationStore.select(selectToast), { message: "newer message", visible: true });
+
+	timers[1].callback();
+	assert.deepEqual(applicationStore.select(selectToast), { message: "", visible: false });
+});
+
+test("cancels the active toast timer when unloading begins", () => {
+	applicationStore.send({ type: "toast/changed", state: { message: "", visible: false } });
+	let cancelled = false;
+	const runtime = createAppRuntime({
+		scheduleToastDismissal: () => () => { cancelled = true; }
+	});
+
+	runtime.showToast("closing");
+	runtime.beginUnload();
+
+	assert.equal(cancelled, true);
+	applicationStore.send({ type: "toast/changed", state: { message: "", visible: false } });
 });
 
 test("hydrates the active capture through archive reads and named commands", async () => {
