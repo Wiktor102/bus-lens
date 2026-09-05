@@ -1,6 +1,5 @@
 import { MAX_SEND_HISTORY, type SendHistoryEntry, type SendQueueEntry, type SendSettings, type StoredFolder } from "../../shared/app-state.ts";
 import {
-	frameWidth,
 	hexByte,
 	makeMessage,
 	normalizeCapture,
@@ -9,7 +8,8 @@ import {
 	signature,
 	visibleByteEntries,
 	type Capture,
-	type CaptureMessage
+	type CaptureMessage,
+	type CaptureSection
 } from "../capture/capture-framing.ts";
 import { recognizeMessagePatterns } from "../analysis/analysis.ts";
 import type { ExportFormat } from "../dialogs/dialog-model.ts";
@@ -75,6 +75,232 @@ function resolveTimeDependencies(dependencies: DataTransferTimeDependencies = {}
 		now,
 		nowIso: dependencies.nowIso || (() => new Date(now()).toISOString())
 	};
+}
+
+function parseCsvRows(text: string): string[][] {
+	const source = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+	const rows: string[][] = [];
+	let row: string[] = [];
+	let field = "";
+	let inQuotes = false;
+	let justClosedQuote = false;
+
+	const appendRow = () => {
+		if (row.some(value => value.length > 0) || field.length > 0) rows.push([...row, field]);
+		row = [];
+		field = "";
+		justClosedQuote = false;
+	};
+
+	for (let index = 0; index < source.length; index += 1) {
+		const character = source[index];
+		if (inQuotes) {
+			if (character === '"') {
+				if (source[index + 1] === '"') {
+					field += '"';
+					index += 1;
+				} else {
+					inQuotes = false;
+					justClosedQuote = true;
+				}
+			} else {
+				field += character;
+			}
+			continue;
+		}
+		if (character === '"') {
+			if (field.length > 0 || justClosedQuote) throw new Error("Malformed CSV: unexpected quote");
+			inQuotes = true;
+			continue;
+		}
+		if (justClosedQuote) {
+			if (character === ",") {
+				row.push(field);
+				field = "";
+				justClosedQuote = false;
+				continue;
+			}
+			if (character !== "\r" && character !== "\n") throw new Error("Malformed CSV: expected a comma or line break after a quoted field");
+		}
+		if (character === ",") {
+			row.push(field);
+			field = "";
+			continue;
+		}
+		if (character === "\r" || character === "\n") {
+			appendRow();
+			if (character === "\r" && source[index + 1] === "\n") index += 1;
+			continue;
+		}
+		field += character;
+	}
+	if (inQuotes) throw new Error("Malformed CSV: unterminated quoted field");
+	if (row.length || field.length || justClosedQuote) appendRow();
+	return rows;
+}
+
+function parseCsvTimestamp(value: string, rowNumber: number, column: string): number {
+	const trimmed = value.trim();
+	if (!trimmed) throw new Error(`CSV row ${rowNumber} has no ${column}`);
+	const numeric = Number(trimmed);
+	if (/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(trimmed) && Number.isFinite(numeric)) return numeric;
+	const parsed = Date.parse(trimmed);
+	if (Number.isFinite(parsed)) return parsed;
+	throw new Error(`CSV row ${rowNumber} has an invalid ${column}: ${trimmed}`);
+}
+
+function parseCsvHex(value: string, rowNumber: number, column: string): number[] {
+	const trimmed = value.trim();
+	if (!trimmed) return [];
+	const parts = trimmed.split(/\s+/);
+	const invalid = parts.find(part => !/^[0-9a-f]{2}$/i.test(part));
+	if (invalid) throw new Error(`CSV row ${rowNumber} has an invalid ${column} byte: ${invalid}`);
+	return parts.map(part => Number.parseInt(part, 16));
+}
+
+function sameBytes(left: readonly number[], right: readonly number[]): boolean {
+	return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+export function parseCsv(text: string, dependencies: DataTransferTimeDependencies = {}): Capture[] {
+	const { generateId, nowIso } = resolveTimeDependencies(dependencies);
+	const rows = parseCsvRows(text);
+	if (!rows.length) throw new Error("CSV contains no rows");
+	const headers = rows[0].map(value => value.trim().toLowerCase());
+	const headerIndex = new Map<string, number>();
+	headers.forEach((header, index) => {
+		if (!header) throw new Error("CSV has an empty column name");
+		if (headerIndex.has(header)) throw new Error(`CSV has a duplicate column: ${header}`);
+		headerIndex.set(header, index);
+	});
+	const missing = ["timestamp", "message_hex"].filter(column => !headerIndex.has(column));
+	if (missing.length) throw new Error(`CSV is missing Bus Lens columns: ${missing.join(", ")}`);
+
+	const byteHexColumns = new Map<number, number>();
+	const byteTimestampColumns = new Map<number, number>();
+	headers.forEach((header, index) => {
+		const match = header.match(/^byte_(\d+)_(hex|timestamp)$/);
+		if (!match) return;
+		const position = Number(match[1]);
+		if (!Number.isSafeInteger(position) || position < 1) throw new Error(`CSV has an invalid byte column: ${header}`);
+		const target = match[2] === "hex" ? byteHexColumns : byteTimestampColumns;
+		if (target.has(position)) throw new Error(`CSV has a duplicate byte column: ${header}`);
+		target.set(position, index);
+	});
+	const bytePositions = [...new Set([...byteHexColumns.keys(), ...byteTimestampColumns.keys()])].sort((a, b) => a - b);
+	if (bytePositions.length && bytePositions.some((position, index) => position !== index + 1)) {
+		throw new Error("CSV byte columns must be numbered consecutively from byte_1");
+	}
+	const orphanTimestamp = bytePositions.find(position => !byteHexColumns.has(position));
+	if (orphanTimestamp !== undefined) throw new Error(`CSV is missing byte_${orphanTimestamp}_hex`);
+
+	const messages: CaptureMessage[] = [];
+	const byteStream: NonNullable<Capture["byteStream"]> = [];
+	const annotations: Record<string, { text: string; type: "message" }> = {};
+	const sequenceRemarks = new Map<string, string>();
+	rows.slice(1).forEach((row, rowIndex) => {
+		const rowNumber = rowIndex + 2;
+		if (row.length !== headers.length) {
+			throw new Error(`CSV row ${rowNumber} has ${row.length} columns; expected ${headers.length}`);
+		}
+		const value = (column: string) => row[headerIndex.get(column)!] || "";
+		const timestamp = parseCsvTimestamp(value("timestamp"), rowNumber, "timestamp");
+		const messageHex = parseCsvHex(value("message_hex"), rowNumber, "message_hex");
+		let bytes = messageHex;
+		let byteTimestamps = bytes.map(() => timestamp);
+		if (bytePositions.length) {
+			const hasByteValues = bytePositions.some(position => row[byteHexColumns.get(position)!].trim());
+			if (hasByteValues) {
+				const parsedBytes: number[] = [];
+				const parsedTimestamps: number[] = [];
+				let blankSeen = false;
+				bytePositions.forEach(position => {
+					const hex = row[byteHexColumns.get(position)!].trim();
+					const timestampValue = byteTimestampColumns.has(position) ? row[byteTimestampColumns.get(position)!].trim() : "";
+					if (!hex) {
+						if (timestampValue) throw new Error(`CSV row ${rowNumber} has a timestamp without byte_${position}_hex`);
+						blankSeen = true;
+						return;
+					}
+					if (blankSeen) throw new Error(`CSV row ${rowNumber} has a byte after an empty byte column`);
+					const parsed = parseCsvHex(hex, rowNumber, `byte_${position}_hex`);
+					if (parsed.length !== 1) throw new Error(`CSV row ${rowNumber} byte_${position}_hex must contain one byte`);
+					parsedBytes.push(parsed[0]);
+					parsedTimestamps.push(timestampValue ? parseCsvTimestamp(timestampValue, rowNumber, `byte_${position}_timestamp`) : timestamp);
+				});
+				if (!sameBytes(parsedBytes, messageHex)) {
+					throw new Error(`CSV row ${rowNumber} byte columns do not match message_hex`);
+				}
+				bytes = parsedBytes;
+				byteTimestamps = parsedTimestamps;
+			}
+		}
+		if (!bytes.length) throw new Error(`CSV row ${rowNumber} has no message bytes`);
+		const rawOffsets = bytes.map((_, index) => byteStream.length + index);
+		byteStream.push(...bytes.map((byte, index) => ({ value: byte, timestamp: byteTimestamps[index], rawOffset: rawOffsets[index] })));
+		const message: CaptureMessage = {
+			id: generateId(),
+			timestamp,
+			byteTimestamps,
+			bytes,
+			hidden: false,
+			hiddenBytes: bytes.map(() => false),
+			sourceIndex: messages.length,
+			rawOffsets,
+			_rawPositions: rawOffsets
+		};
+		messages.push(message);
+		const note = value("message_note");
+		if (note) annotations[message.id!] = { text: note, type: "message" };
+		const sequenceGroup = value("sequence_group");
+		const sequenceRemark = value("sequence_remark");
+		if (sequenceGroup && sequenceRemark) sequenceRemarks.set(sequenceGroup, sequenceRemark);
+	});
+	if (!messages.length) throw new Error("CSV contains no timestamped messages");
+
+	const capture: Capture = {
+		id: generateId(),
+		name: "CSV · imported 1",
+		view: "Imported CSV",
+		params: [],
+		createdAt: nowIso(),
+		frameSize: messages[0]?.bytes.length || 3,
+		baudRate: 115200,
+		inputFormat: "csv",
+		byteStream,
+		messages,
+		frameSections: (() => {
+			const sections: CaptureSection[] = [];
+			messages.forEach(message => {
+				const frameSize = message.bytes.length;
+				const start = message.rawOffsets?.[0] ?? message._rawPositions?.[0] ?? 0;
+				if (sections.at(-1)?.frameSize !== frameSize) {
+					sections.push({
+						start,
+						framingMode: "length",
+						frameSize,
+						frameMarker: "",
+						markerPosition: "start",
+						frameTimeGap: 5,
+						collapseRuns: false,
+						collapsed: false
+					});
+				}
+			});
+			return sections;
+		})(),
+		notes: [],
+		annotations,
+		patternRemarks: {}
+	};
+	if (sequenceRemarks.size) {
+		const groups = recognizeMessagePatterns(capture).groups;
+		sequenceRemarks.forEach((remark, groupId) => {
+			const matchingGroup = groups.find(group => group.id === groupId);
+			capture.patternRemarks![matchingGroup?.key || groupId] = { text: remark, type: "sequence" };
+		});
+	}
+	return [capture];
 }
 
 export function parseDump(text: string, dependencies: DataTransferTimeDependencies = {}): Capture[] {
@@ -229,12 +455,13 @@ export function createDataTransferController(dependencies: DataTransferDependenc
 					compatibilityState.sendSettings = importedSettings;
 				}
 			} else {
-				const captures = parseDump(text, { generateId, now, nowIso });
+				const isCsv = file.name.toLowerCase().endsWith(".csv");
+				const captures = isCsv ? parseCsv(text, { generateId, now, nowIso }) : parseDump(text, { generateId, now, nowIso });
 				if (!captures.length) throw new Error("No timestamped hex messages found");
 				importedCaptures = captures;
 				captures.forEach(capture => {
 					normalizeCapture(capture, generateId);
-					rebuildPreview(capture, generateId);
+					if (!isCsv) rebuildPreview(capture, generateId);
 				});
 				if (compatibilityState) compatibilityState.captures.unshift(...captures);
 			}
@@ -295,7 +522,7 @@ export function createDataTransferController(dependencies: DataTransferDependenc
 			);
 		} else if (format === "csv") {
 			const quote = (value: unknown) => `"${String(value ?? "").replaceAll('"', '""')}"`;
-			const width = frameWidth(capture);
+			const width = Math.max(0, ...(capture.messages || []).map(message => visibleByteEntries(message).length));
 			const byteHeaders = Array.from({ length: width }, (_, index) => [`byte_${index + 1}_hex`, `byte_${index + 1}_timestamp`]).flat();
 			const patterns = recognizeMessagePatterns(capture);
 			const header = [

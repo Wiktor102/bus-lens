@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	createDataTransferController,
+	parseCsv,
 	parseDump,
 	type DataTransferFile
 } from "../src/features/data-transfer/data-transfer.ts";
 import type { ArchiveCommands } from "../src/data/archive-data-layer.ts";
 import type { AppState, SendQueueEntry } from "../src/shared/app-state.ts";
-import type { Capture } from "../src/features/capture/capture-framing.ts";
+import { rebuildPreview, type Capture } from "../src/features/capture/capture-framing.ts";
 
 const fixedNow = Date.UTC(2024, 0, 2, 12, 0, 0);
 
@@ -182,4 +183,123 @@ test("exports JSON through dependency injection without a browser download", () 
 	assert.equal(exported.exportedAt, "2024-01-02T12:00:00.000Z");
 	assert.equal(exported.sendSettings.draft, "");
 	assert.equal(exported.captures[0].id, "existing");
+});
+
+test("round trips the exported CSV projection, including quoted notes and byte timestamps", async () => {
+	const source: Capture = {
+		id: "source",
+		name: "Quoted source",
+		view: "Temperature",
+		params: [],
+		messages: [
+			{
+				id: "message-1",
+				timestamp: fixedNow + 1_000,
+				byteTimestamps: [fixedNow + 1_000, fixedNow + 1_005, fixedNow + 1_010],
+				bytes: [0xaa, 0x01, 0xbb],
+				hidden: false,
+				hiddenBytes: [false, true, false]
+			},
+			{
+				id: "message-2",
+				timestamp: fixedNow + 2_000,
+				byteTimestamps: [fixedNow + 2_000, fixedNow + 2_005, fixedNow + 2_010, fixedNow + 2_015],
+				bytes: [0xc0, 0xc1, 0xc2, 0xc3],
+				hidden: true,
+				hiddenBytes: [false, false, false, false]
+			}
+		],
+		byteStream: [
+			{ value: 0xaa, timestamp: fixedNow + 1_000 },
+			{ value: 0x01, timestamp: fixedNow + 1_005, hidden: true },
+			{ value: 0xbb, timestamp: fixedNow + 1_010 },
+			{ value: 0xc0, timestamp: fixedNow + 2_000 },
+			{ value: 0xc1, timestamp: fixedNow + 2_005 },
+			{ value: 0xc2, timestamp: fixedNow + 2_010 },
+			{ value: 0xc3, timestamp: fixedNow + 2_015 }
+		],
+		annotations: { "message-1": { text: 'note, with "quotes"\nand a new line' } },
+		notes: [],
+		frameSize: 3
+	};
+	const exportState = {
+		captures: [source],
+		folders: [],
+		activeId: source.id,
+		sendHistory: [],
+		sendQueue: [],
+		sendSettings: { draft: "", delayMs: 100, baudRate: 115200 }
+	};
+	const downloads: Array<{ content: string; filename: string; type: string }> = [];
+	const exporter = createDataTransferController({
+		state: exportState,
+		capture: () => source,
+		getActiveId: () => source.id,
+		setActiveId: () => {},
+		render: () => {},
+		showToast: () => {},
+		download: (content, filename, type) => downloads.push({ content, filename, type })
+	});
+	await exporter.exportData("csv");
+
+	assert.equal(downloads.length, 1);
+	assert.equal(downloads[0].type, "text/csv");
+	const state = {
+		captures: [] as Capture[],
+		folders: [],
+		activeId: null,
+		sendHistory: [],
+		sendQueue: [],
+		sendSettings: { draft: "", delayMs: 100, baudRate: 115200 }
+	};
+	let activeId: string | null = null;
+	const importer = createDataTransferController({
+		state,
+		capture: () => state.captures[0],
+		getActiveId: () => activeId,
+		setActiveId: captureId => {
+			activeId = captureId || null;
+		},
+		render: () => {},
+		showToast: () => {},
+		download: () => {},
+		generateId: nextIdFactory(),
+		now: () => fixedNow,
+		nowIso: () => "2024-01-02T12:00:00.000Z"
+	});
+	const file: DataTransferFile = {
+		name: "quoted-source.csv",
+		text: async () => downloads[0].content
+	};
+	await importer.importFile(file);
+
+	assert.equal(state.captures.length, 1);
+	assert.deepEqual(state.captures[0].messages?.map(message => message.bytes), [[0xaa, 0xbb], [0xc0, 0xc1, 0xc2, 0xc3]]);
+	assert.deepEqual(state.captures[0].messages?.[0].byteTimestamps, [fixedNow + 1_000, fixedNow + 1_010]);
+	assert.deepEqual(state.captures[0].byteStream?.map(record => [record.value, record.timestamp]), [
+		[0xaa, fixedNow + 1_000],
+		[0xbb, fixedNow + 1_010],
+		[0xc0, fixedNow + 2_000],
+		[0xc1, fixedNow + 2_005],
+		[0xc2, fixedNow + 2_010],
+		[0xc3, fixedNow + 2_015]
+	]);
+	const importedMessageId = state.captures[0].messages?.[0].id as string;
+	assert.equal((state.captures[0].annotations?.[importedMessageId] as { text?: string }).text, 'note, with "quotes"\nand a new line');
+	const reloaded = structuredClone(state.captures[0]);
+	rebuildPreview(reloaded, nextIdFactory());
+	assert.deepEqual(reloaded.messages?.map(message => message.bytes), [[0xaa, 0xbb], [0xc0, 0xc1, 0xc2, 0xc3]]);
+	assert.equal(reloaded.messages?.[0].id, importedMessageId);
+	assert.equal((reloaded.annotations?.[importedMessageId] as { text?: string }).text, 'note, with "quotes"\nand a new line');
+});
+
+test("rejects malformed CSV with a row-specific error", () => {
+	assert.throws(
+		() => parseCsv("index,timestamp,message_hex\n1,not-a-date,AA"),
+		/CSV row 2 has an invalid timestamp: not-a-date/
+	);
+	assert.throws(
+		() => parseCsv("index,timestamp,message_hex\n1,2024-01-02T12:00:00.000Z,AA\n2,\"unterminated,BB"),
+		/Malformed CSV: unterminated quoted field/
+	);
 });
